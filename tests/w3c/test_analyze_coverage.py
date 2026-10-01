@@ -151,9 +151,11 @@ def test_live_failure_registry_matches_committed_report() -> None:
     }
 
     assert set(failures) == report_ids
-    assert len(failures) == 60
+    assert len(failures) == registry["baseline"]["xfailed"]
     assert {entry["label"] for entry in failures.values()} <= valid_labels
-    assert sum(entry["label"] in valid_labels for entry in failures.values()) == 60
+    assert (
+        sum(entry["label"] in valid_labels for entry in failures.values()) == registry["baseline"]["xfailed"]
+    )
     assert all(
         entry["diagnosis"].strip() and "\n" not in entry["diagnosis"]
         for entry in failures.values()
@@ -184,19 +186,60 @@ def test_live_failure_join_rejects_invalid_label() -> None:
 
 
 def test_live_failure_baseline_rejects_count_mismatch() -> None:
-    stats = analyze_coverage.CategoryStats(total=191, passed=130, xfailed=61)
-    registry = {
-        "baseline": {
-            "profile": "document_edge",
-            "total": 191,
-            "passed": 131,
-            "xfailed": 60,
-        },
-        "failures": {},
-    }
+    registry = json.loads(Path(__file__).with_name("LIVE_FAILURE_LABELS.json").read_text(encoding="utf-8"))
+    baseline = registry["baseline"]
+    stats = analyze_coverage.CategoryStats(
+        total=baseline["total"], passed=baseline["passed"] - 1, xfailed=baseline["xfailed"] + 1
+    )
 
     with pytest.raises(ValueError, match="live failure baseline mismatch.*passed.*xfailed"):
         analyze_coverage.validate_live_failure_baseline(stats, registry, "document_edge")
+
+
+@pytest.mark.parametrize(
+    "bucket_fields",
+    [
+        {},
+        {"bucket": "harness"},
+        {"bucket": "translator"},
+        {"bucket": "loader"},
+        {"bucket": None},
+        {"bucket": []},
+    ],
+)
+@pytest.mark.parametrize("label", analyze_coverage.LIVE_FAILURE_LABELS)
+def test_live_failure_join_validates_bucket(label: str, bucket_fields: dict[str, object]) -> None:
+    entry = {"label": label, "diagnosis": "A concrete one-line diagnosis.", **bucket_fields}
+    valid = (
+        bucket_fields.get("bucket") in ("harness", "translator")
+        if label == "genuine bug"
+        else "bucket" not in bucket_fields
+    )
+
+    if valid:
+        assert analyze_coverage.validate_live_failure_join({"suite/case"}, {"suite/case": entry}) == {
+            label: 1
+        }
+    else:
+        with pytest.raises(ValueError, match="suite/case.*bucket"):
+            analyze_coverage.validate_live_failure_join({"suite/case"}, {"suite/case": entry})
+
+
+@pytest.mark.parametrize("bucket", ["harness", "translator"])
+def test_render_live_failures_shows_bucket(bucket: str) -> None:
+    registry = json.loads(Path(__file__).with_name("LIVE_FAILURE_LABELS.json").read_text(encoding="utf-8"))
+    registry["failures"] = {
+        "suite/case": {
+            "label": "genuine bug",
+            "bucket": bucket,
+            "diagnosis": "A concrete one-line diagnosis.",
+        }
+    }
+
+    rendered = analyze_coverage.render_live_failures(registry, Counter({"genuine bug": 1}))
+
+    assert f"| `suite/case` | genuine bug ({bucket}) |" in rendered
+    assert f"| genuine bug ({bucket}) | 1 |" in rendered
 
 
 @pytest.mark.parametrize("contents", [None, "<testsuites>"])

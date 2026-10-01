@@ -741,6 +741,11 @@ def validate_live_failure_join(
         diagnosis = raw_entry.get("diagnosis")
         if label not in LIVE_FAILURE_LABELS:
             raise ValueError(f"live failure entry {short_id} has invalid label: {label!r}")
+        if label == "genuine bug":
+            if raw_entry.get("bucket") not in ("harness", "translator"):
+                raise ValueError(f"live failure entry {short_id} must have bucket 'harness' or 'translator'")
+        elif "bucket" in raw_entry:
+            raise ValueError(f"live failure entry {short_id} must not have a bucket for label {label!r}")
         if not isinstance(diagnosis, str) or not diagnosis.strip() or "\n" in diagnosis:
             raise ValueError(f"live failure entry {short_id} must have a nonempty one-line diagnosis")
         counts[label] += 1
@@ -802,6 +807,9 @@ def render_live_failures(registry: Mapping[str, object], counts: Counter[str]) -
     ]
     for label in LIVE_FAILURE_LABELS:
         lines.append(f"| {label} | {counts[label]} |")
+    buckets = Counter(entry["bucket"] for entry in failures.values() if entry["label"] == "genuine bug")
+    for bucket in ("harness", "translator"):
+        lines.append(f"| genuine bug ({bucket}) | {buckets[bucket]} |")
 
     lines.extend(
         [
@@ -817,7 +825,10 @@ def render_live_failures(registry: Mapping[str, object], counts: Counter[str]) -
         if not isinstance(entry, dict):
             raise ValueError(f"live failure entry {short_id} must be an object")
         diagnosis = str(entry["diagnosis"]).replace("|", "\\|")
-        lines.append(f"| `{short_id}` | {entry['label']} | {diagnosis} |")
+        label = entry["label"]
+        if label == "genuine bug":
+            label = f"{label} ({entry['bucket']})"
+        lines.append(f"| `{short_id}` | {label} | {diagnosis} |")
 
     lines.extend(
         [
