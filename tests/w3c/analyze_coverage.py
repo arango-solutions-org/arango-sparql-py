@@ -634,10 +634,7 @@ def analyze_live() -> CategoryStats:
         )
         summary = (proc.stdout or "") + (proc.stderr or "")
         if proc.returncode != 0:
-            raise RuntimeError(
-                "live W3C pytest run failed; coverage cannot be reported:\n"
-                f"{summary[-4000:]}"
-            )
+            raise RuntimeError(f"live W3C pytest run failed; coverage cannot be reported:\n{summary[-4000:]}")
 
         # Pytest's compact summary line has the canonical counters: e.g.
         # ``2 passed, 36 xfailed in 4.21s``. The token immediately
