@@ -226,7 +226,7 @@ SKIP_REASONS: dict[str, str] = {
     ),
     "entailment/paper-sparqldl-Q1": "OWL DL reasoning required",
     "entailment/paper-sparqldl-Q1-rdfs": "RDFS entailment required",
-    "entailment/plainLit": "RDF literal-form distinction (plain vs xsd:string)",
+    "entailment/plainLit": "language tag lost on load (\"name\" vs \"name\"@en)",
     "entailment/rdfs02": "RDFS subPropertyOf / domain entailment required",
     "entailment/rdfs05": "RDFS subPropertyOf transitivity entailment required",
     "entailment/rdfs08": "RDFS subClassOf / Resource entailment required",
