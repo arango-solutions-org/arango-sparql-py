@@ -19,14 +19,18 @@ lands behind the ``integration`` marker.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import re
 import sys
+import tempfile
 import warnings
 from collections import Counter
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
+from xml.etree import ElementTree
 
 # rdflib emits noisy ``logger.warning`` lines about borderline-valid IRIs
 # while parsing the W3C corpus (e.g. ``http://example/c:d\?``). They are
@@ -74,6 +78,7 @@ class CategoryStats:
     failed: int = 0
     skipped: int = 0
     xfail_reasons: Counter = None  # type: ignore[assignment]
+    xfail_ids: set[str] = field(default_factory=set)
 
     def __post_init__(self) -> None:
         if self.xfail_reasons is None:
@@ -605,50 +610,58 @@ def analyze_live() -> CategoryStats:
     import subprocess
 
     repo_root = Path(__file__).resolve().parents[2]
-    cmd = [
-        sys.executable,
-        "-m",
-        "pytest",
-        "-q",
-        "--no-header",
-        "-p",
-        "no:cacheprovider",
-        "tests/w3c/test_w3c_live_execution.py::test_live_execution",
-        "-m",
-        "w3c and integration",
-    ]
-    proc = subprocess.run(
-        cmd,
-        cwd=repo_root,
-        capture_output=True,
-        text=True,
-        env=dict(os.environ),  # forward RUN_INTEGRATION + ARANGO_* env vars
-    )
-    summary = (proc.stdout or "") + (proc.stderr or "")
-    if proc.returncode != 0:
-        raise RuntimeError(f"live W3C pytest run failed; coverage cannot be reported:\n{summary[-4000:]}")
-
-    # Pytest's compact summary line has the canonical counters: e.g.
-    # ``2 passed, 36 xfailed in 4.21s``. The token immediately
-    # before each counter name is its integer count.
-    import re as _re
-
-    def _scan(name: str) -> int:
-        match = _re.search(rf"(\d+)\s+{name}\b", summary)
-        return int(match.group(1)) if match else 0
-
-    stats.passed = _scan("passed")
-    stats.xfailed = _scan("xfailed")
-    stats.failed = _scan("failed")
-    stats.skipped = _scan("skipped")
-
-    observed = stats.passed + stats.xfailed + stats.failed + stats.skipped
-    if observed != stats.total:
-        raise RuntimeError(
-            "live W3C pytest summary reported "
-            f"{observed} outcomes for {stats.total} W3C cases; "
-            "refusing to publish an inconsistent coverage denominator"
+    with tempfile.TemporaryDirectory(prefix="w3c-live-") as temp_dir:
+        junit_path = Path(temp_dir) / "live-results.xml"
+        cmd = [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            "--no-header",
+            "-p",
+            "no:cacheprovider",
+            f"--junitxml={junit_path}",
+            "tests/w3c/test_w3c_live_execution.py::test_live_execution",
+            "-m",
+            "w3c and integration",
+        ]
+        proc = subprocess.run(
+            cmd,
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            env=dict(os.environ),  # forward RUN_INTEGRATION + ARANGO_* env vars
         )
+        summary = (proc.stdout or "") + (proc.stderr or "")
+        if proc.returncode != 0:
+            raise RuntimeError(
+                "live W3C pytest run failed; coverage cannot be reported:\n"
+                f"{summary[-4000:]}"
+            )
+
+        # Pytest's compact summary line has the canonical counters: e.g.
+        # ``2 passed, 36 xfailed in 4.21s``. The token immediately
+        # before each counter name is its integer count.
+        import re as _re
+
+        def _scan(name: str) -> int:
+            match = _re.search(rf"(\d+)\s+{name}\b", summary)
+            return int(match.group(1)) if match else 0
+
+        stats.passed = _scan("passed")
+        stats.xfailed = _scan("xfailed")
+        stats.failed = _scan("failed")
+        stats.skipped = _scan("skipped")
+
+        observed = stats.passed + stats.xfailed + stats.failed + stats.skipped
+        if observed != stats.total:
+            raise RuntimeError(
+                "live W3C pytest summary reported "
+                f"{observed} outcomes for {stats.total} W3C cases; "
+                "refusing to publish an inconsistent coverage denominator"
+            )
+
+        stats.xfail_ids = parse_live_xfail_ids(junit_path)
 
     # Surface the divergence reasons we already know about so the
     # report's "Live-execution divergences" table has something to
@@ -658,6 +671,179 @@ def analyze_live() -> CategoryStats:
         stats.xfail_reasons[reason] += 1
 
     return stats
+
+
+LIVE_FAILURE_LABELS_PATH = Path(__file__).with_name("LIVE_FAILURE_LABELS.json")
+LIVE_FAILURES_PATH = Path(__file__).with_name("LIVE_FAILURES.md")
+LIVE_FAILURE_LABELS = (
+    "needs inference",
+    "language tags lost",
+    "text stored the wrong way",
+    "genuine bug",
+)
+_LIVE_TEST_NAME = re.compile(r"^test_live_execution\[(?P<short_id>.+)\]$")
+
+
+def parse_live_xfail_ids(junit_path: Path) -> set[str]:
+    """Return stable W3C IDs for pytest.xfail cases in a JUnit report."""
+    try:
+        root = ElementTree.parse(junit_path).getroot()
+    except (ElementTree.ParseError, OSError) as exc:
+        raise RuntimeError(f"could not parse live W3C JUnit report {junit_path}: {exc}") from exc
+
+    observed: set[str] = set()
+    for testcase in root.iter("testcase"):
+        skipped = testcase.find("skipped")
+        if skipped is None or skipped.get("type") != "pytest.xfail":
+            continue
+        name = testcase.get("name", "")
+        match = _LIVE_TEST_NAME.fullmatch(name)
+        if match is None:
+            raise RuntimeError(f"unexpected xfail testcase name in live W3C JUnit report: {name!r}")
+        short_id = match.group("short_id")
+        if short_id in observed:
+            raise RuntimeError(f"duplicate live W3C xfail ID in JUnit report: {short_id}")
+        observed.add(short_id)
+    return observed
+
+
+def load_live_failure_registry(path: Path = LIVE_FAILURE_LABELS_PATH) -> dict[str, object]:
+    """Load the human-reviewed live failure registry."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        raise ValueError(f"could not load live failure registry {path}: {exc}") from exc
+    if not isinstance(data, dict) or not isinstance(data.get("baseline"), dict):
+        raise ValueError("live failure registry must contain a baseline object")
+    if not isinstance(data.get("failures"), dict):
+        raise ValueError("live failure registry must contain a failures object")
+    return data
+
+
+def validate_live_failure_join(
+    observed_ids: set[str],
+    failures: Mapping[str, object],
+) -> Counter[str]:
+    """Validate the observed-to-reviewed join and return label counts."""
+    registry_ids = set(failures)
+    missing = sorted(observed_ids - registry_ids)
+    stale = sorted(registry_ids - observed_ids)
+    problems: list[str] = []
+    if missing:
+        problems.append(f"unlabelled live xfail IDs: {', '.join(missing)}")
+    if stale:
+        problems.append(f"stale live failure registry IDs: {', '.join(stale)}")
+    if problems:
+        raise ValueError("; ".join(problems))
+
+    counts: Counter[str] = Counter()
+    for short_id, raw_entry in failures.items():
+        if not isinstance(raw_entry, dict):
+            raise ValueError(f"live failure entry {short_id} must be an object")
+        label = raw_entry.get("label")
+        diagnosis = raw_entry.get("diagnosis")
+        if label not in LIVE_FAILURE_LABELS:
+            raise ValueError(f"live failure entry {short_id} has invalid label: {label!r}")
+        if not isinstance(diagnosis, str) or not diagnosis.strip() or "\n" in diagnosis:
+            raise ValueError(f"live failure entry {short_id} must have a nonempty one-line diagnosis")
+        counts[label] += 1
+    return counts
+
+
+def validate_live_failure_baseline(
+    stats: CategoryStats,
+    registry: Mapping[str, object],
+    profile: str,
+) -> Counter[str]:
+    """Fail closed when live outcomes differ from the reviewed baseline."""
+    baseline = registry["baseline"]
+    failures = registry["failures"]
+    if not isinstance(baseline, dict) or not isinstance(failures, dict):
+        raise ValueError("live failure registry baseline and failures must be objects")
+
+    expected = {
+        "profile": profile,
+        "total": stats.total,
+        "passed": stats.passed,
+        "xfailed": stats.xfailed,
+    }
+    mismatches = [
+        f"{key}: registry={baseline.get(key)!r}, observed={value!r}"
+        for key, value in expected.items()
+        if baseline.get(key) != value
+    ]
+    if stats.failed or stats.skipped:
+        mismatches.append(f"failed={stats.failed}, skipped={stats.skipped}")
+    if mismatches:
+        raise ValueError("live failure baseline mismatch: " + "; ".join(mismatches))
+    return validate_live_failure_join(stats.xfail_ids, failures)
+
+
+def render_live_failures(registry: Mapping[str, object], counts: Counter[str]) -> str:
+    """Render the standalone reviewed live failure report."""
+    baseline = registry["baseline"]
+    failures = registry["failures"]
+    if not isinstance(baseline, dict) or not isinstance(failures, dict):
+        raise ValueError("live failure registry baseline and failures must be objects")
+
+    lines = [
+        "# W3C live failure classifications",
+        "",
+        "> Generated file. Edit `LIVE_FAILURE_LABELS.json`, then run the regeneration command below.",
+        "",
+        "## Baseline",
+        "",
+        f"- Commit: `{baseline['commit']}`",
+        f"- Storage profile: `{baseline['profile']}`",
+        f"- Passing: `{baseline['passed']}/{baseline['total']}`",
+        f"- Xfailed: `{baseline['xfailed']}`",
+        "",
+        "## Label summary",
+        "",
+        "| Label | Count |",
+        "| ----- | ----: |",
+    ]
+    for label in LIVE_FAILURE_LABELS:
+        lines.append(f"| {label} | {counts[label]} |")
+
+    lines.extend(
+        [
+            "",
+            "## Classified failures",
+            "",
+            "| Test ID | Label | Diagnosis |",
+            "| ------- | ----- | --------- |",
+        ]
+    )
+    for short_id in sorted(failures):
+        entry = failures[short_id]
+        if not isinstance(entry, dict):
+            raise ValueError(f"live failure entry {short_id} must be an object")
+        diagnosis = str(entry["diagnosis"]).replace("|", "\\|")
+        lines.append(f"| `{short_id}` | {entry['label']} | {diagnosis} |")
+
+    lines.extend(
+        [
+            "",
+            "## Regeneration",
+            "",
+            "```bash",
+            "RUN_INTEGRATION=1 W3C_STORAGE_PROFILE=document_edge \\",
+            "  uv run python tests/w3c/analyze_coverage.py \\",
+            "  --live --profile document_edge --write-live-failures",
+            "```",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def write_live_failures(stats: CategoryStats, profile: str) -> Counter[str]:
+    """Validate and write the reviewed live failure report."""
+    registry = load_live_failure_registry()
+    counts = validate_live_failure_baseline(stats, registry, profile)
+    LIVE_FAILURES_PATH.write_text(render_live_failures(registry, counts), encoding="utf-8")
+    return counts
 
 
 def main() -> int:
@@ -685,7 +871,17 @@ def main() -> int:
             "separately; do not mix their denominators."
         ),
     )
+    parser.add_argument(
+        "--write-live-failures",
+        action="store_true",
+        help="validate LIVE_FAILURE_LABELS.json against --live and write LIVE_FAILURES.md",
+    )
     args = parser.parse_args()
+
+    if args.write_live_failures and not args.live:
+        parser.error("--write-live-failures requires --live")
+    if args.write_live_failures and args.profile != "document_edge":
+        parser.error("--write-live-failures supports only the document_edge profile")
 
     by_category = analyze()
     live_stats: CategoryStats | None = None
@@ -715,6 +911,15 @@ def main() -> int:
         out_path = Path(__file__).parent / "COVERAGE_REPORT.md"
         out_path.write_text(report, encoding="utf-8")
         print(f"wrote {out_path}")
+    elif args.write_live_failures:
+        if live_stats is None or live_profile is None:
+            parser.error("--write-live-failures requires RUN_INTEGRATION=1")
+        counts = write_live_failures(live_stats, live_profile)
+        print(f"live baseline: {live_stats.passed}/{live_stats.total} passing")
+        print(f"live xfails: {live_stats.xfailed}")
+        for label in LIVE_FAILURE_LABELS:
+            print(f"{label}: {counts[label]}")
+        print(f"wrote {LIVE_FAILURES_PATH}")
     else:
         print(report)
     return 0
