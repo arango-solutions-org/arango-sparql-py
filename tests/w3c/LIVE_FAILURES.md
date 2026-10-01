@@ -14,8 +14,8 @@
 | Label | Count |
 | ----- | ----: |
 | needs inference | 18 |
-| language tags lost | 8 |
-| text stored the wrong way | 3 |
+| language tags lost | 9 |
+| text stored the wrong way | 2 |
 | genuine bug | 31 |
 
 ## Classified failures
@@ -33,7 +33,7 @@
 | `entailment/paper-sparqldl-Q1` | needs inference | The expected ConferencePaper binding follows from the declared OWL restriction rather than an explicit matching triple. |
 | `entailment/paper-sparqldl-Q1-rdfs` | needs inference | The expected binding requires the manifest's RDFS entailment regime to apply the subclass relation. |
 | `entailment/paper-sparqldl-Q2` | needs inference | John is explicitly a GraduateAssistant, but membership in the queried Student and Employee intersection requires OWL and RDFS inference. |
-| `entailment/plainLit` | text stored the wrong way | The loader flattens plain and xsd:string literals to the same primitive text, erasing the distinction tested by the query. |
+| `entailment/plainLit` | language tags lost | The data has untagged "name" and "name"@en; the loader drops the @en tag, so the query for "name"@en cannot tell them apart. |
 | `entailment/rdf01` | needs inference | The expected rdf:type predicate binding requires RDF entailment to infer that the used predicate ex:b is an rdf:Property. |
 | `entailment/rdfs01` | needs inference | The second expected predicate is absent explicitly and follows from ex:b1 rdfs:subPropertyOf ex:b2. |
 | `entailment/rdfs02` | needs inference | The expected bindings require RDFS subPropertyOf and domain entailment beyond the explicit triples. |

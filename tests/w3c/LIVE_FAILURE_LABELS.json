@@ -52,8 +52,8 @@
       "diagnosis": "John is explicitly a GraduateAssistant, but membership in the queried Student and Employee intersection requires OWL and RDFS inference."
     },
     "entailment/plainLit": {
-      "label": "text stored the wrong way",
-      "diagnosis": "The loader flattens plain and xsd:string literals to the same primitive text, erasing the distinction tested by the query."
+      "label": "language tags lost",
+      "diagnosis": "The data has untagged \"name\" and \"name\"@en; the loader drops the @en tag, so the query for \"name\"@en cannot tell them apart."
     },
     "entailment/rdf01": {
       "label": "needs inference",

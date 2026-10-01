@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import sys
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -167,3 +169,82 @@ def test_live_failure_join_rejects_missing_and_stale_ids() -> None:
 
     with pytest.raises(ValueError, match="stale.*suite/stale"):
         analyze_coverage.validate_live_failure_join(set(), {"suite/stale": entry})
+
+
+def test_live_failure_join_rejects_invalid_label() -> None:
+    failures = {
+        "suite/case": {
+            "label": "not reviewed",
+            "diagnosis": "A concrete one-line diagnosis.",
+        }
+    }
+
+    with pytest.raises(ValueError, match="invalid label.*not reviewed"):
+        analyze_coverage.validate_live_failure_join({"suite/case"}, failures)
+
+
+def test_live_failure_baseline_rejects_count_mismatch() -> None:
+    stats = analyze_coverage.CategoryStats(total=191, passed=130, xfailed=61)
+    registry = {
+        "baseline": {
+            "profile": "document_edge",
+            "total": 191,
+            "passed": 131,
+            "xfailed": 60,
+        },
+        "failures": {},
+    }
+
+    with pytest.raises(ValueError, match="live failure baseline mismatch.*passed.*xfailed"):
+        analyze_coverage.validate_live_failure_baseline(stats, registry, "document_edge")
+
+
+@pytest.mark.parametrize("contents", [None, "<testsuites>"])
+def test_parse_live_xfail_ids_rejects_missing_or_malformed_junit(
+    tmp_path: Path,
+    contents: str | None,
+) -> None:
+    junit_path = tmp_path / "live-results.xml"
+    if contents is not None:
+        junit_path.write_text(contents, encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="could not parse live W3C JUnit report"):
+        analyze_coverage.parse_live_xfail_ids(junit_path)
+
+
+def test_main_rejects_both_write_modes_before_analysis(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "analyze_coverage.py",
+            "--write",
+            "--live",
+            "--write-live-failures",
+        ],
+    )
+    monkeypatch.setattr(
+        analyze_coverage,
+        "analyze",
+        lambda: pytest.fail("analysis must not run for conflicting write modes"),
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        analyze_coverage.main()
+
+    assert exc_info.value.code != 0
+    assert "--write cannot be used with --write-live-failures" in capsys.readouterr().err
+
+
+def test_render_live_failures_reproduces_committed_report_byte_for_byte() -> None:
+    registry_path = Path(__file__).with_name("LIVE_FAILURE_LABELS.json")
+    report_path = Path(__file__).with_name("LIVE_FAILURES.md")
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    counts = Counter(entry["label"] for entry in registry["failures"].values())
+
+    rendered = analyze_coverage.render_live_failures(registry, counts).encode()
+
+    assert rendered == report_path.read_bytes()

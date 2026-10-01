@@ -878,6 +878,8 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    if args.write and args.write_live_failures:
+        parser.error("--write cannot be used with --write-live-failures")
     if args.write_live_failures and not args.live:
         parser.error("--write-live-failures requires --live")
     if args.write_live_failures and args.profile != "document_edge":
