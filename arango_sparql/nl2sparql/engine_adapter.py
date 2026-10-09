@@ -262,9 +262,13 @@ class SparqlAdapter:
         grounding_index: LabelIndex | None = None,
         predicate_index: PredicateIndex | None = None,
         path_index: ClassPathIndex | None = None,
+        schema_summary: str = "",
     ) -> None:
         self.resolver = resolver
         self.ontology_ttl = ontology_ttl
+        # Classes + their data properties from the analyzer's mapping
+        # (nl2sparql/schema_summary.py) — the OWL alone carries no fields.
+        self.schema_summary = schema_summary
         self._few_shot_index = few_shot_index
         self._few_shot_mode = few_shot_mode
         self._grounding_index = grounding_index
@@ -274,7 +278,10 @@ class SparqlAdapter:
     def grammar_prompt_section(self, schema_context: str) -> str:  # seam 1
         # Reuse the shipped system-prompt template so the grammar + ontology
         # block stays byte-aligned with the standalone PromptBuilder.
-        return PromptBuilder(ontology_ttl=self.ontology_ttl).render_system()
+        return PromptBuilder(
+            ontology_ttl=self.ontology_ttl,
+            schema_summary=self.schema_summary or None,
+        ).render_system()
 
     def few_shot_index(self) -> FewShotIndex | None:  # seam 2
         # Explicit injection wins (tests / the Plan 04 sweep); otherwise return

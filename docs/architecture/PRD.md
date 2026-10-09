@@ -1078,13 +1078,13 @@ Every NL call assembles the prompt from four blocks **in this order**
 
 2. SCHEMA block (conceptual-only — see §17.4)
    ──────────────────────────────────────────
-   ## Classes
-   - <iri> (rdfs:label "Person")
-   - <iri> (rdfs:label "Organization")
-   ## Object properties
-   - <iri> :worksFor (domain Person, range Organization)
-   ## Datatype properties
-   - <iri> :name (domain Person, range xsd:string)
+   The ontology Turtle, then a "## Schema summary" built from the
+   analyzer's mapping — each class with up to 8 of its data properties,
+   then each relationship, all as prefixed names in the ontology's `:`
+   namespace (no collection names, mapping styles or phys: terms):
+     :Person — :name, :email
+     :Organization — :name
+     ?a :worksFor ?b   (?a a :Person ; ?b a :Organization)
 
 3. EXAMPLES block (5–10 hand-curated NL ⇄ SPARQL pairs;
    ─────────────  shape-matched to the active schema's class types)
@@ -1108,10 +1108,17 @@ caching at the `system+user[0]` boundary (≥ 1024 tokens); Anthropic's
 prompt-caching beta honours explicit `<<<cache>>>` markers placed at
 the end of block 3.
 
-The schema block is rendered by
-`arango_sparql.nl2sparql.schema_summary.build_schema_summary(bundle)`
-and is identical in shape to `arango-cypher-py`'s output (different
-keyword: `Class` vs `Label`). Cache hit-rate is observable as the
+The schema summary is rendered by
+`arango_sparql.nl2sparql.schema_summary.build_schema_summary(bundle, namespace=…)`,
+a port of `arango-cypher-py`'s `_build_schema_summary` (SPARQL prefixed names
+instead of Cypher labels). The bundle is the connected session's cached analyzer
+mapping (`/nl-translate`, `/nl-explain`, `/nl-execute`); it is read cache-only
+and never waits on an analysis (§6.3.5), and it is omitted when there is no
+session or no `:` namespace. It is load-bearing, not decoration: the analyzer's
+OWL export declares classes and object properties but **no datatype
+properties**, so without the summary the model never sees a field name — on
+prod.demo `IAM` (1,576 fields) it guessed `:fileName` (0 rows) where the summary
+gives `:file_name` (the real answer). Cache hit-rate is observable as the
 `cached_tokens / prompt_tokens` ratio in `NL2SparqlResult`.
 
 ### 7.3 Repair-loop algorithm

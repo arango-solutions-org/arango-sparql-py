@@ -45,6 +45,7 @@ from ..observability import (
 from ..security import (
     _check_compute_rate_limit,
     _check_nl_rate_limit,
+    _get_optional_session,
     _get_session,
     _sanitize_error,
     _Session,
@@ -79,11 +80,41 @@ def _llm_client_factory() -> Any:
     return get_default_client()
 
 
+def _schema_summary_for(req: Any, session: _Session | None) -> str:
+    """Classes + data properties from the connected database's analyzer
+    mapping, for the NL prompt (``nl2sparql/schema_summary.py``).
+
+    Cache-only: uses the bundle the Workbench already loaded via
+    ``/schema/introspect`` and never waits for an analysis (a miss starts a
+    background one and the prompt simply has no summary yet). Rendered only
+    when the request's ontology (or the bundle's own OWL) names the default
+    ``:`` namespace the terms must be written in. Never fails the request:
+    the summary is an enrichment.
+    """
+    if session is None:
+        return ""
+    try:
+        from ...nl2sparql.schema_summary import build_schema_summary, default_namespace
+        from .sparql import _analyzer_bundle_for_session
+
+        bundle = _analyzer_bundle_for_session(session)
+        if bundle is None:
+            return ""
+        namespace = default_namespace(getattr(req, "ontology_ttl", None), getattr(bundle, "owl_turtle", None))
+        if not namespace:
+            return ""
+        return build_schema_summary(bundle, namespace=namespace)
+    except Exception as exc:  # noqa: BLE001 — enrichment only
+        logger.warning("NL schema summary skipped: %s", exc)
+        return ""
+
+
 def _pipeline_for(
     *,
     client: Any,
     req: Any,
     max_repairs: int,
+    session: _Session | None = None,
 ) -> Any:
     """Construct an :class:`NlPipeline` for the given request.
 
@@ -114,6 +145,7 @@ def _pipeline_for(
         resolver=resolver,
         ontology_ttl=getattr(req, "ontology_ttl", None) or "",
         max_repairs=max_repairs,
+        schema_summary=_schema_summary_for(req, session),
     )
 
 
@@ -241,6 +273,7 @@ def nl_translate_endpoint(
     req: NlTranslateRequest,
     _: None = Depends(_check_nl_rate_limit),
     client: Any = Depends(_llm_client_factory),
+    session: _Session | None = Depends(_get_optional_session),
 ) -> NlTranslateResponse:
     """Translate a natural language question into SPARQL 1.1, then AQL.
 
@@ -249,7 +282,7 @@ def nl_translate_endpoint(
     transpiler. A repair loop fires up to ``max_repairs`` times if
     the transpiler rejects the LLM's output.
     """
-    pipeline = _pipeline_for(client=client, req=req, max_repairs=req.max_repairs)
+    pipeline = _pipeline_for(client=client, req=req, max_repairs=req.max_repairs, session=session)
     t0 = time.perf_counter()
     outcome = pipeline.run(req.nl)
     # Pipeline already records its own latency; ``t0`` is for tests
@@ -287,6 +320,7 @@ def nl_explain_endpoint(
     req: NlExplainRequest,
     _: None = Depends(_check_nl_rate_limit),
     client: Any = Depends(_llm_client_factory),
+    session: _Session | None = Depends(_get_optional_session),
 ) -> NlExplainResponse:
     """Translate (if NL provided) and ask the LLM to explain the resulting SPARQL.
 
@@ -303,7 +337,7 @@ def nl_explain_endpoint(
             },
         )
 
-    pipeline = _pipeline_for(client=client, req=req, max_repairs=req.max_repairs)
+    pipeline = _pipeline_for(client=client, req=req, max_repairs=req.max_repairs, session=session)
     try:
         outcome = pipeline.explain(nl=req.nl, sparql=req.sparql)
     except SparqlError as exc:
@@ -362,7 +396,7 @@ def nl_execute_endpoint(
     expensive translate leg and the compute bucket bounds the
     cursor-materialisation cost. Same auth posture as ``/execute``.
     """
-    pipeline = _pipeline_for(client=client, req=req, max_repairs=req.max_repairs)
+    pipeline = _pipeline_for(client=client, req=req, max_repairs=req.max_repairs, session=session)
     outcome = pipeline.run(req.nl)
     if not outcome.aql:
         _log_outcome("/nl-execute", outcome)

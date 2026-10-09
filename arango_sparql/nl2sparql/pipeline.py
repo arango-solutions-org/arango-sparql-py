@@ -155,10 +155,12 @@ class NlPipeline:
         predicate_index: PredicateIndex | None = None,
         path_k: int = 5,
         path_index: ClassPathIndex | None = None,
+        schema_summary: str = "",
     ) -> None:
         self.client = client
         self.resolver = resolver
         self.ontology_ttl = ontology_ttl
+        self.schema_summary = schema_summary
         self.repair_loop = RepairLoop(max_repairs=max_repairs)
         # rule-300 caps few-shot at <=3 shots; the Plan 04 sweep overrides
         # both via explicit passthrough (zero/dense/bm25 arm selection)
@@ -208,6 +210,7 @@ class NlPipeline:
         adapter = SparqlAdapter(
             resolver=self.resolver,
             ontology_ttl=self.ontology_ttl,
+            schema_summary=self.schema_summary,
             few_shot_index=self.few_shot_index,
             grounding_index=self.grounding_index,
             predicate_index=self.predicate_index,
