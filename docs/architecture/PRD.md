@@ -486,6 +486,14 @@ Relationship styles, attached to OWL `owl:ObjectProperty`:
 | `GENERIC_WITH_TYPE` | **LPG-typed edge** | One shared edge collection holding multiple relationship types, discriminated by a `typeField` | `FOR v, e IN OUTBOUND doc @@edgeColl FILTER e.<typeField> == @typeValue` |
 | `RPT_EDGE` | **RDF object property** | An object-property triple in the `_triples` collection (`object_uri` populated, `object_value` null) | Same as `RPT` entity read; the predicate IRI carries the relationship semantics |
 
+**Collection names** reach AQL only as `@@` bind parameters, so any valid
+ArangoDB name is accepted — including hyphens (`IAM-TERRAFORM-DOCS-DEMO_Relations`
+on prod.demo) and extended names; only an empty name, one containing `/` or a
+control character, or one over 256 bytes is refused, as a translation error
+(`E_AQL_EMIT`), never a bare exception. The bind-parameter *name* is sanitized
+to an identifier (`@@c1_IAM_TERRAFORM_DOCS_DEMO_Relations`); the bound value
+is the real name (`translate/builder.py::bind_collection`).
+
 **Hybrid** is not a fifth style; it is the *case where two or more of the
 above coexist in one database*. Concretely, a single SPARQL query can
 have one BGP triple resolve to `COLLECTION` (read a PG collection

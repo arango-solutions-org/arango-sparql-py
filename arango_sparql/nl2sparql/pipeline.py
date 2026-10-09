@@ -229,7 +229,13 @@ class NlPipeline:
         except Exception as exc:
             # A genuine transport failure is recorded by the bridge and
             # re-raised (so the engine loop doesn't validate an empty string).
-            reason = bridge.records[-1].error if bridge.records else f"{type(exc).__name__}: {exc}"
+            # Only a failure the bridge recorded is a transport failure. Any
+            # other exception (e.g. a translator bug raised while validating a
+            # candidate) must surface as itself, not as "LLM transport failure".
+            recorded = bridge.records[-1].error if bridge.records else None
+            reason = recorded or f"{type(exc).__name__}: {exc}"
+            if not recorded:
+                logger.warning("NL generation failed outside the LLM call: %s", reason, exc_info=True)
             return self._failure_outcome(
                 nl=nl,
                 sparql="",

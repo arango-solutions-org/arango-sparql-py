@@ -22,6 +22,21 @@ from ..errors import AqlEmitError, UnsupportedSparqlError
 
 _AQL_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
+# A collection name only ever reaches AQL as a ``@@`` bind parameter, so it
+# needs to be a valid ArangoDB name, not an AQL identifier. ArangoDB's
+# traditional names allow letters, digits, ``_`` and ``-`` (max 256 bytes);
+# ``IAM-TERRAFORM-DOCS-DEMO_Relations`` on prod.demo is one. Extended names
+# (3.11+) may hold more, so anything printable without ``/`` is accepted and
+# the server stays the authority on what exists.
+_MAX_COLLECTION_NAME_BYTES = 256
+_BIND_NAME_UNSAFE = re.compile(r"[^A-Za-z0-9_]")
+
+
+def _valid_collection_name(name: str) -> bool:
+    if not name or "/" in name or len(name.encode("utf-8")) > _MAX_COLLECTION_NAME_BYTES:
+        return False
+    return all(ch.isprintable() for ch in name)
+
 
 def is_aql_identifier(name: str) -> bool:
     """Whether *name* can be written bare after a dot (``doc.name``)."""
@@ -157,13 +172,19 @@ class AqlQueryBuilder:
         collection in a single query so ArangoDB plans them as the same
         relation instead of two separate references.
         """
-        if not _AQL_IDENT_RE.match(collection_name):
-            raise ValueError(f"invalid collection name: {collection_name!r}")
+        if not _valid_collection_name(collection_name):
+            # A translation error (not ValueError): routes and the NL repair
+            # loop map SparqlError; a bare ValueError escaped as a 500 / an
+            # "LLM transport failure".
+            raise AqlEmitError(f"invalid ArangoDB collection name: {collection_name!r}")
         cached = self._coll_bind_by_name.get(collection_name)
         if cached is not None:
             return f"@@{cached}"
         self._coll_counter += 1
-        name = f"c{self._coll_counter}_{collection_name}"
+        # The bind-parameter NAME must be an identifier even when the
+        # collection name is not (``IAM-TERRAFORM…`` → ``c1_IAM_TERRAFORM…``);
+        # the counter keeps two names that sanitize alike distinct.
+        name = f"c{self._coll_counter}_{_BIND_NAME_UNSAFE.sub('_', collection_name)}"
         # AQL collection bind-var names must not start with a digit; the
         # ``c`` prefix above already guarantees that, but we double-check
         # via the ident regex on the full name to catch typos.

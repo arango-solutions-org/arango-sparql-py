@@ -336,3 +336,20 @@ class TestExplain:
         # The scripted client must not have been called for the
         # explain pass — the queue still has its single response.
         assert client.calls == []
+
+
+def test_a_non_transport_failure_reports_itself_not_transport(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression (prod.demo IAM, 2026-10-09): a translator ValueError raised
+    while validating a candidate surfaced as "LLM transport failure", which
+    sent the investigation to the network instead of the translator."""
+    import arango_sparql.nl2sparql.pipeline as pipeline_mod
+
+    def _boom(self, *args, **kwargs):
+        raise ValueError("invalid collection name: 'IAM-TERRAFORM-DOCS-DEMO_Relations'")
+
+    monkeypatch.setattr(pipeline_mod.NLQueryEngine, "generate", _boom)
+    client = ScriptedLLMClient([_llm_response(_wrap(GOOD_SPARQL))], latency_ms=0)
+    outcome = NlPipeline(client=client, resolver=_resolver(), ontology_ttl=ONTOLOGY).run("anything")
+    messages = " ".join(w.get("message", "") for w in outcome.warnings)
+    assert "ValueError" in messages and "IAM-TERRAFORM" in messages
+    assert "transport" not in messages
