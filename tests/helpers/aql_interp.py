@@ -72,6 +72,11 @@ _FOR_INLINE_RE = re.compile(r"FOR\s+(\w+)\s+IN\s+(\(.+\))\s*$")
 # Checked after ``_FOR_RE`` (which requires the double-@ collection
 # form) and before ``_FOR_INLINE_RE``.
 _FOR_VALUES_RE = re.compile(r"FOR\s+(\w+)\s+IN\s+@(_\w+)\s*$")
+# FOR over a LET-bound row list — the shape ``finalize()`` emits for
+# ``SELECT DISTINCT … LIMIT`` (``LET deduped2 = (…)`` then
+# ``FOR row3 IN deduped2``). A bare identifier, so neither the ``@``
+# forms above nor the parenthesised ``_FOR_INLINE_RE`` match it.
+_FOR_LET_RE = re.compile(r"FOR\s+(\w+)\s+IN\s+([A-Za-z_]\w*)\s*$")
 _LIMIT_RE = re.compile(r"LIMIT\s+(?:(\d+)\s*,\s*)?(\d+)")
 _SORT_RE = re.compile(r"SORT\s+(.+)$")
 # COLLECT clause patterns the visitor emits today:
@@ -651,6 +656,13 @@ def run_aql_subset(
                 raise AssertionError(f"FOR after COLLECT not supported: {line!r}")
             alias, inline_expr = m.groups()
             pre_collect_plan.append(("FOR_INLINE", alias, inline_expr))
+        elif m := _FOR_LET_RE.match(line):
+            if seen_collect:  # pragma: no cover
+                raise AssertionError(f"FOR after COLLECT not supported: {line!r}")
+            # Iterates the list a preceding ``LET <alias> = (…)`` bound;
+            # the identifier evaluates to that list like any LET alias.
+            alias, let_alias = m.groups()
+            pre_collect_plan.append(("FOR_INLINE", alias, let_alias))
         elif _COLLECT_RE.match(line):
             if seen_collect:  # pragma: no cover
                 raise AssertionError(f"second COLLECT not supported: {line!r}")
@@ -843,6 +855,14 @@ def run_aql_subset(
                 row[key] = _eval_expr(value_expr, env, bind_vars, let_env)
         rows.append(row)
 
+    # AQL order, not SPARQL order: a LIMIT at this level runs before the
+    # RETURN that ends it, so ``LIMIT n RETURN DISTINCT`` slices first and
+    # de-duplicates the slice. Applying DISTINCT first (as this did) made
+    # the interpreter evaluate that AQL the way SPARQL would, so the cross
+    # tests passed on exactly the translation that was wrong (issue #39).
+    if limit is not None:
+        offset, count = limit
+        rows = rows[offset : offset + count]
     if return_distinct:
         seen: set[tuple] = set()
         deduped: list[dict[str, Any]] = []
@@ -852,7 +872,4 @@ def run_aql_subset(
                 seen.add(dedup_key)
                 deduped.append(r)
         rows = deduped
-    if limit is not None:
-        offset, count = limit
-        rows = rows[offset : offset + count]
     return rows

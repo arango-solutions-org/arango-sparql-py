@@ -142,6 +142,13 @@ CASES = [
         "PREFIX : <http://ex.org/> SELECT DISTINCT ?n WHERE { ?s a :Person ; :name ?n }",
         id="distinct_projection",
     ),
+    # Alice and Bob share ``dept "eng"``, so the first two rows hold a
+    # duplicate: SPARQL de-duplicates first and returns both departments
+    # (issue #39 — the AQL used to slice first and return one).
+    pytest.param(
+        "PREFIX : <http://ex.org/> SELECT DISTINCT ?d WHERE { ?s a :Person ; :dept ?d } LIMIT 2",
+        id="distinct_with_limit",
+    ),
     # ----- FILTER cases ---------------------------------------------------
     pytest.param(
         'PREFIX : <http://ex.org/> SELECT ?s ?n WHERE { ?s a :Person ; :name ?n . FILTER(?n = "Alice") }',
@@ -216,6 +223,19 @@ ORDER_BY_CASES = [
     pytest.param(
         "PREFIX : <http://ex.org/> SELECT DISTINCT ?a WHERE { ?s a :Person ; :age ?a } ORDER BY ?a",
         id="order_by_distinct",
+    ),
+    # Ordered by name the departments run eng (Alice), eng (Bob), ops
+    # (Carol): DISTINCT then LIMIT keeps [eng, ops], and OFFSET 1 keeps
+    # [ops]. Slicing before de-duplicating gives [eng] for both (#39).
+    pytest.param(
+        "PREFIX : <http://ex.org/> SELECT DISTINCT ?d WHERE { ?s a :Person ; :dept ?d ; :name ?n } "
+        "ORDER BY ?n LIMIT 2",
+        id="distinct_order_by_unprojected_var_with_limit",
+    ),
+    pytest.param(
+        "PREFIX : <http://ex.org/> SELECT DISTINCT ?d WHERE { ?s a :Person ; :dept ?d ; :name ?n } "
+        "ORDER BY ?n LIMIT 1 OFFSET 1",
+        id="distinct_order_by_unprojected_var_with_limit_offset",
     ),
 ]
 

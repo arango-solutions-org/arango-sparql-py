@@ -149,6 +149,30 @@ cases:
     expected_bind_vars:
       "@c1_Document": "Document"
 
+  - name: subselect_with_distinct_and_limit
+    # The sub-SELECT's own builder de-duplicates before its LIMIT, as a
+    # top-level query does (issue #39): the child's ``finalize()`` wraps
+    # its ``RETURN DISTINCT`` in a subquery and slices that.
+    sparql: |
+      PREFIX : <http://ex.org/>
+      SELECT ?n WHERE {
+        { SELECT DISTINCT ?n WHERE { ?s :name ?n } LIMIT 2 }
+      }
+    expected_aql: |-
+      FOR row4 IN (
+        LET deduped2 = (
+          FOR doc1 IN @@c1_Document
+          FILTER HAS(doc1, "name")
+          RETURN DISTINCT { n: doc1.name }
+        )
+        FOR row3 IN deduped2
+        LIMIT 2
+        RETURN row3
+      )
+      RETURN { n: row4.n }
+    expected_bind_vars:
+      "@c1_Document": "Document"
+
   - name: subselect_no_shared_vars
     # Outer projects ``?x``; inner projects ``?max``. No shared
     # variables ⇒ no join FILTER between outer and inner; SPARQL

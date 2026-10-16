@@ -84,9 +84,9 @@ All five rdflib path classes are handled (`paths.py`).
 | Feature | Status | Notes / evidence |
 | --- | --- | --- |
 | `ORDER BY` | ✅ | `visitor.py:1026` |
-| `DISTINCT` | ✅ | `visitor.py:590` |
-| `LIMIT` | ✅ | `visitor.py:594` |
-| `OFFSET` | 🟡 | Supported **with** `LIMIT`; `OFFSET` without `LIMIT` is rejected (`visitor.py:604`) |
+| `DISTINCT` | ✅ | `visitor.py:598`. With `LIMIT`/`OFFSET`, the rows are de-duplicated *before* the slice, as SPARQL's `Slice(Distinct(…))` requires (`builder.py:995`; until 2026-10-16 the slice ran first, issue #39) |
+| `LIMIT` | ✅ | `visitor.py:602` |
+| `OFFSET` | 🟡 | Supported **with** `LIMIT`; `OFFSET` without `LIMIT` is rejected (`visitor.py:612`) |
 | `GROUP BY` | ✅ | `visitor.py:878` |
 | `HAVING` | ✅ | `visitor.py:616` (Filter after aggregation) |
 | Projection / SELECT expressions | ✅ | `visit_Project` / `visit_Extend` |

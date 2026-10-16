@@ -195,6 +195,9 @@ class AqlQueryBuilder:
     appended in visit order."""
     _limit_clause: _Clause | None = None
     _return_clause: _Clause | None = None
+    _return_distinct: bool = False
+    """Set by :meth:`return_object` for a ``RETURN DISTINCT``, so
+    :meth:`finalize` de-duplicates *before* a ``LIMIT`` rather than after."""
     _ask_mode: bool = False
     """When set, :meth:`finalize` wraps the assembled body in
     ``RETURN LENGTH(<body>) > 0`` so an ASK query produces a single
@@ -846,6 +849,7 @@ class AqlQueryBuilder:
         body = ", ".join(f"{k}: {expr}" for k, expr in mapping)
         keyword = "RETURN DISTINCT" if distinct else "RETURN"
         self._return_clause = _Clause(_ClauseKind.RETURN, f"{keyword} {{ {body} }}")
+        self._return_distinct = distinct
         return self
 
     def return_scalar(self, expression: str) -> AqlQueryBuilder:
@@ -951,6 +955,10 @@ class AqlQueryBuilder:
         Algebra visitor walked them in. This is what lets
         ``visit_Slice`` (which receives LIMIT after the inner Project
         already emitted RETURN) work without contortions.
+
+        The exception is a ``RETURN DISTINCT`` with a LIMIT: the body
+        and ``RETURN DISTINCT`` go into a subquery and the LIMIT slices
+        its result, so duplicates are removed before rows are counted.
         """
         if self._return_clause is None:
             raise AqlEmitError("finalize() called without a RETURN; every query must terminate in RETURN")
@@ -984,6 +992,34 @@ class AqlQueryBuilder:
                 wrapper.append(self._limit_clause.text)
             wrapper.append(f"RETURN {result_alias}")
             body = "\n".join(wrapper)
+        elif self._limit_clause is not None and self._return_distinct:
+            # SPARQL de-duplicates before it slices: the algebra is
+            # Slice(Distinct(Project(…))) (SPARQL 1.1 §18.2.5). AQL runs a
+            # LIMIT where it is written, so ``LIMIT n RETURN DISTINCT`` would
+            # take n rows and then de-duplicate those — too few rows whenever
+            # a duplicate falls inside the first n (issue #39). So
+            # de-duplicate in a subquery and slice outside it, as the grouped
+            # fallback above already does. ``RETURN DISTINCT`` keeps the order
+            # of its input (ArangoDB manual, RETURN operation), so a SORT
+            # inside still decides which rows the slice keeps.
+            #
+            # Deliberately not the legacy shape (``pgt-translator.js`` emits
+            # LIMIT before RETURN DISTINCT, the same bug) and not
+            # arango-cypher-py's ``COLLECT k = … SORT … LIMIT``: SPARQL may
+            # ORDER BY a variable it does not project, which COLLECT drops.
+            ordered.append(self._return_clause)
+            inner = "\n".join(c.text for c in ordered)
+            indented = "\n".join("  " + line for line in inner.splitlines())
+            rows_alias = self.fresh_alias(prefix="deduped")
+            row_alias = self.fresh_alias(prefix="row")
+            body = "\n".join(
+                [
+                    f"LET {rows_alias} = (\n{indented}\n)",
+                    f"FOR {row_alias} IN {rows_alias}",
+                    self._limit_clause.text,
+                    f"RETURN {row_alias}",
+                ]
+            )
         else:
             if self._limit_clause is not None:
                 ordered.append(self._limit_clause)

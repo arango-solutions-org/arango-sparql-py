@@ -112,3 +112,27 @@ cases:
     expected_bind_vars:
       "@c1_Person": "Person"
       "_p1": 18
+
+  - name: distinct_order_by_unprojected_var_with_limit_offset
+    # ORDER BY a variable the query does not select, then DISTINCT, then
+    # OFFSET/LIMIT. The SORT stays inside the de-duplicating subquery
+    # (``RETURN DISTINCT`` keeps its input order) and the slice runs on the
+    # de-duplicated rows (issue #39). A COLLECT would drop ``doc1.age``.
+    sparql: |
+      PREFIX : <http://ex.org/>
+      SELECT DISTINCT ?n WHERE { ?s a :Person ; :name ?n ; :age ?a }
+      ORDER BY DESC(?a)
+      LIMIT 2 OFFSET 1
+    expected_aql: |
+      LET deduped2 = (
+        FOR doc1 IN @@c1_Person
+        FILTER HAS(doc1, "age")
+        FILTER HAS(doc1, "name")
+        SORT doc1.age DESC
+        RETURN DISTINCT { n: doc1.name }
+      )
+      FOR row3 IN deduped2
+      LIMIT 1, 2
+      RETURN row3
+    expected_bind_vars:
+      "@c1_Person": "Person"

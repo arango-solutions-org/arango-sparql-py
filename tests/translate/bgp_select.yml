@@ -66,11 +66,19 @@ cases:
     sparql: |
       PREFIX : <http://ex.org/>
       SELECT DISTINCT ?n WHERE { ?s a :Person ; :name ?n } LIMIT 5
+    # SPARQL de-duplicates before it slices (Slice(Distinct(...))). This
+    # golden used to pin ``LIMIT 5`` above ``RETURN DISTINCT``, which takes
+    # five rows and then de-duplicates them (issue #39). The LIMIT now
+    # slices the de-duplicated subquery.
     expected_aql: |
-      FOR doc1 IN @@c1_Person
-      FILTER HAS(doc1, "name")
+      LET deduped2 = (
+        FOR doc1 IN @@c1_Person
+        FILTER HAS(doc1, "name")
+        RETURN DISTINCT { n: doc1.name }
+      )
+      FOR row3 IN deduped2
       LIMIT 5
-      RETURN DISTINCT { n: doc1.name }
+      RETURN row3
     expected_bind_vars:
       "@c1_Person": "Person"
 
