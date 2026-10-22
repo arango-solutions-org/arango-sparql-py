@@ -1089,6 +1089,38 @@ deployments.
 | **Named-graph dispatch** — `GRAPH <iri> { … }` and `GRAPH ?g { … }` are supported through a per-document `_graph` attribute convention. `visit_Graph` pushes the named-graph term (constant `URIRef` or `Variable`) onto a `graph_scope` stack on `_BindingState`; every FOR opened inside the scope consults `_apply_graph_scope`, which attaches `FILTER alias.<graph_field> == @g` for constant IRIs or binds `?g` to `alias.<graph_field>` for variables (sibling FORs in the same scope inherit the binding and emit equality filters, so SPARQL's "same graph variable means same graph" semantics is preserved). Storage knobs on `SchemaResolver`: `graph_field` (default `"_graph"`) renames the per-document attribute; `default_graph_includes_named` (default `True` for v0.9 backward-compat) flips between lax (no filter outside a GRAPH wrapper) and strict (`FILTER alias.<graph_field> == null` outside). The wildcard-predicate skip list at `variable_predicates.SYSTEM_ATTRIBUTES_TO_SKIP` is dynamically extended with `resolver.graph_field` so `?s ?p ?o` never surfaces the named-graph IRI as a triple predicate. Layout-uniform — the same code path serves PG, LPG, and RPT collections because the layout-specific work already lives in the resolver. Storage-model rationale, alternatives considered (per-collection mapping, deferred design doc), and reversibility analysis are captured in [`docs/architecture/decisions/0001-named-graphs-per-document.md`](./decisions/0001-named-graphs-per-document.md). | ✅ shipped | `tests/translate/named_graphs.yml` (7 YAML cases covering constant/variable IRIs, multi-triple subject reuse, implicit graph joins across subjects, inside/outside mixing under lax mode, GRAPH inside sub-SELECT, and wildcard-predicate skip-list cooperation) + `tests/translate/test_translate_named_graphs_goldens.py` (3 Python interaction cases — strict-mode null filter, strict-mode no-double-filter inside GRAPH, custom-`graph_field` dual-propagation into filter AND skip list). Live-executable once the harness loads `_graph` on its fixtures. |
 | **Federated `SERVICE`** — out of scope (see §2) | ❌ won't fix in v1 | — |
 
+#### 6.6.1 Names in emitted AQL
+
+Every name the translator writes into AQL from the query or the mapping MUST
+produce AQL that parses, whatever the name. This covers SPARQL variable names,
+property local names, and the mapping's column names (`phys:*Column`,
+`typeField`, `tenantField`). A name is written **bare** only when ArangoDB's
+lexer accepts it bare:
+
+- it is letters, digits and `_`;
+- a leading underscore is followed by a letter (`_key` and `__x` yes; `_2`, `_` and `_2a` no);
+- it is not an AQL keyword, case-insensitively (`filter`, `desc`, `graph`,
+  `in`, `null` and the rest of the 37 words in
+  `translate/builder.py::AQL_RESERVED_NAMES`).
+
+Anything else is **backtick-quoted**, both as an attribute read
+(`` doc.`_2` ``, `` doc.`filter` ``) and as an object key
+(`` RETURN { `desc`: … } ``). ArangoDB accepts both, and the returned document
+is keyed by the plain name, so `?_2`, `?2` and `?desc` bind under their own
+names. Sub-SELECT, `VALUES` and `UNION` read those keys back through the same
+rule (`` row.`_2` ``). Context words that stay usable bare (`count`, `keep`,
+`options`, `search`, `prune`, `to`, `current`, `new`, `old`, `at`, `least`)
+keep their bare spelling.
+
+A name AQL cannot quote is refused, never emitted bare:
+- an attribute name containing a backtick or backslash raises `E_SPARQL_UNSUPPORTED`;
+- an empty object key raises `AqlEmitError`.
+
+The keyword list is ArangoDB's. `tests/integration/test_aql_names_live.py`
+re-validates it against the live server, together with the object-key subset
+the cross-test interpreter refuses. Issues #73, #75 and #76; goldens in
+`tests/translate/aql_names.yml`.
+
 ### 6.7 Schema warnings (non-fatal)
 
 When the resolver can do the right thing but the operator probably wants
@@ -1099,7 +1131,7 @@ advisories" panel.
 
 | Code | Trigger |
 | --- | --- |
-| `W_SCHEMA_UNMAPPED_IRI` | A predicate IRI is not declared in the ontology. Resolver falls back to the IRI's local name as the AQL attribute. An attribute name that is not an AQL identifier is emitted **backtick-quoted** (`` doc.`phys:typeValue` ``), and `HAS()` receives it as a bind variable; a name containing a backtick or backslash cannot be quoted safely and raises `E_SPARQL_UNSUPPORTED` — never bare, invalid AQL (`translate/builder.py::attribute_ref`, mirroring `arango-cypher-py`'s escaped-name rule). In NL generation a fallback name containing `:` is rejected instead (§7.3.2). |
+| `W_SCHEMA_UNMAPPED_IRI` | A predicate IRI is not declared in the ontology. Resolver falls back to the IRI's local name as the AQL attribute. An attribute name AQL cannot take bare (not an identifier, `_2`-shaped, or an AQL keyword; §6.6.1) is emitted **backtick-quoted** (`` doc.`phys:typeValue` ``), and `HAS()` receives it as a bind variable; a name containing a backtick or backslash cannot be quoted safely and raises `E_SPARQL_UNSUPPORTED` — never bare, invalid AQL (`translate/builder.py::attribute_ref`, mirroring `arango-cypher-py`'s escaped-name rule). In NL generation a fallback name containing `:` is rejected instead (§7.3.2). |
 | `W_SCHEMA_DEFAULT_COLLECTION` | A class is declared `owl:Class` but lacks `phys:collectionName`. Resolver falls back to the IRI's local name as the collection name. |
 | `W_SCHEMA_RPT_INFERRED` | The RPT detector flagged a collection as triples-shaped but the OWL ontology did not declare it as such. Resolver treats it as RPT and surfaces this so the operator can either accept the inference or annotate the OWL. |
 | `W_SCHEMA_HYBRID_DETECTED` | The mapping contains entities of two or more `style` values (e.g. one `RPT` + one `LABEL`). Informational only; useful for the UI banner. |

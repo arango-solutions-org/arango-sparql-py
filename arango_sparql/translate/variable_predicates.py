@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING, Any
 from rdflib import Literal, URIRef, Variable
 
 from ..errors import AqlEmitError, UnsupportedSparqlError
-from .builder import subject_ref
+from .builder import attribute_ref, subject_ref
 
 if TYPE_CHECKING:
     from .resolver import ResolvedProperty
@@ -146,17 +146,17 @@ def _emit_rpt_branch(
     subj_expr = visitor.state.var_to_expr.get(str(subject))
     if subj_expr is None:  # pragma: no cover - defensive
         raise AqlEmitError(f"RPT variable-predicate triple references unbound subject ?{subject}")
-    new_subj_expr = f"{triples_alias}.{rpt_class.subject_column}"
+    new_subj_expr = attribute_ref(triples_alias, rpt_class.subject_column)
     if subj_expr != new_subj_expr:
         visitor.builder.filter_raw(f"{new_subj_expr} == {subj_expr}")
     # ``?p`` binds to the predicate column — no FILTER; we want
     # EVERY predicate on this subject.
-    visitor._record_var_expr(predicate, f"{triples_alias}.{rpt_class.predicate_column}")
+    visitor._record_var_expr(predicate, attribute_ref(triples_alias, rpt_class.predicate_column))
     # ``?o`` follows the same NOT_NULL shape as
     # _emit_rpt_property_triple's Variable branch.
     coalesce_expr = (
-        f"NOT_NULL({triples_alias}.{rpt_class.object_uri_column}, "
-        f"{triples_alias}.{rpt_class.object_value_column})"
+        f"NOT_NULL({attribute_ref(triples_alias, rpt_class.object_uri_column)}, "
+        f"{attribute_ref(triples_alias, rpt_class.object_value_column)})"
     )
     if isinstance(obj, Variable):
         o_name = str(obj)
@@ -169,8 +169,8 @@ def _emit_rpt_branch(
     if isinstance(obj, URIRef):
         uri_bind = visitor.builder.bind(str(obj), hint="obj")
         visitor.builder.filter_raw(
-            f"({triples_alias}.{rpt_class.object_uri_column} == {uri_bind} "
-            f"|| {triples_alias}.{rpt_class.object_value_column} == {uri_bind})"
+            f"({attribute_ref(triples_alias, rpt_class.object_uri_column)} == {uri_bind} "
+            f"|| {attribute_ref(triples_alias, rpt_class.object_value_column)} == {uri_bind})"
         )
         return
     if isinstance(obj, Literal):
@@ -179,7 +179,7 @@ def _emit_rpt_branch(
         from .visitor import _term_to_python
 
         val_bind = visitor.builder.bind(_term_to_python(obj), hint="obj")
-        visitor.builder.filter_eq(f"{triples_alias}.{rpt_class.object_value_column}", val_bind)
+        visitor.builder.filter_eq(attribute_ref(triples_alias, rpt_class.object_value_column), val_bind)
         return
     raise UnsupportedSparqlError(
         f"variable-predicate RPT triple object term type "
@@ -322,7 +322,7 @@ def _emit_document_edge_union(
                     "without both typeField and typeValue"
                 )
             type_bind = child.bind(prop.type_value, hint=prop.type_field)
-            child.filter_eq(f"{edge_alias}.{prop.type_field}", type_bind)
+            child.filter_eq(attribute_ref(edge_alias, prop.type_field), type_bind)
         predicate_bind = child.bind(prop.iri, hint="predicate")
         child.return_object(
             [

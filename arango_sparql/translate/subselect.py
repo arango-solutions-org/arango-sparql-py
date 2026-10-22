@@ -48,6 +48,7 @@ from typing import TYPE_CHECKING, Any
 from rdflib import Literal, URIRef
 
 from ..errors import UnsupportedSparqlError
+from .builder import attribute_ref
 
 if TYPE_CHECKING:
     from .visitor import AlgebraVisitor
@@ -264,7 +265,7 @@ def _bind_outer_scope(
     against.
     """
     for var_name in var_names:
-        new_expr = f"{row_alias}.{var_name}"
+        new_expr = attribute_ref(row_alias, var_name)
         existing = visitor.state.var_to_expr.get(var_name)
         if existing is None:
             visitor.state.var_to_expr[var_name] = new_expr

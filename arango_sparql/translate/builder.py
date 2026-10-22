@@ -22,6 +22,62 @@ from ..errors import AqlEmitError, UnsupportedSparqlError
 
 _AQL_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
+# What ArangoDB's lexer accepts as an unquoted name after a dot: a leading
+# underscore must be followed by a letter (``_key``, ``__x``), so ``_2``, ``_``
+# and ``_2a`` are syntax errors bare (ERR 1501) and have to be backtick-quoted.
+# RDF container membership properties (``rdf:_1``, ``rdf:_2``) hit this.
+_AQL_BARE_ATTRIBUTE_RE = re.compile(r"^([A-Za-z][A-Za-z0-9_]*|_+[A-Za-z][A-Za-z0-9_]*)$")
+
+# AQL keywords ArangoDB rejects bare after a dot (``doc.filter``, ERR 1501),
+# case-insensitively — validated one by one with ``db.aql.validate`` against
+# ArangoDB 3.12.9, and re-validated live by ``tests/integration/
+# test_aql_names_live.py`` (issue #76). As object keys (``{filter: 1}``) ArangoDB
+# rejects a subset of these, so one set serves both: quoting a key that did not
+# need it is harmless. Context words that stay usable bare (SEARCH, KEEP, COUNT,
+# OPTIONS, PRUNE, TO, CURRENT, NEW, OLD, AT, LEAST) are deliberately absent, so
+# common names like ``count`` keep their bare spelling and every golden holds.
+AQL_RESERVED_NAMES = frozenset(
+    {
+        "aggregate",
+        "all",
+        "all_shortest_paths",
+        "and",
+        "any",
+        "asc",
+        "collect",
+        "desc",
+        "distinct",
+        "false",
+        "filter",
+        "for",
+        "graph",
+        "in",
+        "inbound",
+        "insert",
+        "into",
+        "k_paths",
+        "k_shortest_paths",
+        "let",
+        "like",
+        "limit",
+        "none",
+        "not",
+        "null",
+        "or",
+        "outbound",
+        "remove",
+        "replace",
+        "return",
+        "shortest_path",
+        "sort",
+        "true",
+        "update",
+        "upsert",
+        "window",
+        "with",
+    }
+)
+
 # A collection name only ever reaches AQL as a ``@@`` bind parameter, so it
 # needs to be a valid ArangoDB name, not an AQL identifier. ArangoDB's
 # traditional names allow letters, digits, ``_`` and ``-`` (max 256 bytes);
@@ -109,18 +165,41 @@ def parse_flag(value: str | None) -> bool | None:
 
 
 def is_aql_identifier(name: str) -> bool:
-    """Whether *name* can be written bare after a dot (``doc.name``)."""
-    return bool(_AQL_IDENT_RE.match(name or ""))
+    """Whether *name* can be written bare after a dot (``doc.name``) or as an
+    object key (``{name: …}``): lexer-shaped and not an AQL keyword."""
+    return bool(_AQL_BARE_ATTRIBUTE_RE.match(name or "")) and name.lower() not in AQL_RESERVED_NAMES
+
+
+def _can_backtick_quote(name: str) -> bool:
+    """Inside AQL backticks ``\\`` starts an escape and a backtick ends the
+    quoting, so a name containing either (or an empty one) cannot be passed."""
+    return bool(name) and "`" not in name and "\\" not in name
+
+
+def object_key(name: str) -> str:
+    """An object-literal key for *name* that is valid AQL: bare when it can be
+    (``{name: …}``), backtick-quoted otherwise (``{`_2`: …}``, ``{`filter`: …}``).
+
+    The returned document is keyed by the plain *name* either way, so a SPARQL
+    variable like ``?_2`` or ``?desc`` binds under its own name (issues #75,
+    #76). A name AQL cannot quote raises :class:`AqlEmitError`; SPARQL variable
+    names never contain a backtick or backslash, so only a builder bug gets there.
+    """
+    if is_aql_identifier(name):
+        return name
+    if not _can_backtick_quote(name):
+        raise AqlEmitError(f"invalid RETURN key: {name!r}")
+    return f"`{name}`"
 
 
 def attribute_ref(alias: str, name: str) -> str:
     """AQL attribute access ``alias.<name>`` that is valid for ANY attribute name.
 
     A plain identifier is emitted bare (``doc.name`` — every existing golden).
-    Anything else (``phys:typeValue``, ``first name``, ``é``) is backtick-
-    quoted: ``doc.`phys:typeValue```. Emitting it bare produced invalid AQL
-    (``doc.phys:typeValue`` → ERR 1501), and an unquoted caller-influenced
-    name is an injection shape.
+    Anything else (``phys:typeValue``, ``first name``, ``é``, ``_2``, or an AQL
+    keyword such as ``filter``) is backtick-quoted: ``doc.`phys:typeValue```.
+    Emitting it bare produced invalid AQL (``doc.phys:typeValue`` → ERR 1501),
+    and an unquoted caller-influenced name is an injection shape.
 
     Inside AQL backticks ``\\`` starts an escape and a backtick ends the
     quoting, so a name containing either cannot be passed safely and is
@@ -129,7 +208,7 @@ def attribute_ref(alias: str, name: str) -> str:
     """
     if is_aql_identifier(name):
         return f"{alias}.{name}"
-    if not name or "`" in name or "\\" in name:
+    if not _can_backtick_quote(name):
         shown = name if len(name) <= 80 else name[:80] + "…"
         raise UnsupportedSparqlError(
             f"attribute name {shown!r} contains a backtick or backslash (or is empty) "
@@ -808,10 +887,9 @@ class AqlQueryBuilder:
         """
         if self._return_clause is not None:
             raise AqlEmitError("RETURN already emitted; only one RETURN per query")
-        for key, _ in mapping:
-            if not _AQL_IDENT_RE.match(key):
-                raise AqlEmitError(f"invalid RETURN key: {key!r}")
-        body = ", ".join(f"{k}: {expr}" for k, expr in mapping)
+        # Keys are SPARQL variable names: quoted where AQL cannot take them
+        # bare (``?_2``, ``?desc``), refused where AQL cannot quote them.
+        body = ", ".join(f"{object_key(k)}: {expr}" for k, expr in mapping)
         keyword = "RETURN DISTINCT" if distinct else "RETURN"
         self._return_clause = _Clause(_ClauseKind.RETURN, f"{keyword} {{ {body} }}")
         self._return_distinct = distinct

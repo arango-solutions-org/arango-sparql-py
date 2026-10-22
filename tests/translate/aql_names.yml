@@ -1,0 +1,174 @@
+# Golden corpus: names ArangoDB cannot take bare (issues #75, #76).
+#
+# A SPARQL variable or attribute name reaches AQL as an object key
+# (``RETURN { name: … }``) or an attribute read (``doc.name``). ArangoDB's
+# lexer takes a name bare only if a leading underscore is followed by a letter
+# (``_key`` yes, ``_2`` no — #73 for attribute reads, #75 for keys and row
+# reads) and it is not an AQL keyword (``filter``, ``desc``, ``graph``, ``in``,
+# case-insensitively — #76). Anything else is backtick-quoted, which ArangoDB
+# accepts in both places; the returned document is still keyed by the plain
+# name. Context words such as ``count`` stay bare, so ordinary goldens hold.
+#
+# ``translate/builder.py``: ``is_aql_identifier`` (the rule),
+# ``attribute_ref`` (reads), ``object_key`` (keys); the sub-SELECT / VALUES and
+# UNION row reads go through ``attribute_ref``. Each AQL below parses on
+# ArangoDB 3.12 (``tests/integration/test_aql_names_live.py`` runs them).
+
+ontology: |
+  @prefix : <http://example.org/> .
+  @prefix owl: <http://www.w3.org/2002/07/owl#> .
+  @prefix phys: <https://arango.solutions/phys#> .
+  :Doc a owl:Class ; phys:mappingStyle "COLLECTION" ; phys:collectionName "Docs" .
+  :Tag a owl:Class ; phys:mappingStyle "COLLECTION" ; phys:collectionName "Tags" .
+
+cases:
+  - name: underscore_digit_variable_is_a_quoted_key
+    sparql: |
+      PREFIX : <http://example.org/>
+      SELECT ?_2 WHERE { ?_2 a :Doc }
+    expected_aql: |
+      FOR doc1 IN @@c1_Docs
+      RETURN { `_2`: NOT_NULL(doc1._uri, doc1._id) }
+    expected_bind_vars: {"@c1_Docs": "Docs"}
+
+  - name: digit_variable_is_a_quoted_key
+    # Refused before (``AqlEmitError: invalid RETURN key``); SPARQL allows ?2.
+    sparql: |
+      PREFIX : <http://example.org/>
+      SELECT ?2 WHERE { ?2 a :Doc }
+    expected_aql: |
+      FOR doc1 IN @@c1_Docs
+      RETURN { `2`: NOT_NULL(doc1._uri, doc1._id) }
+    expected_bind_vars: {"@c1_Docs": "Docs"}
+
+  - name: keyword_variable_is_a_quoted_key
+    sparql: |
+      PREFIX : <http://example.org/>
+      SELECT ?desc WHERE { ?desc a :Doc }
+    expected_aql: |
+      FOR doc1 IN @@c1_Docs
+      RETURN { `desc`: NOT_NULL(doc1._uri, doc1._id) }
+    expected_bind_vars: {"@c1_Docs": "Docs"}
+
+  - name: keyword_attribute_is_a_quoted_read
+    sparql: |
+      PREFIX : <http://example.org/>
+      SELECT ?f WHERE { ?d a :Doc ; :filter ?f }
+    expected_aql: |
+      FOR doc1 IN @@c1_Docs
+      FILTER HAS(doc1, @_p1_attr)
+      RETURN { f: doc1.`filter` }
+    expected_bind_vars: {"@c1_Docs": "Docs", "_p1_attr": "filter"}
+
+  - name: keyword_attribute_is_case_insensitive
+    sparql: |
+      PREFIX : <http://example.org/>
+      SELECT ?f WHERE { ?d a :Doc ; :FILTER ?f }
+    expected_aql: |
+      FOR doc1 IN @@c1_Docs
+      FILTER HAS(doc1, @_p1_attr)
+      RETURN { f: doc1.`FILTER` }
+    expected_bind_vars: {"@c1_Docs": "Docs", "_p1_attr": "FILTER"}
+
+  - name: keyword_attribute_with_a_constant_object
+    sparql: |
+      PREFIX : <http://example.org/>
+      SELECT ?d WHERE { ?d a :Doc ; :in 5 }
+    expected_aql: |
+      FOR doc1 IN @@c1_Docs
+      FILTER doc1.`in` == @_p1
+      RETURN { d: NOT_NULL(doc1._uri, doc1._id) }
+    expected_bind_vars: {"@c1_Docs": "Docs", "_p1": 5}
+
+  - name: context_word_attribute_stays_bare
+    # COUNT is an AQL context word, not reserved: ``doc.count`` parses.
+    sparql: |
+      PREFIX : <http://example.org/>
+      SELECT ?c WHERE { ?d a :Doc ; :count ?c }
+    expected_aql: |
+      FOR doc1 IN @@c1_Docs
+      FILTER HAS(doc1, "count")
+      RETURN { c: doc1.count }
+    expected_bind_vars: {"@c1_Docs": "Docs"}
+
+  - name: subselect_row_read_is_quoted
+    sparql: |
+      PREFIX : <http://example.org/>
+      SELECT ?_2 WHERE { { SELECT ?_2 WHERE { ?_2 a :Doc } LIMIT 3 } }
+    expected_aql: |
+      FOR row2 IN (
+        FOR doc1 IN @@c1_Docs
+        LIMIT 3
+        RETURN { `_2`: NOT_NULL(doc1._uri, doc1._id) }
+      )
+      RETURN { `_2`: row2.`_2` }
+    expected_bind_vars: {"@c1_Docs": "Docs"}
+
+  - name: union_row_read_is_quoted
+    sparql: |
+      PREFIX : <http://example.org/>
+      SELECT ?_2 WHERE { { ?_2 a :Doc } UNION { ?_2 a :Tag } }
+    expected_aql: |
+      FOR row3 IN UNION(
+      (
+        FOR doc1 IN @@c1_Docs
+        RETURN { `_2`: NOT_NULL(doc1._uri, doc1._id) }
+      ),
+      (
+        FOR doc2 IN @@c2_Tags
+        RETURN { `_2`: NOT_NULL(doc2._uri, doc2._id) }
+      )
+      )
+      RETURN { `_2`: row3.`_2` }
+    expected_bind_vars: {"@c1_Docs": "Docs", "@c2_Tags": "Tags"}
+
+  - name: values_row_read_is_quoted
+    sparql: |
+      PREFIX : <http://example.org/>
+      SELECT ?desc WHERE { VALUES ?desc { 1 2 } }
+    expected_aql: |
+      FOR row1 IN @_p1_values
+      RETURN { `desc`: row1.`desc` }
+    expected_bind_vars: {"_p1_values": [{"desc": 1}, {"desc": 2}]}
+
+  - name: group_by_keyword_variable
+    sparql: |
+      PREFIX : <http://example.org/>
+      SELECT ?graph (COUNT(?d) AS ?_n) WHERE { ?d a :Doc ; :graph ?graph } GROUP BY ?graph
+    expected_aql: |
+      LET results4 = (
+        FOR doc1 IN @@c1_Docs
+        FILTER HAS(doc1, @_p1_attr)
+        COLLECT grp2 = doc1.`graph` WITH COUNT INTO agg3
+        RETURN { `graph`: grp2, _n: agg3 }
+      )
+      FOR result5 IN (LENGTH(results4) == 0 ? [{}] : results4)
+      RETURN result5
+    expected_bind_vars: {"@c1_Docs": "Docs", "_p1_attr": "graph"}
+
+  - name: rpt_mapping_columns_named_like_keywords
+    # Column names from the mapping (phys:*Column) are read through the same
+    # rule: a triples table whose predicate column is ``graph`` stays valid.
+    ontology: |
+      @prefix : <http://example.org/> .
+      @prefix owl: <http://www.w3.org/2002/07/owl#> .
+      @prefix phys: <https://arango.solutions/phys#> .
+      :Fact a owl:Class ; phys:mappingStyle "RPT" ; phys:triplesCollection "facts" ;
+        phys:subjectColumn "subject" ; phys:predicateColumn "graph" ;
+        phys:objectUriColumn "in" ; phys:objectValueColumn "_2" .
+    sparql: |
+      PREFIX : <http://example.org/>
+      SELECT ?s ?v WHERE { ?s a :Fact ; :label ?v }
+    expected_aql: |
+      FOR doc1 IN @@c1_facts
+      FILTER doc1.`graph` == @_p1_rdftype
+      FILTER doc1.`in` == @_p2_cls
+      FOR doc2 IN @@c1_facts
+      FILTER doc2.`graph` == @_p3_pred
+      FILTER doc2.subject == doc1.subject
+      RETURN { s: doc1.subject, v: NOT_NULL(doc2.`in`, doc2.`_2`) }
+    expected_bind_vars:
+      "@c1_facts": facts
+      _p1_rdftype: http://www.w3.org/1999/02/22-rdf-syntax-ns#type
+      _p2_cls: http://example.org/Fact
+      _p3_pred: http://example.org/label

@@ -558,12 +558,12 @@ class AlgebraVisitor:
 
         alias = self.builder.fresh_alias(prefix="d")
         coll_ref = self.builder.bind_collection(rpt_class.collection)
-        coalesce = f"NOT_NULL({alias}.{rpt_class.object_uri_column}, {alias}.{rpt_class.object_value_column})"
+        coalesce = f"NOT_NULL({attribute_ref(alias, rpt_class.object_uri_column)}, {attribute_ref(alias, rpt_class.object_value_column)})"
         return (
             f"FOR {alias} IN {coll_ref} "
-            f"FILTER {alias}.{rpt_class.subject_column} == {subject_expr} "
-            f"RETURN {{subject: {alias}.{rpt_class.subject_column}, "
-            f"predicate: {alias}.{rpt_class.predicate_column}, "
+            f"FILTER {attribute_ref(alias, rpt_class.subject_column)} == {subject_expr} "
+            f"RETURN {{subject: {attribute_ref(alias, rpt_class.subject_column)}, "
+            f"predicate: {attribute_ref(alias, rpt_class.predicate_column)}, "
             f"object: {coalesce}}}"
         )
 
@@ -886,7 +886,7 @@ class AlgebraVisitor:
             # (``_emit_edge_triple``).
             if prop.mapping_style == "GENERIC_WITH_TYPE" and prop.type_field and prop.type_value:
                 bind = child.bind(prop.type_value, hint=prop.type_field)
-                child.filter_eq(f"{e_alias}.{prop.type_field}", bind)
+                child.filter_eq(attribute_ref(e_alias, prop.type_field), bind)
             fields.append((var, subject_ref(v_alias)))
         for var, source_expr in attr_bindings:
             if self.resolver.fan_out_list_values:
@@ -1851,7 +1851,7 @@ class AlgebraVisitor:
         if self.state.tenant_bind_placeholder is None:
             self.state.tenant_bind_placeholder = self.builder.bind(self.tenant_id, hint="tenant")
         self.builder.filter_eq(
-            f"{alias}.{resolved.tenant_field}",
+            attribute_ref(alias, resolved.tenant_field),
             self.state.tenant_bind_placeholder,
         )
 
@@ -1894,11 +1894,11 @@ class AlgebraVisitor:
             )
         rdf_type_bind = self.builder.bind(str(RDF.type), hint="rdftype")
         class_bind = self.builder.bind(str(class_iri), hint="cls")
-        self.builder.filter_eq(f"{triples_alias}.{resolved.predicate_column}", rdf_type_bind)
-        self.builder.filter_eq(f"{triples_alias}.{resolved.object_uri_column}", class_bind)
+        self.builder.filter_eq(attribute_ref(triples_alias, resolved.predicate_column), rdf_type_bind)
+        self.builder.filter_eq(attribute_ref(triples_alias, resolved.object_uri_column), class_bind)
         if isinstance(subject, Variable):
             name = str(subject)
-            subj_expr = f"{triples_alias}.{resolved.subject_column}"
+            subj_expr = attribute_ref(triples_alias, resolved.subject_column)
             existing_alias = self.state.var_to_doc_alias.get(name)
             existing_expr = self.state.var_to_expr.get(name)
             if existing_alias is None and existing_expr is None:
@@ -1930,7 +1930,7 @@ class AlgebraVisitor:
             return
         if isinstance(subject, URIRef):
             uri_bind = self.builder.bind(str(subject), hint="uri")
-            self.builder.filter_eq(f"{triples_alias}.{resolved.subject_column}", uri_bind)
+            self.builder.filter_eq(attribute_ref(triples_alias, resolved.subject_column), uri_bind)
             return
         raise UnsupportedSparqlError(
             f"RPT type pattern subject term type {type(subject).__name__!r} is not supported"
@@ -1967,19 +1967,19 @@ class AlgebraVisitor:
         # bound here, joins through the same column overrides the
         # subject's class declared.
         pred_bind = self.builder.bind(str(predicate), hint="pred")
-        self.builder.filter_eq(f"{triples_alias}.{rpt_class.predicate_column}", pred_bind)
+        self.builder.filter_eq(attribute_ref(triples_alias, rpt_class.predicate_column), pred_bind)
         # Join on subject URI: the subject's value lives in
         # ``var_to_expr`` already (set by the type pattern emitter).
         subj_expr = self.state.var_to_expr.get(str(subject))
         if subj_expr is None:
             raise AqlEmitError(f"RPT property triple references unbound subject ?{subject}")
-        new_subj_expr = f"{triples_alias}.{rpt_class.subject_column}"
+        new_subj_expr = attribute_ref(triples_alias, rpt_class.subject_column)
         if subj_expr != new_subj_expr:
             self.builder.filter_raw(f"{new_subj_expr} == {subj_expr}")
         # OBJECT — variable / IRI / literal each take a different shape.
         coalesce_expr = (
-            f"NOT_NULL({triples_alias}.{rpt_class.object_uri_column}, "
-            f"{triples_alias}.{rpt_class.object_value_column})"
+            f"NOT_NULL({attribute_ref(triples_alias, rpt_class.object_uri_column)}, "
+            f"{attribute_ref(triples_alias, rpt_class.object_value_column)})"
         )
         if isinstance(obj, Variable):
             o_name = str(obj)
@@ -2002,13 +2002,13 @@ class AlgebraVisitor:
             # still bind correctly. Mirrors the legacy
             # ``rpt-translator.js`` OR-filter.
             self.builder.filter_raw(
-                f"({triples_alias}.{rpt_class.object_uri_column} == {uri_bind} "
-                f"|| {triples_alias}.{rpt_class.object_value_column} == {uri_bind})"
+                f"({attribute_ref(triples_alias, rpt_class.object_uri_column)} == {uri_bind} "
+                f"|| {attribute_ref(triples_alias, rpt_class.object_value_column)} == {uri_bind})"
             )
             return
         if isinstance(obj, Literal):
             val_bind = self.builder.bind(_term_to_python(obj), hint="obj")
-            self.builder.filter_eq(f"{triples_alias}.{rpt_class.object_value_column}", val_bind)
+            self.builder.filter_eq(attribute_ref(triples_alias, rpt_class.object_value_column), val_bind)
             return
         raise UnsupportedSparqlError(
             f"RPT property triple object term type {type(obj).__name__!r} "
@@ -2075,7 +2075,7 @@ class AlgebraVisitor:
         # / ``:livesIn`` rows that happen to ride the same collection.
         if prop.mapping_style == "GENERIC_WITH_TYPE" and prop.type_field and prop.type_value:
             bind = self.builder.bind(prop.type_value, hint=prop.type_field)
-            self.builder.filter_eq(f"{e_alias}.{prop.type_field}", bind)
+            self.builder.filter_eq(attribute_ref(e_alias, prop.type_field), bind)
         # We track the edge alias on the builder for the rare query that
         # references the edge document itself; ``v_alias`` is the
         # traversal vertex and is what binds to the SPARQL object.

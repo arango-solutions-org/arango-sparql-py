@@ -26,6 +26,11 @@ from __future__ import annotations
 import re
 from typing import Any
 
+# The keyword list is ArangoDB's, re-validated against a live server by
+# ``tests/integration/test_aql_names_live.py`` — so importing it here keeps
+# one list, pinned to the server, not a second copy that could drift.
+from arango_sparql.translate.builder import AQL_RESERVED_NAMES
+
 _FOR_RE = re.compile(r"FOR\s+(\w+)\s+IN\s+@@(\w+)")
 # Graph traversal the edge-collection visitor emits for object
 # properties: ``FOR v2, e3 IN OUTBOUND doc1 @@c2_knows``. The start
@@ -110,6 +115,48 @@ _DOC_ATTR_RE = re.compile(r"\b((?:doc|v|e|optrow|row)\d+)\.(\w+)\b")
 # default-dict to recognise a missing-doc-attribute lookup as a
 # null-binding (AQL parity) rather than a programmer error.
 _DOC_ATTR_NAMESPACE_RE = re.compile(r"^(?:doc|v|e|optrow|row)\d+__\w+$")
+# A backtick-quoted attribute read, ``doc1.`_2``` / ``row2.`filter```: same
+# value as a bare read; on a ``null`` row (the OPTIONAL pad) it is null.
+_QUOTED_ATTR_RE = re.compile(r"\b((?:doc|v|e|optrow|row)\d+)\.`([^`\\]*)`")
+# What ArangoDB's lexer takes bare as a name: a leading underscore must be
+# followed by a letter (``_key`` yes, ``_2`` no). Combined with the keyword
+# lists below, the interpreter refuses exactly the bare spellings ArangoDB
+# refuses (ERR 1501) instead of evaluating AQL the server would reject —
+# the infidelity that hid issues #75 and #76 from every cross test.
+_BARE_NAME_RE = re.compile(r"^([A-Za-z][A-Za-z0-9_]*|_+[A-Za-z][A-Za-z0-9_]*)$")
+# Object keys ArangoDB rejects bare — a subset of ``AQL_RESERVED_NAMES``
+# (``{limit: 1}`` parses, ``doc.limit`` does not). Validated live alongside it.
+AQL_RESERVED_OBJECT_KEYS = frozenset(
+    {
+        "aggregate",
+        "all_shortest_paths",
+        "and",
+        "asc",
+        "collect",
+        "desc",
+        "distinct",
+        "false",
+        "filter",
+        "for",
+        "graph",
+        "in",
+        "insert",
+        "k_paths",
+        "k_shortest_paths",
+        "let",
+        "not",
+        "null",
+        "or",
+        "remove",
+        "replace",
+        "return",
+        "shortest_path",
+        "sort",
+        "true",
+        "update",
+        "upsert",
+    }
+)
 _BIND_RE = re.compile(r"@(_\w+)")
 # C-style ternary the visitor emits inside OPTIONAL+FILTER LETs and the
 # cross-subject OPTIONAL FOR-inline source:
@@ -160,6 +207,39 @@ def _to_string(v: Any) -> str | None:
     return None if v is None else str(v)
 
 
+def _aql_attr(obj: Any, name: str) -> Any:
+    """AQL attribute access: the value, or null when absent or *obj* is not
+    an object (``null.x`` is null in AQL, never an error)."""
+    return obj.get(name) if isinstance(obj, dict) else None
+
+
+def _bare_attr(match: re.Match[str]) -> str:
+    alias, name = match.group(1), match.group(2)
+    if not _BARE_NAME_RE.match(name) or name.lower() in AQL_RESERVED_NAMES:
+        raise AssertionError(
+            f"ArangoDB rejects the bare attribute read {alias}.{name} (ERR 1501); it must be backtick-quoted"
+        )
+    return f"{alias}__{name}"
+
+
+def _object_pair(pair: str) -> tuple[str, str]:
+    """Split one ``key: expr`` pair of a ``RETURN {…}`` object the way AQL
+    reads it: a backtick-quoted key is its inner text; a bare key must be one
+    ArangoDB accepts bare."""
+    pair = pair.strip()
+    if pair.startswith("`"):
+        end = pair.index("`", 1)
+        key, rest = pair[1:end], pair[end + 1 :].lstrip()
+        if not rest.startswith(":"):
+            raise AssertionError(f"malformed RETURN pair: {pair!r}")
+        return key, rest[1:].strip()
+    key, _, value_expr = pair.partition(":")
+    key = key.strip()
+    if not _BARE_NAME_RE.match(key) or key.lower() in AQL_RESERVED_OBJECT_KEYS:
+        raise AssertionError(f"ArangoDB rejects the bare object key {key!r} (ERR 1501); it must be quoted")
+    return key, value_expr.strip()
+
+
 def _not_null(*args: Any) -> Any:
     """AQL ``NOT_NULL`` — first non-null argument, else null.
 
@@ -180,6 +260,7 @@ def _not_null(*args: Any) -> Any:
 # explicit error so we notice when the visitor emits AQL the
 # interpreter doesn't yet understand.
 _AQL_BUILTINS: dict[str, Any] = {
+    "_aql_attr": _aql_attr,
     "REGEX_TEST": _regex_test,
     "CONTAINS": _contains,
     "STARTS_WITH": _starts_with,
@@ -589,7 +670,8 @@ def _eval_expr(
     namespace.update(bind_vars)
     namespace.update(scoped_let)
     py = _TERNARY_RE.sub(r"((\2) if (\1) else \3)", expr)
-    py = _DOC_ATTR_RE.sub(lambda m: f"{m.group(1)}__{m.group(2)}", py)
+    py = _QUOTED_ATTR_RE.sub(lambda m: f"_aql_attr({m.group(1)}, {m.group(2)!r})", py)
+    py = _DOC_ATTR_RE.sub(_bare_attr, py)
     py = _BIND_RE.sub(lambda m: m.group(1), py)
     py = py.replace("&&", " and ").replace("||", " or ")
     py = re.sub(r"!(?=\()", " not ", py)
@@ -826,8 +908,7 @@ def run_aql_subset(
             # colon in our emitted AQL — the only colon is the
             # key/value separator).
             for pair in _split_top_level_commas(m.group(2)):
-                key, _, value_expr = pair.partition(":")
-                return_pairs.append((key.strip(), value_expr.strip()))
+                return_pairs.append(_object_pair(pair))
         elif m := _RETURN_SCALAR_RE.match(line):
             # ``RETURN 1`` (probe subquery) — a single scalar column.
             # Only the row *count* matters to the enclosing LENGTH((…)),

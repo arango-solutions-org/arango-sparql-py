@@ -47,6 +47,7 @@ from typing import TYPE_CHECKING, Any
 from rdflib import URIRef, Variable
 
 from ..errors import UnsupportedSparqlError
+from .builder import attribute_ref
 
 if TYPE_CHECKING:
     from .visitor import AlgebraVisitor
@@ -116,22 +117,22 @@ def emit_rpt_cross_subject_optional(visitor: AlgebraVisitor, triple: tuple[Any, 
     # Join the OPTIONAL subject to the outer-bound value. The outer
     # alias referenced by ``subject_value_expr`` is in lexical scope
     # inside this subquery (same as the MINUS/EXISTS probe).
-    child.filter_raw(f"{triples_alias}.{rpt_class.subject_column} == {subject_value_expr}")
+    child.filter_raw(f"{attribute_ref(triples_alias, rpt_class.subject_column)} == {subject_value_expr}")
 
     # One projection field per *new* variable (predicate if it's a
     # variable, plus the object). Fields are positional (``f0``, ``f1``)
     # so the downstream binding doesn't depend on SPARQL var names.
     new_bindings: list[tuple[str, str]] = []  # (sparql_var, source_expr)
     if isinstance(predicate, Variable):
-        new_bindings.append((str(predicate), f"{triples_alias}.{rpt_class.predicate_column}"))
+        new_bindings.append((str(predicate), attribute_ref(triples_alias, rpt_class.predicate_column)))
     elif isinstance(predicate, URIRef):
         pred_bind = child.bind(str(predicate), hint="pred")
-        child.filter_eq(f"{triples_alias}.{rpt_class.predicate_column}", pred_bind)
+        child.filter_eq(attribute_ref(triples_alias, rpt_class.predicate_column), pred_bind)
     else:
         raise UnsupportedSparqlError("cross-subject OPTIONAL predicate must be a variable or an IRI")
     object_expr = (
-        f"NOT_NULL({triples_alias}.{rpt_class.object_uri_column}, "
-        f"{triples_alias}.{rpt_class.object_value_column})"
+        f"NOT_NULL({attribute_ref(triples_alias, rpt_class.object_uri_column)}, "
+        f"{attribute_ref(triples_alias, rpt_class.object_value_column)})"
     )
     new_bindings.append((str(obj), object_expr))
 
