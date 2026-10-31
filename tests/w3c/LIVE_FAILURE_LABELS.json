@@ -1,10 +1,10 @@
 {
   "baseline": {
-    "commit": "e94776922f7f02bced97da6e706caef5d0d53811",
+    "commit": "2a0e62ab579167ce0ca016697039a1f52aee2fd2",
     "profile": "document_edge",
     "total": 191,
-    "passed": 131,
-    "xfailed": 60
+    "passed": 135,
+    "xfailed": 56
   },
   "failures": {
     "bind/bind07": {
@@ -16,26 +16,6 @@
       "label": "genuine bug",
       "bucket": "translator",
       "diagnosis": "The translator exposes the outer BIND value ?z inside the nested group FILTER even though ?z is not in scope there."
-    },
-    "bindings/values4": {
-      "label": "genuine bug",
-      "bucket": "translator",
-      "diagnosis": "The translator emits equality against the UNDEF VALUES cell instead of treating that cell as an unbound compatible slot."
-    },
-    "bindings/values5": {
-      "label": "genuine bug",
-      "bucket": "translator",
-      "diagnosis": "The translator emits equality constraints for both UNDEF VALUES cells, rejecting every otherwise compatible solution."
-    },
-    "bindings/values7": {
-      "label": "genuine bug",
-      "bucket": "translator",
-      "diagnosis": "The translator compares VALUES to a failed OPTIONAL result instead of allowing VALUES to bind the still-unbound ?o2."
-    },
-    "bindings/values8": {
-      "label": "genuine bug",
-      "bucket": "translator",
-      "diagnosis": "The translator emits equality against each UNDEF VALUES cell, so neither partially bound VALUES row can join."
     },
     "construct/constructwhere04": {
       "label": "genuine bug",

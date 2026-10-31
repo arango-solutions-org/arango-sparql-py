@@ -305,7 +305,13 @@ EXPECTED_LIVE_PASSES: frozenset[str] = frozenset(
         "bindings/values1",
         "bindings/values2",
         "bindings/values3",
+        # An UNDEF VALUES cell, or a variable a failed OPTIONAL left
+        # unbound, joins with any value.
+        "bindings/values4",
+        "bindings/values5",
         "bindings/values6",
+        "bindings/values7",
+        "bindings/values8",
         "entailment/owlds01",
         "entailment/parent2",
         # Blank-node objects remain present in the document profile.
