@@ -17,10 +17,8 @@ from typing import Any
 
 import pytest
 
-from arango_sparql.api import translate
-from arango_sparql.translate.resolver import SchemaResolver
-from tests.cross.test_multi_document_iri_cross import PREFIXES, Store, case_params
-from tests.helpers.oxi import assert_bindings_equal, drop_null_bindings, normalize_oxi_row, oxi_bindings
+from tests.cross.test_multi_document_iri_cross import Store, case_params, oracle_rows, translate_case
+from tests.helpers.oxi import assert_bindings_equal, drop_null_bindings
 from tests.integration.conftest import (
     DEFAULT_ARANGO_DB,
     DEFAULT_ARANGO_PASSWORD,
@@ -34,7 +32,7 @@ from tests.integration.conftest import (
 
 pytestmark = pytest.mark.integration
 
-oxi = pytest.importorskip("pyoxigraph", reason="pyoxigraph is the ground truth for these tests")
+pytest.importorskip("pyoxigraph", reason="pyoxigraph is the ground truth for these tests")
 
 
 @pytest.fixture(scope="module")
@@ -66,17 +64,10 @@ def _load(db: Any, store: Store) -> None:
 def test_arangodb_agrees_with_pyoxigraph(db: Any, store: Store, query: str) -> None:
     _load(db, store)
     try:
-        sparql = "PREFIX : <http://ex.org/>\n" + query
-        result = translate(
-            sparql, resolver=SchemaResolver.from_turtle(store.ontology, **store.resolver_kwargs)
-        )
+        result = translate_case(store, query)
         rows = [drop_null_bindings(r) for r in db.aql.execute(result.aql, bind_vars=result.bind_vars)]
     finally:
         for name in store.docs:
             if db.has_collection(name):
                 db.delete_collection(name)
-    oracle = oxi.Store()
-    oracle.load(
-        (PREFIXES + store.data).encode(), format=oxi.RdfFormat.TRIG if store.trig else oxi.RdfFormat.TURTLE
-    )
-    assert_bindings_equal([normalize_oxi_row(r) for r in oxi_bindings(oracle, sparql)], rows)
+    assert_bindings_equal(oracle_rows(store, query), rows)

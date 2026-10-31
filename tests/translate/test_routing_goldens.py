@@ -172,39 +172,41 @@ _NO_RANGE = """
 @prefix phys: <https://arango.solutions/phys#> .
 :Person a owl:Class ; phys:collectionName "Person" .
 :Agent a owl:Class ; phys:collectionName "Agent" .
-:Fact a owl:Class ; phys:mappingStyle "RPT" ; phys:triplesCollection "Triples" .
 :knows a owl:ObjectProperty ; phys:edgeCollectionName "knows" .
 """
 
 
-def test_without_a_range_the_copies_are_looked_up_in_every_document_collection() -> None:
-    resolver = SchemaResolver.from_turtle(_NO_RANGE, default_collection="Document")
+def test_without_a_range_the_walk_starts_from_the_bound_document_alone() -> None:
+    # Looking for copies in every mapped collection would read collections
+    # the database may not have (ERR 1203; the /sparql route's default
+    # ``Document`` among them), so an edge into another copy is a known
+    # limit there (#105).
+    aql = _aql(_NO_RANGE, "SELECT ?x WHERE { ?y a :Person . ?x :knows ?y }")
+    assert "UNION" not in aql
+    assert "FOR v2, e3 IN INBOUND doc1 @@c2_knows\n" in aql
+
+
+_SCOPED = """
+@prefix : <http://ex.org/> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix phys: <https://arango.solutions/phys#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+:Person a owl:Class ; phys:collectionName "Person" ; phys:tenantField "org" ; phys:tenantEntity "Org" .
+:knows a owl:ObjectProperty ; phys:edgeCollectionName "knows" ; rdfs:range :Person .
+"""
+
+
+def test_each_copy_is_read_as_its_class_in_the_bound_documents_graph() -> None:
+    # A copy is read as a document of the range class would be: its tenant
+    # FILTER, and under a GRAPH scope the bound document's graph (which that
+    # document passed already). Unscoped, the walk returned other tenants'
+    # and other graphs' edges.
+    resolver = SchemaResolver.from_turtle(_SCOPED)
     result = translate(
-        "PREFIX : <http://ex.org/>\nSELECT ?x WHERE { ?y a :Person . ?x :knows ?y }", resolver=resolver
+        "PREFIX : <http://ex.org/>\nSELECT ?x WHERE { GRAPH :g { ?y a :Person . ?x :knows ?y } }",
+        resolver=resolver,
+        tenant_id="t1",
     )
-    looked_up = sorted(v for k, v in result.bind_vars.items() if k.startswith("@c") and v != "knows")
-    # The type pattern's Person, then each document collection (not the triples table).
-    assert looked_up == ["Agent", "Document", "Person", "Person"]
-
-
-def test_document_collections_are_the_document_classes_and_the_default_unless_strict() -> None:
-    assert SchemaResolver.from_turtle(_NO_RANGE, default_collection="Document").document_collections() == (
-        "Agent",
-        "Document",
-        "Person",
-    )
-    strict = SchemaResolver(
-        ontology=SchemaResolver.from_turtle(_NO_RANGE).ontology, strict_subject_resolution=True
-    )
-    assert strict.document_collections() == ("Agent", "Person")
-
-
-def test_listing_the_document_collections_reports_no_advisory_for_unnamed_classes() -> None:
-    # A class without phys:collectionName resolves with a W_SCHEMA advisory;
-    # listing collections must not report it, nor hide it from a later query.
-    ttl = _NO_RANGE + ":Loose a owl:Class .\n"
-    resolver = SchemaResolver.from_turtle(ttl)
-    assert "Loose" in resolver.document_collections()
-    assert resolver.warnings == []
-    resolver.resolve_class("http://ex.org/Loose")
-    assert [w["iri"] for w in resolver.warnings] == ["http://ex.org/Loose"]
+    arm = result.aql.split("FOR doc3 IN @@c2_Person\n", 1)[1].split("RETURN doc3", 1)[0]
+    assert "FILTER doc3._graph == doc1._graph\n" in arm
+    assert "FILTER doc3.org == @" in arm

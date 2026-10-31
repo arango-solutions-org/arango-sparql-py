@@ -1913,7 +1913,9 @@ class AlgebraVisitor:
             # this alias's graph_field and the existing expression.
             self.builder.filter_raw(f"{lhs} == {existing}")
 
-    def _enforce_tenant_scope(self, alias: str, resolved: ResolvedClass) -> None:
+    def _enforce_tenant_scope(
+        self, alias: str, resolved: ResolvedClass, builder: AqlQueryBuilder | None = None
+    ) -> None:
         """Emit the per-entity tenant FILTER for an opened FOR alias.
 
         PRD §6.5.1: every read of a tenant-scoped entity gets a
@@ -1957,7 +1959,7 @@ class AlgebraVisitor:
             )
         if self.state.tenant_bind_placeholder is None:
             self.state.tenant_bind_placeholder = self.builder.bind(self.tenant_id, hint="tenant")
-        self.builder.filter_eq(
+        (builder or self.builder).filter_eq(
             attribute_ref(alias, resolved.tenant_field),
             self.state.tenant_bind_placeholder,
         )
@@ -2494,57 +2496,77 @@ class AlgebraVisitor:
         """The documents carrying the IRI of the document at *alias* that an
         edge can point at, as one alias to walk backwards from (issue #105).
 
-        One IRI can be several documents (an entity of two classes, the W3C
-        loader's copies, one document per named graph), and an edge points
-        at one of them, not necessarily the one bound: walking back from
-        that one alone missed the others' edges, where the forward plan,
-        which joins on the IRI, finds them. The copies are found by an
-        indexed ``_uri`` match in the property's ``rdfs:range`` collections
-        when the range is a document class (trusted as where the object is
-        stored, PRD §6.1), else in every collection the mapping stores
-        documents in. The bound document is kept too when it is in none of
-        those collections, so an edge into it is never lost. The arms are
-        disjoint, so each document, and each edge, is walked once (a plain
-        ``UNION``: ``UNION_DISTINCT`` compares whole documents, LDBC IC8 PG
-        ran 0.06 s → 0.18 s with it).
+        One IRI can be several documents (an entity of two classes, one
+        document per named graph), and an edge points at one of them, not
+        necessarily the one bound: walking back from that one alone missed
+        the others' edges, where the forward plan, which joins on the IRI,
+        finds them. The copies are looked up by an indexed ``_uri`` match in
+        the collections of the property's declared ``rdfs:range`` (trusted
+        as where the object is stored, PRD §6.1), each read as a document of
+        that class would be: its tenant FILTER, and the bound document's
+        named graph whenever a GRAPH scope or the strict default graph
+        applies (the bound document passed that scope already). The bound
+        document is kept too when it is in none of those collections, so an
+        edge into it is never lost; the arms are disjoint, so each document
+        is walked once (a plain ``UNION``: ``UNION_DISTINCT`` compares whole
+        documents, LDBC IC8 PG ran 0.06 s → 0.18 s with it).
+
+        With no declared range (the W3C loader's layout, for one) the walk
+        starts from the bound document alone, as before: looking in every
+        mapped collection would read collections the database may not have
+        (ERR 1203, the ``Document`` default of the ``/sparql`` route among
+        them), so an edge into another copy there is a known limit (#105).
         """
-        collections = self._range_collections(range_iri) or self.resolver.document_collections()
-        if not collections:
+        by_collection = self._range_classes(range_iri)
+        if not by_collection:
             return alias
+        graph_field = self.resolver.graph_field
+        same_graph = bool(self.state.graph_scope) or not self.resolver.default_graph_includes_named
         arms = []
         bound = self.builder.create_child()
         inner = bound.fresh_alias()
         bound.for_inline(inner, f"[{alias}]")
         elsewhere = " || ".join(
-            f"IS_SAME_COLLECTION({bound.bind(c, hint='coll')}, {inner})" for c in collections
+            f"IS_SAME_COLLECTION({bound.bind(c, hint='coll')}, {inner})" for c in by_collection
         )
         bound.filter_raw(f"!({elsewhere})")
         bound.return_scalar(inner)
         arms.append(self.builder.absorb_child(bound))
-        for collection in collections:
+        for collection, classes in by_collection.items():
             child = self.builder.create_child()
             inner = child.fresh_alias()
             child.for_(inner, collection)
             child.filter_raw(subject_matches_value(inner, subject_ref(alias)))
+            if same_graph:
+                child.filter_raw(
+                    f"{attribute_ref(inner, graph_field)} == {attribute_ref(alias, graph_field)}"
+                )
+            for tenant in {(c.tenant_field, c.tenant_entity): c for c in classes}.values():
+                self._enforce_tenant_scope(inner, tenant, builder=child)
             child.return_scalar(inner)
             arms.append(self.builder.absorb_child(child))
         copies = self.builder.fresh_alias()
         self.builder.for_union(copies, arms, scans_documents=True)
         return copies
 
-    def _range_collections(self, range_iri: str | None) -> tuple[str, ...]:
-        """The collections a declared ``rdfs:range`` stores its documents in
-        (a supertype's members'; a sharded class's family); empty when there
-        is no range or it is not stored as documents (RPT)."""
+    def _range_classes(self, range_iri: str | None) -> dict[str, list[ResolvedClass]]:
+        """The document classes of a declared ``rdfs:range`` (a supertype's
+        members), by the collection each is stored in (a sharded class in
+        each member of its family); empty when there is no range or it is
+        not stored as documents (RPT)."""
         if range_iri is None:
-            return ()
+            return {}
         try:
             classes = self._concrete_classes((range_iri,))
         except SchemaResolutionError:
-            return ()
+            return {}
         if not classes or any(c.style == "RPT" for c in classes):
-            return ()
-        return tuple(sorted({name for c in classes for name in (c.shard_family or (c.collection,))}))
+            return {}
+        out: dict[str, list[ResolvedClass]] = {}
+        for c in classes:
+            for name in c.shard_family or (c.collection,):
+                out.setdefault(name, []).append(c)
+        return dict(sorted(out.items()))
 
     def _concrete_classes(self, class_iris: tuple[str, ...] | list[str]) -> list[ResolvedClass]:
         """Resolve *class_iris*, without duplicates: a ``UNION`` supertype

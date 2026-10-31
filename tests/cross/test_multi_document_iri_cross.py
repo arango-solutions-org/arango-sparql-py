@@ -46,6 +46,8 @@ class Store:
     data: str
     trig: bool = False
     resolver_kwargs: dict[str, Any] = field(default_factory=dict)
+    strict: bool = False  # strict_subject_resolution, as the service's mapping sets it
+    tenant_id: str | None = None
 
 
 PG_TWO_CLASSES = Store(
@@ -142,6 +144,97 @@ NAMED_GRAPHS_STRICT = Store(
     resolver_kwargs={"default_graph_includes_named": False},
 )
 
+#: Edges inside named graphs: ``:a :knows :y`` in the default graph, ``:b
+#: :knows :y`` in ``:g``, each edge into that graph's copy of ``:y``.
+_NG_DOCS = {
+    "Person": [
+        {"_id": "Person/y0", "_uri": EX + "y"},
+        {"_id": "Person/yg", "_uri": EX + "y", "_graph": EX + "g"},
+        {"_id": "Person/a0", "_uri": EX + "a"},
+        {"_id": "Person/bg", "_uri": EX + "b", "_graph": EX + "g"},
+    ],
+    "knows": [
+        {"_id": "knows/1", "_from": "Person/a0", "_to": "Person/y0"},
+        {"_id": "knows/2", "_from": "Person/bg", "_to": "Person/yg", "_graph": EX + "g"},
+    ],
+}
+_NG_DATA = ":y a :Person . :a a :Person . :a :knows :y .\n:g { :y a :Person . :b a :Person . :b :knows :y . }"
+_NG_ONTOLOGY = (
+    PREFIXES
+    + """
+:Person a owl:Class ; phys:collectionName "Person" .
+:knows a owl:ObjectProperty ; phys:edgeCollectionName "knows" ; rdfs:domain :Person ; rdfs:range :Person .
+"""
+)
+NG_EDGES = Store(_NG_ONTOLOGY, _NG_DOCS, _NG_DATA, trig=True)
+NG_EDGES_STRICT = Store(
+    _NG_ONTOLOGY, _NG_DOCS, _NG_DATA, trig=True, resolver_kwargs={"default_graph_includes_named": False}
+)
+
+#: The same IRI in two tenants; the oracle holds tenant t1's facts. ``knows``
+#: declares no domain, so nothing else keeps the walk inside the tenant.
+TENANTS = Store(
+    ontology=PREFIXES
+    + """
+:Person a owl:Class ; phys:collectionName "Person" ; phys:tenantField "org" ; phys:tenantEntity "Org" .
+:knows a owl:ObjectProperty ; phys:edgeCollectionName "knows" ; rdfs:range :Person .
+""",
+    docs={
+        "Person": [
+            {"_id": "Person/y1", "_uri": EX + "y", "org": "t1"},
+            {"_id": "Person/y2", "_uri": EX + "y", "org": "t2"},
+            {"_id": "Person/a1", "_uri": EX + "a", "org": "t1"},
+            {"_id": "Person/b2", "_uri": EX + "b", "org": "t2"},
+        ],
+        "knows": [
+            {"_id": "knows/1", "_from": "Person/a1", "_to": "Person/y1"},
+            {"_id": "knows/2", "_from": "Person/b2", "_to": "Person/y2"},
+        ],
+    },
+    data=":y a :Person . :a a :Person . :a :knows :y .",
+    strict=True,
+    tenant_id="t1",
+)
+
+#: A non-strict mapping (the /sparql route's) whose database has no default
+#: ``Document`` collection, and an edge with no declared range: the walk must
+#: not read a collection the query never names (ERR 1203 live).
+NO_DEFAULT_COLLECTION = Store(
+    ontology=PREFIXES
+    + """
+:Person a owl:Class ; phys:collectionName "Person" .
+:Company a owl:Class ; phys:collectionName "Company" .
+:knows a owl:ObjectProperty ; phys:edgeCollectionName "knows" ; rdfs:domain :Person .
+""",
+    docs={
+        "Person": [{"_id": "Person/y", "_uri": EX + "y"}, {"_id": "Person/a", "_uri": EX + "a"}],
+        "knows": [{"_id": "knows/1", "_from": "Person/a", "_to": "Person/y"}],
+    },
+    data=":y a :Person . :a a :Person . :a :knows :y .",
+)
+
+#: The W3C loader's layout with a symmetric property: one ``:y :knows :x``
+#: stored as an edge from each copy of ``:y``; the oracle holds the closure.
+W3C_SYMMETRIC = Store(
+    ontology=PREFIXES
+    + """
+:Agent a owl:Class ; phys:collectionName "t_Agent" .
+:Person a owl:Class ; phys:collectionName "t_Person" .
+:knows a owl:ObjectProperty, owl:SymmetricProperty ; phys:edgeCollectionName "t_knows" .
+""",
+    docs={
+        "t_Document": [{"_id": "t_Document/y", "_uri": EX + "y"}, {"_id": "t_Document/x", "_uri": EX + "x"}],
+        "t_Person": [{"_id": "t_Person/y", "_uri": EX + "y"}],
+        "t_Agent": [{"_id": "t_Agent/x", "_uri": EX + "x"}],
+        "t_knows": [
+            {"_id": "t_knows/0", "_from": "t_Document/y", "_to": "t_Document/x"},
+            {"_id": "t_knows/1", "_from": "t_Person/y", "_to": "t_Document/x"},
+        ],
+    },
+    data=":y a :Person ; :knows :x . :x a :Agent ; :knows :y .",
+    resolver_kwargs={"default_collection": "t_Document"},
+)
+
 _CASES: list[tuple[str, Store, str, str | None]] = [
     # (id, store, query, issue it is wrong under on main — or None)
     ("pg_two_types", PG_TWO_CLASSES, "SELECT ?s WHERE { ?s a :Person . ?s a :Employee }", None),
@@ -184,8 +277,9 @@ _CASES: list[tuple[str, Store, str, str | None]] = [
         "SELECT ?y WHERE { :a :knows ?y FILTER NOT EXISTS { ?y a :Person } }",
         None,
     ),
-    ("w3c_untyped_reverse", W3C_COPIES, "SELECT ?x ?y WHERE { ?y a :Person . ?x :knows ?y }", None),
-    ("w3c_const_reverse", W3C_COPIES, "SELECT ?x WHERE { :b a :Person . ?x :knows :b }", None),
+    # No declared range: the walk starts from the bound copy alone (#105 known limit).
+    ("w3c_untyped_reverse", W3C_COPIES, "SELECT ?x ?y WHERE { ?y a :Person . ?x :knows ?y }", "#105"),
+    ("w3c_const_reverse", W3C_COPIES, "SELECT ?x WHERE { :b a :Person . ?x :knows :b }", "#105"),
     ("pg_const_reverse", PG_TWO_CLASSES, "SELECT ?x WHERE { :s a :Employee . ?x :knows :s }", None),
     ("range_elsewhere_reverse", RANGE_ELSEWHERE, "SELECT ?x WHERE { ?c a :Place . ?x :livesIn ?c }", None),
     ("graph_type", NAMED_GRAPHS, "SELECT ?s WHERE { ?s :name ?n . GRAPH :g { ?s a :Person } }", None),
@@ -225,6 +319,41 @@ _CASES: list[tuple[str, Store, str, str | None]] = [
         "SELECT ?s WHERE { GRAPH :g { ?s :age ?a } ?s a :Person }",
         None,
     ),
+    ("ng_graph_reverse", NG_EDGES, "SELECT ?x WHERE { GRAPH :g { ?y a :Person . ?x :knows ?y } }", None),
+    (
+        "ng_graph_reverse_const",
+        NG_EDGES,
+        "SELECT ?x WHERE { GRAPH :g { :y a :Person . ?x :knows :y } }",
+        None,
+    ),
+    ("ng_strict_reverse", NG_EDGES_STRICT, "SELECT ?x ?y WHERE { ?y a :Person . ?x :knows ?y }", None),
+    (
+        "ng_strict_count",
+        NG_EDGES_STRICT,
+        "SELECT (COUNT(*) AS ?n) WHERE { ?y a :Person . ?x :knows ?y }",
+        None,
+    ),
+    (
+        "ng_strict_optional",
+        NG_EDGES_STRICT,
+        "SELECT ?y ?x WHERE { ?y a :Person OPTIONAL { ?x :knows ?y } }",
+        None,
+    ),
+    (
+        "ng_graph_var_reverse",
+        NG_EDGES,
+        "SELECT ?gg ?x WHERE { GRAPH ?gg { ?y a :Person . ?x :knows ?y } }",
+        "#106",
+    ),
+    ("tenant_reverse", TENANTS, "SELECT ?x ?y WHERE { ?y a :Person . ?x :knows ?y }", None),
+    ("tenant_reverse_const", TENANTS, "SELECT ?x WHERE { :y a :Person . ?x :knows :y }", None),
+    (
+        "no_default_collection_reverse",
+        NO_DEFAULT_COLLECTION,
+        "SELECT ?x ?y WHERE { ?y a :Person . ?x :knows ?y }",
+        None,
+    ),
+    ("w3c_symmetric_reverse", W3C_SYMMETRIC, "SELECT ?x ?y WHERE { ?y a :Person . ?x :knows ?y }", None),
     (
         "graph_var_type",
         NAMED_GRAPHS,
@@ -240,24 +369,41 @@ _CASES: list[tuple[str, Store, str, str | None]] = [
 ]
 
 
-def case_params() -> list[Any]:
+#: Cases the AQL interpreter cannot run (a ``UNION`` inside an OPTIONAL
+#: sub-query); ``tests/integration/test_multi_document_iri_live.py`` runs them.
+_LIVE_ONLY = {"ng_strict_optional"}
+
+
+def case_params(*, interpreter: bool = False) -> list[Any]:
     out = []
     for name, store, query, issue in _CASES:
-        marks = [pytest.mark.xfail(strict=True, reason=f"{issue}: wrong on main")] if issue else []
+        marks: list[Any] = [pytest.mark.xfail(strict=True, reason=f"{issue}: wrong on main")] if issue else []
+        if interpreter and name in _LIVE_ONLY:
+            marks = [pytest.mark.skip(reason="the AQL interpreter cannot run it; checked live")]
         out.append(pytest.param(store, query, id=name, marks=marks))
     return out
 
 
-@pytest.mark.parametrize("store, query", case_params())
-def test_the_translation_agrees_with_pyoxigraph(store: Store, query: str) -> None:
-    sparql = "PREFIX : <http://ex.org/>\n" + query
-    resolver = SchemaResolver.from_turtle(store.ontology, **store.resolver_kwargs)
-    result = translate(sparql, resolver=resolver)
-    rows = [drop_null_bindings(r) for r in run_aql_subset(result.aql, result.bind_vars, store.docs)]
+def translate_case(store: Store, query: str) -> Any:
+    """The case's translation (shared with the live test)."""
+    ontology = SchemaResolver.from_turtle(store.ontology).ontology
+    resolver = SchemaResolver(
+        ontology=ontology, strict_subject_resolution=store.strict, **store.resolver_kwargs
+    )
+    return translate("PREFIX : <http://ex.org/>\n" + query, resolver=resolver, tenant_id=store.tenant_id)
 
+
+def oracle_rows(store: Store, query: str) -> list[dict[str, Any]]:
+    """pyoxigraph's answer on the case's facts (shared with the live test)."""
     oracle = oxi.Store()
     oracle.load(
         (PREFIXES + store.data).encode(), format=oxi.RdfFormat.TRIG if store.trig else oxi.RdfFormat.TURTLE
     )
-    expected = [normalize_oxi_row(r) for r in oxi_bindings(oracle, sparql)]
-    assert_bindings_equal(expected, rows)
+    return [normalize_oxi_row(r) for r in oxi_bindings(oracle, "PREFIX : <http://ex.org/>\n" + query)]
+
+
+@pytest.mark.parametrize("store, query", case_params(interpreter=True))
+def test_the_translation_agrees_with_pyoxigraph(store: Store, query: str) -> None:
+    result = translate_case(store, query)
+    rows = [drop_null_bindings(r) for r in run_aql_subset(result.aql, result.bind_vars, store.docs)]
+    assert_bindings_equal(oracle_rows(store, query), rows)

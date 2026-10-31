@@ -372,8 +372,6 @@ class SchemaResolver:
     _triple_store_class: ResolvedClass | None = field(default=None)
     """Cached result of :meth:`triple_store_class`."""
     _triple_store_checked: bool = field(default=False)
-    _document_collections: tuple[str, ...] | None = field(default=None)
-    """Cached result of :meth:`document_collections`."""
     _nested_properties: tuple[str, ...] | None = field(default=None)
     """Lazily-built IRIs of datatype properties stored in a nested object."""
     _shard_family_by_collection: dict[str, tuple[str, ...]] = field(default_factory=dict)
@@ -928,48 +926,6 @@ class SchemaResolver:
             return None
         self._triple_store_class = replace(resolved[0], iri=TRIPLE_STORE_IRI)
         return self._triple_store_class
-
-    def document_collections(self) -> tuple[str, ...]:
-        """Every collection the mapping stores entity documents in.
-
-        The collections of each ``owl:Class`` stored as documents (PG, LPG;
-        a sharded class's whole family), plus the default collection unless
-        ``strict_subject_resolution`` (which never reads it). Triple-store
-        (RPT) and ``UNION`` classes hold no documents of their own.
-
-        One IRI can be a document in several of them (an entity of two
-        classes, the W3C loader's copies): a backward walk from an object
-        whose edge declares no ``rdfs:range`` looks for the object's copies
-        in all of them (issue #105).
-        """
-        if self._document_collections is not None:
-            return self._document_collections
-        collections: set[str] = set()
-        # Resolving every class must not report schema advisories about
-        # classes the query never names, nor cache them so that a class the
-        # query does name later skips its advisory: restore all three.
-        warnings, warned, cache = list(self.warnings), set(self._warned_keys), dict(self._class_cache)
-        try:
-            for cls in self.ontology.subjects(RDF.type, OWL.Class):
-                if not isinstance(cls, URIRef):
-                    continue
-                try:
-                    resolved = self.resolve_class(cls)
-                except SchemaResolutionError:
-                    continue  # not readable as documents (refused when a query names it)
-                if resolved.style in ("RPT", "UNION") or not resolved.collection:
-                    continue
-                collections.update(resolved.shard_family or (resolved.collection,))
-        finally:
-            self.warnings[:] = warnings
-            self._warned_keys.clear()
-            self._warned_keys.update(warned)
-            self._class_cache.clear()
-            self._class_cache.update(cache)
-        if not self.strict_subject_resolution and self.default_collection:
-            collections.add(self.default_collection)
-        self._document_collections = tuple(sorted(collections))
-        return self._document_collections
 
     def edge_properties(self) -> tuple[ResolvedProperty, ...]:
         """Return edge-backed object properties in deterministic IRI order.
