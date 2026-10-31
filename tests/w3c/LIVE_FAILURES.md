@@ -4,10 +4,10 @@
 
 ## Baseline
 
-- Commit: `e94776922f7f02bced97da6e706caef5d0d53811`
+- Commit: `2a0e62ab579167ce0ca016697039a1f52aee2fd2`
 - Storage profile: `document_edge`
-- Passing: `131/191`
-- Xfailed: `60`
+- Passing: `135/191`
+- Xfailed: `56`
 
 ## Label summary
 
@@ -16,9 +16,9 @@
 | needs inference | 18 |
 | language tags lost | 9 |
 | text stored the wrong way | 2 |
-| genuine bug | 31 |
+| genuine bug | 27 |
 | genuine bug (harness) | 11 |
-| genuine bug (translator) | 20 |
+| genuine bug (translator) | 16 |
 
 ## Classified failures
 
@@ -26,10 +26,6 @@
 | ------- | ----- | --------- |
 | `bind/bind07` | genuine bug (translator) | The translator evaluates UNION inside the outer FOR, so each inner BIND incorrectly sees outer ?o and binds ?z. |
 | `bind/bind10` | genuine bug (translator) | The translator exposes the outer BIND value ?z inside the nested group FILTER even though ?z is not in scope there. |
-| `bindings/values4` | genuine bug (translator) | The translator emits equality against the UNDEF VALUES cell instead of treating that cell as an unbound compatible slot. |
-| `bindings/values5` | genuine bug (translator) | The translator emits equality constraints for both UNDEF VALUES cells, rejecting every otherwise compatible solution. |
-| `bindings/values7` | genuine bug (translator) | The translator compares VALUES to a failed OPTIONAL result instead of allowing VALUES to bind the still-unbound ?o2. |
-| `bindings/values8` | genuine bug (translator) | The translator emits equality against each UNDEF VALUES cell, so neither partially bound VALUES row can join. |
 | `construct/constructwhere04` | genuine bug (harness) | The live harness does not load the query-level FROM <data.ttl> dataset, so the CONSTRUCT runs over an empty collection. |
 | `entailment/lang` | language tags lost | The loader flattens the explicit language-tagged literal, so the query cannot match its @en language tag. |
 | `entailment/paper-sparqldl-Q1` | needs inference | The expected ConferencePaper binding follows from the declared OWL restriction rather than an explicit matching triple. |
