@@ -118,6 +118,32 @@ def test_a_seed_row_with_undef_matches_any_value(store: Any, resolver: SchemaRes
     assert sorted(row["p"] for row in actual) == ["http://ex.org/alice", "http://ex.org/carol"]
 
 
+def test_seeds_on_two_variables_keep_only_matching_pairs(store: Any, resolver: SchemaResolver) -> None:
+    # Distinct seeds on two bound variables: a semi-join on the pair.
+    partition = "PREFIX : <http://ex.org/> SELECT ?p ?dept WHERE { ?p a :Person ; :dept ?dept }"
+    seeds = [
+        {"p": {"type": "uri", "value": "http://ex.org/alice"}, "dept": "eng"},
+        {"p": {"type": "uri", "value": "http://ex.org/carol"}, "dept": "eng"},
+    ]
+    result = translate_partition(partition, resolver=resolver, canonical_keys=["p"], seed_bindings=seeds)
+    assert "] IN values" in result.aql
+    actual = run_aql_subset(result.aql, result.bind_vars, ARANGO_DOCS)
+    expected = [normalize_oxi_row(row) for row in oxi_bindings(store, result.provenance.query_text)]
+    assert_bindings_equal(actual, expected)
+    assert [row["p"] for row in actual] == ["http://ex.org/alice"]
+
+
+def test_a_repeated_seed_row_repeats_its_solutions(store: Any, resolver: SchemaResolver) -> None:
+    # VALUES is a bag: a row given twice joins twice.
+    partition = "PREFIX : <http://ex.org/> SELECT ?name WHERE { ?p a :Person ; :name ?name }"
+    seeds = [{"p": {"type": "uri", "value": "http://ex.org/alice"}}] * 2
+    result = translate_partition(partition, resolver=resolver, canonical_keys=["p"], seed_bindings=seeds)
+    actual = run_aql_subset(result.aql, result.bind_vars, ARANGO_DOCS)
+    expected = [normalize_oxi_row(row) for row in oxi_bindings(store, result.provenance.query_text)]
+    assert_bindings_equal([{"name": row["name"]} for row in actual], expected)
+    assert len(actual) == 2
+
+
 def test_two_leg_federation_equals_whole_query(store: Any, resolver: SchemaResolver) -> None:
     # Leg 1 — "which people are in eng?" — returns canonical keys.
     leg1 = translate_partition(
@@ -155,7 +181,4 @@ def test_two_leg_federation_equals_whole_query(store: Any, resolver: SchemaResol
     # Sanity: the pushdown actually constrained leg 2 — Carol's (ops)
     # projects would be absent even if she had any, and the seed rows
     # travelled as bind data, not inline text.
-    assert leg2.bind_vars["_p1_values"] == [
-        {"p": "http://ex.org/alice"},
-        {"p": "http://ex.org/bob"},
-    ]
+    assert leg2.bind_vars["_p1_values"] == ["http://ex.org/alice", "http://ex.org/bob"]

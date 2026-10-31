@@ -290,6 +290,10 @@ _AQL_BUILTINS: dict[str, Any] = {
     "IS_SAME_COLLECTION": lambda name, doc: (
         (doc.get("_id") if isinstance(doc, dict) else doc or "").split("/", 1)[0] == name
     ),
+    # ``NOOPT(value)`` returns its argument; it only stops the optimizer
+    # folding the expression into a constant. A VALUES semi-join keeps its
+    # ``IN`` list a variable that way (``LET values3 = NOOPT(@_p1_values)``).
+    "NOOPT": lambda v: v,
     "LOWER": lambda v: None if v is None else str(v).lower(),
     "UPPER": lambda v: None if v is None else str(v).upper(),
     "LENGTH": lambda v: None if v is None else len(v),

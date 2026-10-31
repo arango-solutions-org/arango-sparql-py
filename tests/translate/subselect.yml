@@ -7,7 +7,9 @@
 # inner-scope variables become ``<row>.<var>`` in the outer
 # ``var_to_expr`` map, and any shared variable that's already bound
 # by an outer pattern receives an equality FILTER to enforce the
-# SPARQL join.
+# SPARQL join. A VALUES block whose distinct, fully bound rows only
+# test variables the pattern binds is a semi-join instead: an ``IN``
+# against the rows, held in a LET before every FOR.
 #
 # All cases run against an empty resolver
 # (``SchemaResolver.from_turtle("", default_collection="Document")``)
@@ -204,10 +206,11 @@ cases:
   # ---- VALUES (inline binding data) ---------------------------------
 
   - name: values_single_var
-    # ``VALUES ?s { :alice :bob }`` — one variable, two rows.
-    # The visitor binds the rows as a Python list-of-dicts, FORs
-    # over the bind, and joins ``row2.s == doc1._uri`` to enforce
-    # the shared-variable semantics with the outer triple.
+    # ``VALUES ?s { :alice :bob }`` — one variable, two distinct rows,
+    # on a variable the outer triple already binds: a semi-join. The
+    # keys are bound as a list, held in a LET before every FOR (so
+    # ArangoDB sorts it once and binary-searches it), and the subject
+    # is tested with ``IN``.
     sparql: |
       PREFIX : <http://ex.org/>
       SELECT ?s ?n WHERE {
@@ -215,23 +218,23 @@ cases:
         VALUES ?s { :alice :bob }
       }
     expected_aql: |-
+      LET values2 = NOOPT(@_p1_values)
       FOR doc1 IN @@c1_Document
       FILTER HAS(doc1, "name")
-      FOR row2 IN @_p1_values
-      FILTER row2.s == NOT_NULL(doc1._uri, doc1._id)
+      FILTER NOT_NULL(doc1._uri, doc1._id) IN values2
       RETURN { s: NOT_NULL(doc1._uri, doc1._id), n: doc1.name }
     expected_bind_vars:
       "@c1_Document": "Document"
       "_p1_values":
-        - s: "http://ex.org/alice"
-        - s: "http://ex.org/bob"
+        - "http://ex.org/alice"
+        - "http://ex.org/bob"
 
   - name: values_multi_var
     # ``VALUES (?s ?n) { (:alice "Alice") (:bob "Bob") }`` —
-    # two variables × two rows. Both ?s and ?n appear in the
-    # outer triple, so two FILTERs fire to enforce the SPARQL
-    # join. Variable iteration order is sorted by name (n
-    # before s) for PYTHONHASHSEED stability.
+    # two variables × two distinct rows, both bound by the outer
+    # triple: a semi-join on the tuple. Each row is bound as a list
+    # in variable order, sorted by name (n before s) for
+    # PYTHONHASHSEED stability.
     sparql: |
       PREFIX : <http://ex.org/>
       SELECT ?s ?n WHERE {
@@ -239,19 +242,37 @@ cases:
         VALUES (?s ?n) { (:alice "Alice") (:bob "Bob") }
       }
     expected_aql: |-
+      LET values2 = NOOPT(@_p1_values)
+      FOR doc1 IN @@c1_Document
+      FILTER HAS(doc1, "name")
+      FILTER [doc1.name, NOT_NULL(doc1._uri, doc1._id)] IN values2
+      RETURN { s: NOT_NULL(doc1._uri, doc1._id), n: doc1.name }
+    expected_bind_vars:
+      "@c1_Document": "Document"
+      "_p1_values":
+        - ["Alice", "http://ex.org/alice"]
+        - ["Bob", "http://ex.org/bob"]
+
+  - name: values_repeated_row_keeps_the_loop
+    # A repeated VALUES row repeats every solution it joins (bag
+    # semantics), which an ``IN`` test would collapse, so the rows
+    # are joined in a loop as before.
+    sparql: |
+      PREFIX : <http://ex.org/>
+      SELECT ?s ?n WHERE {
+        ?s :name ?n .
+      } VALUES ?n { "Alice" "Alice" }
+    expected_aql: |-
       FOR doc1 IN @@c1_Document
       FILTER HAS(doc1, "name")
       FOR row2 IN @_p1_values
       FILTER row2.n == doc1.name
-      FILTER row2.s == NOT_NULL(doc1._uri, doc1._id)
       RETURN { s: NOT_NULL(doc1._uri, doc1._id), n: doc1.name }
     expected_bind_vars:
       "@c1_Document": "Document"
       "_p1_values":
         - n: "Alice"
-          s: "http://ex.org/alice"
-        - n: "Bob"
-          s: "http://ex.org/bob"
+        - n: "Alice"
 
   - name: values_with_undef
     # ``VALUES (?s ?n) { (:alice "Alice") (:bob UNDEF) }`` —
