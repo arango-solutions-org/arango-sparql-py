@@ -152,6 +152,17 @@ Reference repositories examined (via the GitHub API, 2026-10-23):
      and the reference `interactive-update-*.rq` templates exist — which is
      follow-up work package WP-LDBC-REPLAY. **Until then pyoxigraph is the
      only oracle**, and the `oracle_disagrees` state is unused.
+   - **Replay, increment 1 (2026-10-30).** `python -m tests.ldbc.replay`
+     applies each insert to a copy of the normalised oracle store, in file
+     order, and checks the first *N* reads of each short read at their
+     point in the stream. The inserts are written to match the Turtle model,
+     not taken from the reference `interactive-update-*.rq` templates (those
+     reuse an existing `studyAt` / `workAt` node). At SF0.1, 50 each of IS1–IS5
+     and IS7 agree with LDBC (300/300): the short reads' SPARQL text and the
+     normalisation are right. IS6 is left out by default: pyoxigraph does
+     not answer it within 10 minutes and has no query timeout. Complex reads
+     and replaying the inserts on the ArangoDB layouts are the next
+     increments.
 
 The two oracles separate the failure classes cleanly (once both exist):
 
@@ -423,6 +434,7 @@ tests/ldbc/
   test_ldbc_ratchet.py     # default suite: translation tier, no DB, < 5 s
   test_ldbc_execution.py   # integration: execute on ArangoDB + compare to pyoxigraph
   test_ldbc_validation.py  # integration: pyoxigraph vs LDBC validation parameters
+  replay.py                # LDBC's update stream on the oracle, short reads vs LDBC (WP-LDBC-REPLAY)
   bench.py                 # perf runner: python -m tests.ldbc.bench --sf 0.1 --layout rpt,lpg,pg
   report.py                # results JSON → docs/ldbc_results.md (with disclaimer)
 tests/ldbc/mappings/
