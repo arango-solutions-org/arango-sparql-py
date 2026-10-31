@@ -359,6 +359,19 @@ What it found, beyond §3.1, §3.2 and §3.4:
   collection), so `sparqldl-07/08/09` returned their answer twice. The
   vertex is now kept to the collections the forward plan reads, with the
   tenant filter the forward plan's class would have.
+- **IC10 and IC4: a walk into the subject's class (2026-10-31).**
+  `?post :hasCreator ?foaf ; a :Post` with `?foaf` a document scanned every
+  post per friend (IC10 timed out on every layout). The edge is now walked
+  backwards from `?foaf` first, and the walk applies the type pattern's
+  tests to the vertex it reaches (PRD §6.1, "Join order"). IC10 matches the
+  oracle on PG (0.3–3.5 s) and LPG (1.7–12 s); IC4 went from 5–13 s to
+  0.01 s on both. A first attempt (#101) tested the already-bound document
+  in place of a class scan and gave silent wrong answers where one IRI is
+  several documents; it was reverted (#103). The redo landed in three
+  steps: index-friendly IRI joins (#108), backward walks from every copy of
+  the object in its range, scoped by graph and tenant (#109, part of #105),
+  then this ordering, each checked against pyoxigraph on multi-document
+  stores and on ArangoDB. IC10 on RPT still times out.
 - **The benchmark runner crashed on the first EXPLAIN error** and looked
   up pyoxigraph times under the wrong cache key; both fixed (`a17b0a8`).
 

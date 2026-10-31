@@ -235,6 +235,66 @@ W3C_SYMMETRIC = Store(
     resolver_kwargs={"default_collection": "t_Document"},
 )
 
+#: ``likes`` (range Person, no domain) from a Person and from a Robot: a walk
+#: into ``?x a :Person`` keeps only the Person's edge, as the class scan does.
+CLASS_FILTER = Store(
+    ontology=PREFIXES
+    + """
+:Person a owl:Class ; phys:collectionName "Person" .
+:Robot a owl:Class ; phys:collectionName "Robot" .
+:likes a owl:ObjectProperty ; phys:edgeCollectionName "likes" ; rdfs:range :Person .
+""",
+    docs={
+        "Person": [{"_id": "Person/y", "_uri": EX + "y"}, {"_id": "Person/a", "_uri": EX + "a"}],
+        "Robot": [{"_id": "Robot/r", "_uri": EX + "r"}],
+        "likes": [
+            {"_id": "likes/1", "_from": "Person/a", "_to": "Person/y"},
+            {"_id": "likes/2", "_from": "Robot/r", "_to": "Person/y"},
+        ],
+    },
+    data=":y a :Person . :a a :Person ; :likes :y . :r a :Robot ; :likes :y .",
+)
+
+#: TENANTS plus an edge from tenant t2's ``:b`` into tenant t1's ``:y``: a
+#: walk into ``?x a :Person`` applies the tenant FILTER to ``?x`` as the
+#: class scan does.
+TENANTS_CROSS_EDGE = Store(
+    TENANTS.ontology,
+    {
+        **TENANTS.docs,
+        "knows": [*TENANTS.docs["knows"], {"_id": "knows/3", "_from": "Person/b2", "_to": "Person/y1"}],
+    },
+    TENANTS.data,
+    strict=True,
+    tenant_id="t1",
+)
+
+#: LPG: one collection, classes as labels. ``:c`` is a Person and an Employee.
+LPG_LABELS = Store(
+    ontology=PREFIXES
+    + """
+:Person a owl:Class ; phys:collectionName "nodes" ; phys:mappingStyle "LABEL" ;
+    phys:typeField "labels" ; phys:typeFieldIsArray "true" ; phys:typeValue "Person" .
+:Employee a owl:Class ; phys:collectionName "nodes" ; phys:mappingStyle "LABEL" ;
+    phys:typeField "labels" ; phys:typeFieldIsArray "true" ; phys:typeValue "Employee" .
+:knows a owl:ObjectProperty ; phys:edgeCollectionName "edges" ; phys:mappingStyle "GENERIC_WITH_TYPE" ;
+    phys:typeField "type" ; phys:typeValue "KNOWS" ; rdfs:domain :Person ; rdfs:range :Person .
+""",
+    docs={
+        "nodes": [
+            {"_id": "nodes/y", "_uri": EX + "y", "labels": ["Person"]},
+            {"_id": "nodes/a", "_uri": EX + "a", "labels": ["Person"]},
+            {"_id": "nodes/c", "_uri": EX + "c", "labels": ["Person", "Employee"]},
+        ],
+        "edges": [
+            {"_id": "edges/1", "_from": "nodes/a", "_to": "nodes/y", "type": "KNOWS"},
+            {"_id": "edges/2", "_from": "nodes/c", "_to": "nodes/y", "type": "KNOWS"},
+            {"_id": "edges/3", "_from": "nodes/y", "_to": "nodes/a", "type": "LIKES"},
+        ],
+    },
+    data=":y a :Person . :a a :Person ; :knows :y . :c a :Person, :Employee ; :knows :y .",
+)
+
 _CASES: list[tuple[str, Store, str, str | None]] = [
     # (id, store, query, issue it is wrong under on main — or None)
     ("pg_two_types", PG_TWO_CLASSES, "SELECT ?s WHERE { ?s a :Person . ?s a :Employee }", None),
@@ -353,6 +413,74 @@ _CASES: list[tuple[str, Store, str, str | None]] = [
         "SELECT ?x ?y WHERE { ?y a :Person . ?x :knows ?y }",
         None,
     ),
+    # A walk into the subject's class (the subject has one type pattern): the
+    # walk applies that pattern's tests to the vertex it reaches.
+    (
+        "pg_class_walk_other_copy",
+        PG_TWO_CLASSES,
+        "SELECT ?x ?s WHERE { { ?s a :Employee } { ?x :knows ?s . ?x a :Person } }",
+        None,
+    ),
+    (
+        "range_elsewhere_class_walk",
+        RANGE_ELSEWHERE,
+        "SELECT ?x WHERE { { ?c a :Place } { ?x :livesIn ?c . ?x a :Person } }",
+        None,
+    ),
+    (
+        "ng_graph_class_walk",
+        NG_EDGES,
+        "SELECT ?x WHERE { GRAPH :g { { ?y a :Person } { ?x :knows ?y . ?x a :Person } } }",
+        None,
+    ),
+    (
+        "ng_strict_class_walk",
+        NG_EDGES_STRICT,
+        "SELECT ?x ?y WHERE { { ?y a :Person } { ?x :knows ?y . ?x a :Person } }",
+        None,
+    ),
+    (
+        "ng_strict_optional_class_walk",
+        NG_EDGES_STRICT,
+        "SELECT ?y ?x WHERE { ?y a :Person OPTIONAL { ?x :knows ?y . ?x a :Person } }",
+        None,
+    ),
+    (
+        "class_walk_keeps_the_class",
+        CLASS_FILTER,
+        "SELECT ?x WHERE { { ?y a :Person } { ?x :likes ?y . ?x a :Person } }",
+        None,
+    ),
+    (
+        "tenant_cross_edge_reverse",
+        TENANTS_CROSS_EDGE,
+        "SELECT ?x ?y WHERE { ?y a :Person . ?x :knows ?y }",
+        "#113",
+    ),
+    (
+        "tenant_cross_edge_class_walk",
+        TENANTS_CROSS_EDGE,
+        "SELECT ?x ?y WHERE { { ?y a :Person } { ?x :knows ?y . ?x a :Person } }",
+        None,
+    ),
+    (
+        "tenant_class_walk",
+        TENANTS,
+        "SELECT ?x ?y WHERE { { ?y a :Person } { ?x :knows ?y . ?x a :Person } }",
+        None,
+    ),
+    (
+        "lpg_class_walk",
+        LPG_LABELS,
+        "SELECT ?x WHERE { { ?y a :Person } { ?x :knows ?y . ?x a :Employee } }",
+        None,
+    ),
+    (
+        "lpg_class_walk_const",
+        LPG_LABELS,
+        "SELECT ?x WHERE { :y a :Person . ?x :knows :y . ?x a :Person }",
+        None,
+    ),
     ("w3c_symmetric_reverse", W3C_SYMMETRIC, "SELECT ?x ?y WHERE { ?y a :Person . ?x :knows ?y }", None),
     (
         "graph_var_type",
@@ -371,7 +499,7 @@ _CASES: list[tuple[str, Store, str, str | None]] = [
 
 #: Cases the AQL interpreter cannot run (a ``UNION`` inside an OPTIONAL
 #: sub-query); ``tests/integration/test_multi_document_iri_live.py`` runs them.
-_LIVE_ONLY = {"ng_strict_optional"}
+_LIVE_ONLY = {"ng_strict_optional", "ng_strict_optional_class_walk"}
 
 
 def case_params(*, interpreter: bool = False) -> list[Any]:
@@ -407,3 +535,14 @@ def test_the_translation_agrees_with_pyoxigraph(store: Store, query: str) -> Non
     result = translate_case(store, query)
     rows = [drop_null_bindings(r) for r in run_aql_subset(result.aql, result.bind_vars, store.docs)]
     assert_bindings_equal(oracle_rows(store, query), rows)
+
+
+@pytest.mark.parametrize(
+    "store, query", [pytest.param(st, q, id=n) for n, st, q, _i in _CASES if "class_walk" in n]
+)
+def test_the_class_walk_cases_walk_into_the_class(store: Store, query: str) -> None:
+    # Guard: these cases check the walk that applies a type pattern's tests
+    # to the vertex it reaches; if the join order stopped choosing it they
+    # would pass on the forward plan and check nothing.
+    aql = translate_case(store, query).aql
+    assert " IN INBOUND " in aql or " IN ANY " in aql

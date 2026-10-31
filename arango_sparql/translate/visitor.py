@@ -15,6 +15,7 @@ from __future__ import annotations
 import datetime
 import decimal
 import logging
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -1549,8 +1550,28 @@ class AlgebraVisitor:
                 entries.setdefault(str(o), set()).add(str(p))
         exits = {str(p) for _s, p, _o in triples if isinstance(p, URIRef) and self.resolver.is_edge_exit(p)}
         outer_entries, self.state.bgp_entries = self.state.bgp_entries, entries
+        # A subject's type patterns, for a walk into its class (rank 2).
+        types: dict[str, list[tuple[Any, Any, Any]]] = {}
+        for t in triples:
+            if isinstance(t[0], Variable) and t[1] == RDF.type and isinstance(t[2], URIRef):
+                types.setdefault(str(t[0]), []).append(t)
+        absorbed: list[tuple[Any, Any, Any]] = []
         try:
-            for triple in _order_bgp(triples, bound, set(entries), exits):
+            for triple in _iter_bgp_order(
+                triples,
+                bound,
+                set(entries),
+                exits,
+                lambda t: self._class_walk(t, types, absorbed) is not None,
+            ):
+                if triple in absorbed:
+                    absorbed.remove(triple)  # its walk applied it
+                    continue
+                type_triple = self._class_walk(triple, types, absorbed)
+                if type_triple is not None:
+                    self._walk_back_into_class(triple, type_triple)
+                    absorbed.append(type_triple)
+                    continue
                 self._emit_triple(triple)
         finally:
             self.state.bgp_entries = outer_entries
@@ -2549,6 +2570,109 @@ class AlgebraVisitor:
         self.builder.for_union(copies, arms, scans_documents=True)
         return copies
 
+    def _class_walk(
+        self,
+        triple: tuple[Any, Any, Any],
+        types: dict[str, list[tuple[Any, Any, Any]]],
+        absorbed: list[tuple[Any, Any, Any]],
+    ) -> tuple[Any, Any, Any] | None:
+        """The type pattern a backward walk over *triple* can apply, or ``None``.
+
+        ``?s :p ?o`` qualifies when ``?s`` is not bound yet, ``?o`` is a
+        document (a variable bound to one, or a constant already read), ``:p``
+        is a plain edge with a declared ``rdfs:range`` of document classes
+        (where the object's copies are looked for, :meth:`_every_copy`), and
+        *types* holds exactly one type pattern for ``?s`` that no walk has
+        applied yet, of a class stored as documents in one collection (not
+        RPT, not a supertype, not sharded). Without the walk, that type
+        pattern would scan its class and walk ``:p`` forwards from every
+        document of it (:meth:`_walk_back_into_class`).
+        """
+        s, p, o = triple
+        if not isinstance(s, Variable) or not isinstance(p, URIRef) or p == RDF.type:
+            return None
+        name = str(s)
+        if (
+            name in self.state.var_to_doc_alias
+            or name in self.state.var_to_expr
+            or name in self.state.bgp_entries
+        ):
+            return None
+        pending = [t for t in types.get(name, []) if t not in absorbed]
+        if len(types.get(name, [])) != 1 or len(pending) != 1:
+            return None
+        if isinstance(o, Variable):
+            if str(o) not in self.state.var_to_doc_alias:
+                return None
+        elif not (isinstance(o, URIRef) and str(o) in self.state.const_subject_alias):
+            return None
+        try:
+            prop = self.resolver.resolve_property(p)
+            resolved = self.resolver.resolve_class(pending[0][2])
+        except SchemaResolutionError:
+            return None
+        if (
+            not prop.edge_collection
+            or prop.reified_edge
+            or prop.mapping_style == "RPT_EDGE"
+            or self.resolver.is_edge_exit(p)
+            or resolved.style in ("RPT", "UNION")
+            or resolved.shard_family is not None
+            or not self._range_classes(prop.range_iri)
+        ):
+            return None
+        return pending[0]
+
+    def _walk_back_into_class(self, triple: tuple[Any, Any, Any], type_triple: tuple[Any, Any, Any]) -> None:
+        """``?s :p ?o . ?s a :C`` with ``?o`` a document: walk ``:p`` backwards
+        from ``?o`` and keep the vertices in ``:C``, instead of scanning ``:C``
+        and walking ``:p`` forwards from each of its documents.
+
+        The walk keeps exactly the vertices the type pattern's scan would
+        read — its collection, label, named-graph scope and tenant — so the
+        vertex is the class's document itself, never a copy tested in its
+        place (PR #101's mistake, reverted in #103). It starts from every
+        document carrying ``?o``'s IRI in ``:p``'s range, and from ``?o``'s
+        own document (:meth:`_every_copy`), where the forward walk compared
+        the IRI of whatever it reached: the same (document, edge) pairs,
+        unless an edge points at a copy of ``?o`` that is neither of those —
+        stored outside the declared range, which is trusted as for any
+        backward walk (PRD §6.1).
+        """
+        s, p, o = triple
+        prop = self.resolver.resolve_property(p)
+        resolved = self.resolver.resolve_class(type_triple[2])
+        assert prop.edge_collection is not None  # _class_walk checked it
+        target = (
+            self.state.var_to_doc_alias[str(o)]
+            if isinstance(o, Variable)
+            else self.state.const_subject_alias[str(o)]
+        )
+        source = self._every_copy(target, prop.range_iri)
+        v_alias = self.builder.fresh_alias(prefix="v")
+        e_alias = self.builder.fresh_alias(prefix="e")
+        self.builder.for_traversal(
+            v_alias, e_alias, source, prop.edge_collection, direction="ANY" if prop.symmetric else "INBOUND"
+        )
+        self._filter_edge_type(prop, e_alias)
+        # What the type pattern's scan applies (:meth:`_open_collection`,
+        # then Case 1 of :meth:`_emit_triple`), applied to the vertex.
+        self._apply_graph_scope(v_alias)
+        self.builder.filter_raw(
+            f"IS_SAME_COLLECTION({self.builder.bind(resolved.collection, hint='coll')}, {v_alias})"
+        )
+        if resolved.type_field and resolved.type_value:
+            bind = self.builder.bind(
+                resolved.type_value,
+                hint=resolved.type_field if is_aql_identifier(resolved.type_field) else None,
+            )
+            self.builder.filter_raw(
+                type_predicate(v_alias, resolved.type_field, bind, is_array=resolved.type_field_is_array)
+            )
+        self._enforce_tenant_scope(v_alias, resolved)
+        self.state.doc_to_collection[v_alias] = resolved.collection
+        self._bind_subject(s, v_alias)
+
     def _range_classes(self, range_iri: str | None) -> dict[str, list[ResolvedClass]]:
         """The document classes of a declared ``rdfs:range`` (a supertype's
         members), by the collection each is stored in (a sharded class in
@@ -3221,7 +3345,11 @@ def _term_known(term: Any, bound: set[str]) -> bool:
 
 
 def _join_rank(
-    triple: tuple[Any, Any, Any], bound: set[str], relationship_nodes: set[str], exits: set[str]
+    triple: tuple[Any, Any, Any],
+    bound: set[str],
+    relationship_nodes: set[str],
+    exits: set[str],
+    walks: bool = False,
 ) -> int:
     """Lower = emit earlier. See :func:`_order_bgp`."""
     s, p, o = triple
@@ -3229,14 +3357,16 @@ def _join_rank(
     subject_known = _term_known(s, bound)
     if not subject_known and isinstance(s, Variable) and str(s) in relationship_nodes:
         # An exit with a known object walks its relationship backwards.
-        return 3 if str(p) in exits and _term_known(o, bound) else 5
+        return 4 if str(p) in exits and _term_known(o, bound) else 6
     if is_type:
-        return 0 if subject_known else 2
+        return 0 if subject_known else 3
     if subject_known:
         return 1
+    if walks:
+        return 2
     if _term_known(o, bound):
-        return 3
-    return 4
+        return 4
+    return 5
 
 
 def _order_bgp(
@@ -3245,6 +3375,17 @@ def _order_bgp(
     relationship_nodes: set[str] | None = None,
     exits: set[str] | None = None,
 ) -> list[tuple[Any, Any, Any]]:
+    """:func:`_iter_bgp_order` with no walks into a class, as a list."""
+    return list(_iter_bgp_order(triples, bound, relationship_nodes, exits))
+
+
+def _iter_bgp_order(
+    triples: list[tuple[Any, Any, Any]],
+    bound: set[str],
+    relationship_nodes: set[str] | None = None,
+    exits: set[str] | None = None,
+    walks: Callable[[tuple[Any, Any, Any]], bool] | None = None,
+) -> Iterator[tuple[Any, Any, Any]]:
     """Greedy, binding-aware order for a BGP's triples.
 
     Each step takes the lowest-ranked remaining triple, then counts its
@@ -3255,15 +3396,21 @@ def _order_bgp(
          outer pattern, or the object of a triple already emitted — so the
          nested FOR is an index lookup, and chains (person → city → id)
          follow themselves;
-      2. a type pattern on an unknown subject — it anchors the subject to its
+      2. an edge walked backwards into its subject's class (*walks*, asked
+         again before each choice, after the caller emitted the previous
+         triple: :meth:`AlgebraVisitor._class_walk`). ``?post :hasCreator
+         ?foaf ; a :Post`` with ``?foaf`` a document reaches the friend's
+         posts from the friend instead of scanning every post per friend
+         (LDBC IC10), and the walk applies the type pattern's tests itself;
+      3. a type pattern on an unknown subject — it anchors the subject to its
          class's collection (which PG / LPG routing needs before that
          subject's property triples) at the cost of a class scan;
-      3. a triple whose object is known (a reverse lookup);
-      4. anything else;
-      5. a triple about a relationship node (D8) not bound yet: its entry
+      4. a triple whose object is known (a reverse lookup);
+      5. anything else;
+      6. a triple about a relationship node (D8) not bound yet: its entry
          triple (``?p :knows ?k``) binds it to an edge, which its exit and
          attribute triples need — except an exit whose object is known
-         (``?m :hasPerson ?fr``), which ranks 3: it walks the relationship
+         (``?m :hasPerson ?fr``), which ranks 4: it walks the relationship
          backwards from the object, binding the edge and its source.
 
     Ties keep rdflib's order, so output stays deterministic. Property-path
@@ -3271,21 +3418,25 @@ def _order_bgp(
     """
     bound = set(bound)
     remaining = list(enumerate(triples))
-    ordered: list[tuple[Any, Any, Any]] = []
     while remaining:
         best = min(
             remaining,
             key=lambda item: (
-                _join_rank(item[1], bound, relationship_nodes or set(), exits or set()),
+                _join_rank(
+                    item[1],
+                    bound,
+                    relationship_nodes or set(),
+                    exits or set(),
+                    walks is not None and walks(item[1]),
+                ),
                 item[0],
             ),
         )
         remaining.remove(best)
-        ordered.append(best[1])
+        yield best[1]
         for term in best[1]:
             if isinstance(term, Variable):
                 bound.add(str(term))
-    return ordered
 
 
 def _is_empty_bgp(node: Any) -> bool:
