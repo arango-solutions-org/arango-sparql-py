@@ -549,7 +549,12 @@ identity can be pasted back as a constant (`<aws_iam_role/0123>`). A scan
 joined to a value computed at run time (a sub-select column, a VALUES row, a
 probe's outer row) uses the same index-friendly form, guarded against a null
 value, which `NOT_NULL(...) ==` never matched (`subject_matches_value`); for a
-subject read across several collections it runs inside each arm. Known limit:
+subject read across several collections it runs inside each arm. So does a
+class opened for a subject already bound to a document (`:a :knows ?y . ?y a
+:Person`, a second class for one variable or constant): it joins on the
+IRI, not the document, because one IRI can be several documents (an entity of
+two classes, the W3C loader's copies, one document per named graph), and the
+index serves it instead of a class scan per row. Known limit:
 a constant subject is still looked up in the default collection, not in the
 collection its `_id` names; and `isIRI()` is false for an `_id` identity.
 
