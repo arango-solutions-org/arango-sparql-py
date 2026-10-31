@@ -398,6 +398,50 @@ class AqlQueryBuilder:
         self._scanned_aliases.append(alias)
         return self
 
+    def for_source(
+        self,
+        alias: str,
+        source_bind: str,
+        *,
+        search: str | None = None,
+        options: str | None = None,
+    ) -> AqlQueryBuilder:
+        """Emit ``FOR <alias> IN @@<source> [SEARCH …] [OPTIONS …]``.
+
+        For a loop a registered predicate shapes
+        (:mod:`arango_sparql.translate.predicates`): *source_bind* is an
+        ``@@`` placeholder from :meth:`bind_collection` (a view or a
+        collection); *search* and *options* reference only bind parameters.
+        """
+        if not _AQL_IDENT_RE.match(alias):
+            raise ValueError(f"invalid FOR alias: {alias!r}")
+        if not source_bind.startswith("@@"):
+            raise ValueError(f"expected a collection bind placeholder (@@name), got: {source_bind!r}")
+        text = f"FOR {alias} IN {source_bind}"
+        if search is not None:
+            text += f" SEARCH {search}"
+        if options is not None:
+            text += f" OPTIONS {options}"
+        self._body_clauses.append(_Clause(_ClauseKind.FOR, text))
+        self._scanned_aliases.append(alias)
+        return self
+
+    def sort_here(self, expression: str, *, descending: bool) -> AqlQueryBuilder:
+        """Emit ``SORT <expression>`` at this point of the body, unlike
+        :meth:`sort`, which collects the query's final SORT."""
+        self._body_clauses.append(
+            _Clause(_ClauseKind.SORT, f"SORT {expression}{' DESC' if descending else ''}")
+        )
+        return self
+
+    def limit_here(self, count_bind: str) -> AqlQueryBuilder:
+        """Emit ``LIMIT <count>`` at this point of the body; *count_bind* is a
+        value bind placeholder."""
+        if not count_bind.startswith("@") or count_bind.startswith("@@"):
+            raise ValueError(f"expected a value bind placeholder (@name), got: {count_bind!r}")
+        self._body_clauses.append(_Clause(_ClauseKind.LIMIT, f"LIMIT {count_bind}"))
+        return self
+
     def scanned_aliases(self) -> tuple[str, ...]:
         """Aliases of the documents this builder's own body scans.
 

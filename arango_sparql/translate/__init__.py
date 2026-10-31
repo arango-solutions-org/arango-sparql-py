@@ -8,6 +8,8 @@ Submodules:
 - :mod:`.resolver` — OWL/Turtle URI → ArangoDB collection resolver.
 - :mod:`.mapping`  — ``MappingBundle`` wire-format (conceptual + physical).
 - :mod:`.csi`      — ``CSI v1`` interchange → ``MappingBundle`` adapter.
+- :mod:`.predicates` — caller-registered predicates (magic properties), and an
+  ArangoSearch full-text handler for them.
 """
 
 from __future__ import annotations
