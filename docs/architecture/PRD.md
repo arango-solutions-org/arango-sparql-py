@@ -610,6 +610,26 @@ attributes the query reads.
 Without a domain, a subject reads the default collection, or under
 `strict_subject_resolution` is refused.
 
+**Join order: a walk into the subject's class.** A type pattern on an
+unbound subject normally comes before that subject's other triples: it
+places the subject in its class's collection at the cost of a class scan
+(`translate/visitor.py::_iter_bgp_order`). When an edge's object is already
+a document, the edge declares an `rdfs:range`, and the subject has exactly
+one type pattern in the group, of a class stored as documents in one
+collection, the edge is walked backwards **first** and the walk applies the
+type pattern itself (`_walk_back_into_class`): it starts from the object's
+copies in the range (`_every_copy`) and keeps the vertices the class scan
+would have read — the class's collection, label, named-graph scope and
+tenant. The vertex is that class's document, never a copy tested in its
+place (one IRI can be several documents; PR #101 tested the bound document
+instead, gave silent wrong answers, and was reverted in #103). It is the
+forward plan's (document, edge) pairs, reached from the other end; only an
+edge into a copy of the object stored outside the declared range and not
+the bound document is not found (the range is trusted as for any backward
+walk). LDBC IC10's `OPTIONAL { ?post :hasCreator ?foaf ; a :Post }`
+scanned every post per friend and timed out; it now reaches the friend's
+posts (PG, LPG match the oracle), and IC4 went from 5–13 s to 0.01 s.
+
 **Label fields** (`LABEL` style). The type test depends on the field's shape,
 because each form is served by a different index (`translate/builder.py::
 type_predicate`, issue #10): `phys:typeFieldIsArray true` → `@v IN doc.f`

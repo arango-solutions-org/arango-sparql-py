@@ -213,3 +213,44 @@ def test_each_copy_is_read_as_its_class_in_the_active_graph() -> None:
     graph = re.search(r"FILTER doc3\._graph == @(\w+)\n", arm)
     assert graph is not None and result.bind_vars[graph.group(1)] == "http://ex.org/g"
     assert "FILTER doc3.org == @" in arm
+
+
+def test_a_walk_into_the_subjects_class_replaces_the_class_scan() -> None:
+    # LDBC IC10's OPTIONAL: ``?post :hasCreator ?foaf ; a :Post`` with ?foaf a
+    # document. hasCreator is walked backwards from ?foaf's copies in its
+    # range, and the vertex is tested as the Post scan would have read it;
+    # there is no ``FOR … IN @@…Post`` scan per friend.
+    assert _aql(
+        PG_ONTOLOGY, "SELECT ?post WHERE { ?foaf a :Person OPTIONAL { ?post :hasCreator ?foaf ; a :Post } }"
+    ) == (
+        "FOR doc1 IN @@c1_Person\n"
+        "LET optsub7 = (\n"
+        "  FOR doc4 IN UNION(\n"
+        "  (\n"
+        "    FOR doc2 IN [doc1]\n"
+        "    FILTER !(IS_SAME_COLLECTION(@_p1_coll, doc2))\n"
+        "    RETURN doc2\n"
+        "  ),\n"
+        "  (\n"
+        "    FOR doc3 IN @@c2_Person\n"
+        "    FILTER (NOT_NULL(doc1._uri, doc1._id) != null && (doc3._uri == NOT_NULL(doc1._uri, doc1._id) "
+        "|| (doc3._uri == null && doc3._id == NOT_NULL(doc1._uri, doc1._id))))\n"
+        "    RETURN doc3\n"
+        "  )\n"
+        "  )\n"
+        "  FOR v5, e6 IN INBOUND doc4 @@c3_has_creator\n"
+        "  FILTER IS_SAME_COLLECTION(@_p2_coll, v5)\n"
+        "  RETURN { post: NOT_NULL(v5._uri, v5._id) }\n"
+        ")\n"
+        "FOR optrow8 IN (LENGTH(optsub7) > 0 ? optsub7 : [null])\n"
+        "RETURN { post: optrow8.post }"
+    )
+
+
+def test_an_lpg_walk_into_a_class_tests_its_label_on_the_vertex() -> None:
+    aql = _aql(
+        LPG_ONTOLOGY, "SELECT ?post WHERE { ?foaf a :Person OPTIONAL { ?post :hasCreator ?foaf ; a :Post } }"
+    )
+    walk = aql.split(" IN INBOUND doc4 ", 1)[1]
+    assert "FILTER @_p5_labels IN v5.labels\n" in walk
+    assert "IN @@c" not in walk.split("RETURN", 1)[0].split("\n", 1)[1]  # no class scan after the walk
