@@ -572,7 +572,23 @@ routes the subject (`translate/visitor.py`):
   trusted as where the object is stored, as the domain is for subjects: an
   object stored outside its range class is not found, so the triple matches
   nothing for it. A mapping the schema analyzer builds agrees with its data
-  (ranges come from the edges' `_to` collections); a hand-written one must;
+  (ranges come from the edges' `_to` collections); a hand-written one must.
+  An object already bound to a document is walked from **every document
+  carrying its IRI in the range** (`_every_copy`, issue #105): one IRI can
+  be several documents (an entity of two classes, one per named graph) and
+  the edge may point at another copy than the bound one. Each copy is
+  looked up by an indexed `_uri` match in the range's collections and read
+  as a document of that class: its tenant FILTER, and the active GRAPH
+  scope or the strict default graph (the scope's graph, not the bound
+  document's: an object bound outside `GRAPH :g` is walked inside it from
+  its copy in `:g`). The bound
+  document is kept when it is in none of them, and the arms are disjoint,
+  so each document is walked once. With **no declared range** the walk
+  starts from the bound document alone: every mapped collection would
+  include ones the database may not have (ERR 1203, such as the
+  `/sparql` route's default `Document`), so an edge into another copy
+  there is a known limit (#105; the W3C loader's layout declares no
+  ranges);
 - otherwise the property's `rdfs:domain` opens the subject's collection
   (`_route_by_domain`): one class opens its collection, with its label test in
   LPG; an `owl:unionOf` of LABEL classes in one collection is an any-of label

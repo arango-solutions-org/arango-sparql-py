@@ -197,22 +197,37 @@ cases:
 
   - name: edge_type_field_named_like_a_keyword_reverse_traversal
     # The subject is unbound and the object is a document, so the edge is
-    # walked backwards; the discriminator FILTER is quoted on that path too.
+    # walked backwards, from every document carrying the object's IRI (#105);
+    # the discriminator FILTER is quoted on that path too.
     ontology: *edge_type_ontology
     sparql: |
       PREFIX : <http://example.org/>
       SELECT ?a ?b WHERE { ?b a :Person . ?a :knows ?b }
     expected_aql: |
       FOR doc1 IN @@c1_Persons
-      FOR v2, e3 IN INBOUND doc1 @@c2_Rels
-      FILTER e3.`graph` == @_p1_graph
-      FILTER IS_SAME_COLLECTION(@_p2_coll, v2)
-      RETURN { a: NOT_NULL(v2._uri, v2._id), b: NOT_NULL(doc1._uri, doc1._id) }
+      FOR doc4 IN UNION(
+      (
+        FOR doc2 IN [doc1]
+        FILTER !(IS_SAME_COLLECTION(@_p1_coll, doc2))
+        RETURN doc2
+      ),
+      (
+        FOR doc3 IN @@c2_Persons
+        FILTER (NOT_NULL(doc1._uri, doc1._id) != null && (doc3._uri == NOT_NULL(doc1._uri, doc1._id) || (doc3._uri == null && doc3._id == NOT_NULL(doc1._uri, doc1._id))))
+        RETURN doc3
+      )
+      )
+      FOR v5, e6 IN INBOUND doc4 @@c3_Rels
+      FILTER e6.`graph` == @_p2_graph
+      FILTER IS_SAME_COLLECTION(@_p3_coll, v5)
+      RETURN { a: NOT_NULL(v5._uri, v5._id), b: NOT_NULL(doc1._uri, doc1._id) }
     expected_bind_vars:
       "@c1_Persons": Persons
-      "@c2_Rels": Rels
-      _p1_graph: KNOWS
-      _p2_coll: Persons
+      "@c2_Persons": Persons
+      "@c3_Rels": Rels
+      _p1_coll: Persons
+      _p2_graph: KNOWS
+      _p3_coll: Persons
 
   - name: tenant_field_named_like_a_keyword
     # ``phys:tenantField`` reaches AQL as the tenant FILTER on every read.
