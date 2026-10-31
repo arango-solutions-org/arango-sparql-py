@@ -3375,9 +3375,14 @@ layout.
   - **`pyoxigraph`** runs the same SPARQL text on the same normalised data. It
     is the translator's oracle (hard rule 5).
   - **LDBC's published Interactive v1 validation parameters** check the SPARQL
-    text itself. They interleave updates with reads, so they apply only once
-    those updates are replayed on the oracle (plan §2.4); until then
-    pyoxigraph is the only oracle.
+    text itself. They interleave updates with reads, so each answer applies
+    only at its point in the update stream: `python -m tests.ldbc.replay`
+    applies the inserts (IU1–IU8, written as the Turtle models them) to a copy
+    of the normalised oracle store, in file order, and checks each sampled
+    read there (plan §2.4). The short reads IS1–IS5 and IS7 are checked this
+    way; IS6 is opt-in (pyoxigraph does not answer it in 10 minutes). For the
+    complex reads, and on the ArangoDB layouts, pyoxigraph is still the only
+    oracle.
   - The oracle MUST NOT make network calls: a query that uses `SERVICE` is
     refused, not sent.
 

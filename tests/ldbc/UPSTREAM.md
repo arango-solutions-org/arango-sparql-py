@@ -69,7 +69,7 @@ why.
 - **Validation parameters:** LDBC publishes expected results for Interactive v1
   (`validation_params-interactive-v1.0.0-sf0.1-to-sf10.tar.zst`, SHA-256
   `1fc17c19426c2ea04e4b2119b28a8813323b8d0b4f7a6731bb7b8445dd9cf707`). They
-  interleave 18,626 updates with 119,848 reads from the first line, so they
+  interleave 7,996 inserts with 130,478 reads from the first line, so they
   describe the database *after* inserts the Turtle snapshot does not contain.
-  Using them needs the updates replayed on the oracle first (plan, follow-up
-  work package); until then pyoxigraph is the only oracle.
+  `python -m tests.ldbc.replay` replays the inserts on the oracle and checks
+  the short reads against them (plan, WP-LDBC-REPLAY).
