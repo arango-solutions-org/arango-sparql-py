@@ -140,3 +140,71 @@ def test_a_value_bound_object_is_looked_up_and_walked_inbound() -> None:
         "FILTER (IS_SAME_COLLECTION(@_p2_coll, v3) || IS_SAME_COLLECTION(@_p3_coll, v3))\n"
         "RETURN { m: NOT_NULL(v3._uri, v3._id) }"
     )
+
+
+def test_a_reverse_walk_from_a_bound_document_starts_from_every_copy_in_the_range() -> None:
+    # One IRI can be several documents (#105): the edge may point at a copy
+    # other than the bound one, so its copies in the range are walked too.
+    assert _aql(PG_ONTOLOGY, "SELECT ?m WHERE { ?p a :Person . ?m :hasCreator ?p }") == (
+        "FOR doc1 IN @@c1_Person\n"
+        "FOR doc4 IN UNION(\n"
+        "(\n"
+        "  FOR doc2 IN [doc1]\n"
+        "  FILTER !(IS_SAME_COLLECTION(@_p1_coll, doc2))\n"
+        "  RETURN doc2\n"
+        "),\n"
+        "(\n"
+        "  FOR doc3 IN @@c2_Person\n"
+        "  FILTER (NOT_NULL(doc1._uri, doc1._id) != null && (doc3._uri == NOT_NULL(doc1._uri, doc1._id) "
+        "|| (doc3._uri == null && doc3._id == NOT_NULL(doc1._uri, doc1._id))))\n"
+        "  RETURN doc3\n"
+        ")\n"
+        ")\n"
+        "FOR v5, e6 IN INBOUND doc4 @@c3_has_creator\n"
+        "FILTER (IS_SAME_COLLECTION(@_p2_coll, v5) || IS_SAME_COLLECTION(@_p3_coll, v5))\n"
+        "RETURN { m: NOT_NULL(v5._uri, v5._id) }"
+    )
+
+
+_NO_RANGE = """
+@prefix : <http://ex.org/> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix phys: <https://arango.solutions/phys#> .
+:Person a owl:Class ; phys:collectionName "Person" .
+:Agent a owl:Class ; phys:collectionName "Agent" .
+:Fact a owl:Class ; phys:mappingStyle "RPT" ; phys:triplesCollection "Triples" .
+:knows a owl:ObjectProperty ; phys:edgeCollectionName "knows" .
+"""
+
+
+def test_without_a_range_the_copies_are_looked_up_in_every_document_collection() -> None:
+    resolver = SchemaResolver.from_turtle(_NO_RANGE, default_collection="Document")
+    result = translate(
+        "PREFIX : <http://ex.org/>\nSELECT ?x WHERE { ?y a :Person . ?x :knows ?y }", resolver=resolver
+    )
+    looked_up = sorted(v for k, v in result.bind_vars.items() if k.startswith("@c") and v != "knows")
+    # The type pattern's Person, then each document collection (not the triples table).
+    assert looked_up == ["Agent", "Document", "Person", "Person"]
+
+
+def test_document_collections_are_the_document_classes_and_the_default_unless_strict() -> None:
+    assert SchemaResolver.from_turtle(_NO_RANGE, default_collection="Document").document_collections() == (
+        "Agent",
+        "Document",
+        "Person",
+    )
+    strict = SchemaResolver(
+        ontology=SchemaResolver.from_turtle(_NO_RANGE).ontology, strict_subject_resolution=True
+    )
+    assert strict.document_collections() == ("Agent", "Person")
+
+
+def test_listing_the_document_collections_reports_no_advisory_for_unnamed_classes() -> None:
+    # A class without phys:collectionName resolves with a W_SCHEMA advisory;
+    # listing collections must not report it, nor hide it from a later query.
+    ttl = _NO_RANGE + ":Loose a owl:Class .\n"
+    resolver = SchemaResolver.from_turtle(ttl)
+    assert "Loose" in resolver.document_collections()
+    assert resolver.warnings == []
+    resolver.resolve_class("http://ex.org/Loose")
+    assert [w["iri"] for w in resolver.warnings] == ["http://ex.org/Loose"]

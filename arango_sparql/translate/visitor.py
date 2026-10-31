@@ -2441,20 +2441,22 @@ class AlgebraVisitor:
         scanned every message). ``None`` when the object cannot be found
         that way. The range is trusted as where the object is stored, as
         :meth:`_route_by_domain` trusts the domain: an object stored outside
-        it is not found (PRD §6.1).
+        it is not found (PRD §6.1). An object already bound to a document
+        is walked from every document carrying its IRI
+        (:meth:`_every_copy`).
         """
         if isinstance(obj, Variable):
             name = str(obj)
             alias = self.state.var_to_doc_alias.get(name)
             if alias is not None:
-                return alias
+                return self._every_copy(alias, range_iri)
             value = self.state.var_to_expr.get(name)
             if value is None:
                 return None
         elif isinstance(obj, URIRef):
             known = self.state.const_subject_alias.get(str(obj))
             if known is not None:
-                return known
+                return self._every_copy(known, range_iri)
             value = None
         else:
             return None
@@ -2487,6 +2489,62 @@ class AlgebraVisitor:
         self.builder.filter_raw(subject_matches(alias, uri_bind))
         self.state.const_subject_alias[str(obj)] = alias
         return alias
+
+    def _every_copy(self, alias: str, range_iri: str | None) -> str:
+        """The documents carrying the IRI of the document at *alias* that an
+        edge can point at, as one alias to walk backwards from (issue #105).
+
+        One IRI can be several documents (an entity of two classes, the W3C
+        loader's copies, one document per named graph), and an edge points
+        at one of them, not necessarily the one bound: walking back from
+        that one alone missed the others' edges, where the forward plan,
+        which joins on the IRI, finds them. The copies are found by an
+        indexed ``_uri`` match in the property's ``rdfs:range`` collections
+        when the range is a document class (trusted as where the object is
+        stored, PRD §6.1), else in every collection the mapping stores
+        documents in. The bound document is kept too when it is in none of
+        those collections, so an edge into it is never lost. The arms are
+        disjoint, so each document, and each edge, is walked once (a plain
+        ``UNION``: ``UNION_DISTINCT`` compares whole documents, LDBC IC8 PG
+        ran 0.06 s → 0.18 s with it).
+        """
+        collections = self._range_collections(range_iri) or self.resolver.document_collections()
+        if not collections:
+            return alias
+        arms = []
+        bound = self.builder.create_child()
+        inner = bound.fresh_alias()
+        bound.for_inline(inner, f"[{alias}]")
+        elsewhere = " || ".join(
+            f"IS_SAME_COLLECTION({bound.bind(c, hint='coll')}, {inner})" for c in collections
+        )
+        bound.filter_raw(f"!({elsewhere})")
+        bound.return_scalar(inner)
+        arms.append(self.builder.absorb_child(bound))
+        for collection in collections:
+            child = self.builder.create_child()
+            inner = child.fresh_alias()
+            child.for_(inner, collection)
+            child.filter_raw(subject_matches_value(inner, subject_ref(alias)))
+            child.return_scalar(inner)
+            arms.append(self.builder.absorb_child(child))
+        copies = self.builder.fresh_alias()
+        self.builder.for_union(copies, arms, scans_documents=True)
+        return copies
+
+    def _range_collections(self, range_iri: str | None) -> tuple[str, ...]:
+        """The collections a declared ``rdfs:range`` stores its documents in
+        (a supertype's members'; a sharded class's family); empty when there
+        is no range or it is not stored as documents (RPT)."""
+        if range_iri is None:
+            return ()
+        try:
+            classes = self._concrete_classes((range_iri,))
+        except SchemaResolutionError:
+            return ()
+        if not classes or any(c.style == "RPT" for c in classes):
+            return ()
+        return tuple(sorted({name for c in classes for name in (c.shard_family or (c.collection,))}))
 
     def _concrete_classes(self, class_iris: tuple[str, ...] | list[str]) -> list[ResolvedClass]:
         """Resolve *class_iris*, without duplicates: a ``UNION`` supertype

@@ -32,7 +32,7 @@ from tests.helpers.oxi import assert_bindings_equal, drop_null_bindings, normali
 oxi = pytest.importorskip("pyoxigraph", reason="pyoxigraph required for cross tests")
 
 EX = "http://ex.org/"
-_PREFIXES = """@prefix : <http://ex.org/> .
+PREFIXES = """@prefix : <http://ex.org/> .
 @prefix owl: <http://www.w3.org/2002/07/owl#> .
 @prefix phys: <https://arango.solutions/phys#> .
 @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
@@ -49,7 +49,7 @@ class Store:
 
 
 PG_TWO_CLASSES = Store(
-    ontology=_PREFIXES
+    ontology=PREFIXES
     + """
 :Person a owl:Class ; phys:collectionName "Person" .
 :Employee a owl:Class ; phys:collectionName "Employee" .
@@ -68,9 +68,29 @@ PG_TWO_CLASSES = Store(
     data=':s a :Person, :Employee ; :name "S" ; :salary 10 . :a a :Person ; :name "A" ; :knows :s .',
 )
 
+#: An edge into a document outside its property's declared range: a walk
+#: from that document still finds it (the range is only where copies are
+#: looked for).
+RANGE_ELSEWHERE = Store(
+    ontology=PREFIXES
+    + """
+:Person a owl:Class ; phys:collectionName "Person" .
+:City a owl:Class ; phys:collectionName "City" .
+:Place a owl:Class ; phys:collectionName "Place" .
+:livesIn a owl:ObjectProperty ; phys:edgeCollectionName "lives" ; rdfs:domain :Person ; rdfs:range :City .
+""",
+    docs={
+        "Person": [{"_id": "Person/a", "_uri": EX + "a"}],
+        "City": [],
+        "Place": [{"_id": "Place/r", "_uri": EX + "r"}],
+        "lives": [{"_id": "lives/1", "_from": "Person/a", "_to": "Place/r"}],
+    },
+    data=":a a :Person ; :livesIn :r . :r a :Place .",
+)
+
 #: As ``tests/w3c/loader.py`` stores ``:a :knows :b . :a a :Agent . :b a :Person . :c a :Person``.
 W3C_COPIES = Store(
-    ontology=_PREFIXES
+    ontology=PREFIXES
     + """
 :Agent a owl:Class ; phys:collectionName "t_Agent" .
 :Person a owl:Class ; phys:collectionName "t_Person" .
@@ -98,7 +118,7 @@ W3C_COPIES = Store(
 )
 
 NAMED_GRAPHS = Store(
-    ontology=_PREFIXES
+    ontology=PREFIXES
     + """
 :Person a owl:Class ; phys:collectionName "Person" .
 :name a owl:DatatypeProperty ; rdfs:domain :Person .
@@ -152,7 +172,7 @@ _CASES: list[tuple[str, Store, str, str | None]] = [
         None,
     ),
     ("pg_attr_then_type", PG_TWO_CLASSES, "SELECT ?s WHERE { ?s :name ?n . ?s a :Employee }", "#105"),
-    ("pg_untyped_reverse", PG_TWO_CLASSES, "SELECT ?x ?s WHERE { ?s a :Employee . ?x :knows ?s }", "#105"),
+    ("pg_untyped_reverse", PG_TWO_CLASSES, "SELECT ?x ?s WHERE { ?s a :Employee . ?x :knows ?s }", None),
     ("w3c_const_then_type", W3C_COPIES, "SELECT ?y WHERE { :a :knows ?y . ?y a :Person }", None),
     ("w3c_var_chain", W3C_COPIES, 'SELECT ?x ?y WHERE { ?x :name "A" . ?x :knows ?y . ?y a :Person }', None),
     ("w3c_typed_both", W3C_COPIES, "SELECT ?x ?y WHERE { ?x a :Agent . ?x :knows ?y . ?y a :Person }", None),
@@ -164,7 +184,10 @@ _CASES: list[tuple[str, Store, str, str | None]] = [
         "SELECT ?y WHERE { :a :knows ?y FILTER NOT EXISTS { ?y a :Person } }",
         None,
     ),
-    ("w3c_untyped_reverse", W3C_COPIES, "SELECT ?x ?y WHERE { ?y a :Person . ?x :knows ?y }", "#105"),
+    ("w3c_untyped_reverse", W3C_COPIES, "SELECT ?x ?y WHERE { ?y a :Person . ?x :knows ?y }", None),
+    ("w3c_const_reverse", W3C_COPIES, "SELECT ?x WHERE { :b a :Person . ?x :knows :b }", None),
+    ("pg_const_reverse", PG_TWO_CLASSES, "SELECT ?x WHERE { :s a :Employee . ?x :knows :s }", None),
+    ("range_elsewhere_reverse", RANGE_ELSEWHERE, "SELECT ?x WHERE { ?c a :Place . ?x :livesIn ?c }", None),
     ("graph_type", NAMED_GRAPHS, "SELECT ?s WHERE { ?s :name ?n . GRAPH :g { ?s a :Person } }", None),
     (
         "graph_exists_type",
@@ -217,7 +240,7 @@ _CASES: list[tuple[str, Store, str, str | None]] = [
 ]
 
 
-def _params() -> list[Any]:
+def case_params() -> list[Any]:
     out = []
     for name, store, query, issue in _CASES:
         marks = [pytest.mark.xfail(strict=True, reason=f"{issue}: wrong on main")] if issue else []
@@ -225,7 +248,7 @@ def _params() -> list[Any]:
     return out
 
 
-@pytest.mark.parametrize("store, query", _params())
+@pytest.mark.parametrize("store, query", case_params())
 def test_the_translation_agrees_with_pyoxigraph(store: Store, query: str) -> None:
     sparql = "PREFIX : <http://ex.org/>\n" + query
     resolver = SchemaResolver.from_turtle(store.ontology, **store.resolver_kwargs)
@@ -234,7 +257,7 @@ def test_the_translation_agrees_with_pyoxigraph(store: Store, query: str) -> Non
 
     oracle = oxi.Store()
     oracle.load(
-        (_PREFIXES + store.data).encode(), format=oxi.RdfFormat.TRIG if store.trig else oxi.RdfFormat.TURTLE
+        (PREFIXES + store.data).encode(), format=oxi.RdfFormat.TRIG if store.trig else oxi.RdfFormat.TURTLE
     )
     expected = [normalize_oxi_row(r) for r in oxi_bindings(oracle, sparql)]
     assert_bindings_equal(expected, rows)
