@@ -1681,7 +1681,7 @@ class AlgebraVisitor:
                 # :C (one row each) instead of x alone.
                 previous = self.state.const_subject_alias.get(str(s))
                 if previous is not None:
-                    self.builder.filter_raw(f"{subject_ref(alias)} == {subject_ref(previous)}")
+                    self.builder.filter_raw(subject_matches_value(alias, subject_ref(previous)))
                 else:
                     uri_bind = self.builder.bind(str(s), hint="uri")
                     self.builder.filter_raw(subject_matches(alias, uri_bind))
@@ -2592,7 +2592,7 @@ class AlgebraVisitor:
             return
         previous = self.state.const_subject_alias.get(str(subject))
         if previous is not None:
-            self.builder.filter_raw(f"{subject_ref(alias)} == {subject_ref(previous)}")
+            self.builder.filter_raw(subject_matches_value(alias, subject_ref(previous)))
             return
         if not matched:
             uri_bind = self.builder.bind(str(subject), hint="uri")
@@ -2812,7 +2812,10 @@ class AlgebraVisitor:
             return
         if existing_alias == alias:
             return
-        self.builder.filter_raw(f"{subject_ref(alias)} == {subject_ref(existing_alias)}")
+        # The same IRI, not the same document: an entity of two classes is a
+        # document in each (PRD §6.1). Written so the new FOR is an index
+        # lookup on ``_uri`` / ``_id`` rather than a scan per outer row.
+        self.builder.filter_raw(subject_matches_value(alias, subject_ref(existing_alias)))
 
     def _value_match_expr(self, attr_path: str, value_expr: str) -> str:
         """Equality between an attribute read and a value expression.

@@ -52,6 +52,29 @@ def test_edge_target_and_bound_object_compare_the_same_identity() -> None:
     assert "FILTER NOT_NULL(v3._uri, v3._id) == NOT_NULL(doc1._uri, doc1._id)" in aql
 
 
+@pytest.mark.parametrize(
+    "body, joined, earlier",
+    [
+        # A type pattern on a traversal vertex (``?a`` reached over ``owns``).
+        ("SELECT ?a WHERE { :o :owns ?a . ?a a :Asset }", "doc4", "v2"),
+        # Two classes for one variable.
+        ("SELECT ?s WHERE { ?s a :Owner . ?s a :Asset }", "doc2", "doc1"),
+        # Two classes for one constant.
+        ("SELECT * WHERE { :x a :Owner . :x a :Asset }", "doc2", "doc1"),
+    ],
+)
+def test_a_class_opened_for_a_bound_subject_joins_on_its_iri_through_the_index(
+    body: str, joined: str, earlier: str
+) -> None:
+    # Same IRI, not the same document: an entity of two classes is a document
+    # in each (PRD §6.1). The NOT_NULL(...) == NOT_NULL(...) form hid the _uri
+    # index, so each row scanned the whole class (LDBC PG: a person scan per
+    # friend, 0.13 s → 0.01 s for 185 rows).
+    aql = _aql(body)
+    assert f"FILTER {subject_matches_value(joined, subject_ref(earlier))}" in aql
+    assert f"{subject_ref(joined)} == {subject_ref(earlier)}" not in aql
+
+
 def test_constant_subject_uses_the_exact_match_form() -> None:
     aql = _aql("SELECT ?n WHERE { <Assets/a2> :name ?n . }", default_collection="Assets")
     assert "._uri == @" in aql and "._uri == null && " in aql and "._id == @" in aql
