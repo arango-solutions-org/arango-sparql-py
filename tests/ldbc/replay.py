@@ -26,6 +26,7 @@ Usage::
 
     python -m tests.ldbc.replay --sf 0.1 --per-op 25            # IS1–IS5, IS7
     python -m tests.ldbc.replay --sf 0.1 --op IS1 --op IS3 --per-op 200
+    python -m tests.ldbc.replay --sf 0.1 --every 100 --per-op 100   # all inserts
 """
 
 from __future__ import annotations
@@ -503,16 +504,28 @@ PROGRESS_EVERY = 1000
 
 
 def replay(
-    store: ox.Store, operations: Iterator[Operation], reads: tuple[str, ...], per_op: int, keep: int = 5
+    store: ox.Store,
+    operations: Iterator[Operation],
+    reads: tuple[str, ...],
+    per_op: int,
+    keep: int = 5,
+    *,
+    every: int = 1,
 ) -> ReplayReport:
     """Apply every insert in order; check the first *per_op* reads of each
-    kind in *reads* at their point in the stream.
+    kind in *reads* at their point in the stream, or with *every* > 1 the
+    first *per_op* of every *every*-th read of each kind (the 1st, the
+    *every*+1-th, …), so the checks spread over the whole stream: 50 of each
+    read are reached by line 1,586 of 138,474, before any new person.
 
     Each checked read and every :data:`PROGRESS_EVERY` inserts is logged, so
     a read that hangs (pyoxigraph has no query timeout) shows by its line.
     """
+    if every < 1 or per_op < 1:
+        raise ReplayError(f"every and per_op must be at least 1, not {every} and {per_op}")
     report = ReplayReport()
     nodes = _Nodes()
+    seen = Counter[str]()
     started = time.monotonic()
     for op in operations:
         if op.is_update:
@@ -523,7 +536,10 @@ def replay(
             if applied % PROGRESS_EVERY == 0:
                 logger.info("line %d: %d inserts applied", op.index + 1, applied)
             continue
-        if op.name not in reads or report.checked[op.name] >= per_op:
+        if op.name not in reads:
+            continue
+        seen[op.name] += 1
+        if (seen[op.name] - 1) % every or report.checked[op.name] >= per_op:
             continue
         logger.info("line %d: %s …", op.index + 1, op.name)
         read_started = time.monotonic()
@@ -585,13 +601,24 @@ def main(argv: list[str] | None = None) -> int:
         "--op", action="append", choices=READS, help="reads to check (default: IS1–IS5 and IS7; IS6 is slow)"
     )
     parser.add_argument("--per-op", type=int, default=25, help="reads of each kind to check")
+    parser.add_argument(
+        "--every",
+        type=int,
+        default=1,
+        help="check every Nth read of each kind, so the checks reach the whole stream "
+        "(all 7,996 inserts: --every 100 --per-op 100)",
+    )
     parser.add_argument("--json", type=Path, help="write the report here")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     try:
         store = load_store(args.sf)
         report = replay(
-            store, read_operations(validation_file(args.sf)), tuple(args.op or DEFAULT_READS), args.per_op
+            store,
+            read_operations(validation_file(args.sf)),
+            tuple(args.op or DEFAULT_READS),
+            args.per_op,
+            every=args.every,
         )
     except ReplayError as exc:
         print(f"error: {exc}", file=sys.stderr)

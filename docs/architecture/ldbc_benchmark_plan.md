@@ -161,8 +161,9 @@ Reference repositories examined (via the GitHub API, 2026-10-23):
      and IS7 agree with LDBC (300/300): the short reads' SPARQL text and the
      normalisation are right. Those 300 reads end at line 1,586, after only
      86 inserts and before the first new person (IU1, line 36,332), so they
-     say little about the inserts: a run of all 7,996 inserts with every
-     100th short read checked (2026-10-31) agrees 405/405. Its first attempt
+     say little about the inserts: `--every 100 --per-op 100` applies all
+     7,996 inserts and checks every 100th short read, and agrees 405/405
+     (2026-10-31). Its first attempt
      crashed at that IU1, whose `studyAt` / `workAt` entries are objects;
      a unit test now applies the first insert of each kind from LDBC's file.
      IS6 is left out by default: pyoxigraph does

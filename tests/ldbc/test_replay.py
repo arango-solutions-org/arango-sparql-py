@@ -272,6 +272,33 @@ def test_each_read_sees_only_the_inserts_before_it_and_is_logged(caplog: pytest.
     assert "line 4" not in caplog.text
 
 
+def test_every_nth_read_spreads_the_checks_and_inserts_still_all_apply() -> None:
+    wrong = dict(_IS1_ANSWER, firstName="Bea")
+    read = {"personIdSQ1": 1}
+    ops = [
+        _op(0, read, {}),  # IS1 #1: checked (no person yet)
+        _op(1, read, wrong),  # #2: skipped by every=3
+        _op(2, read, wrong),  # #3: skipped
+        _op(3, _IU1),
+        _op(4, read, _IS1_ANSWER),  # #4: checked, after the insert
+        _op(5, read, wrong),  # #5, #6: skipped
+        _op(6, read, wrong),
+        _op(7, read, wrong),  # #7: every=3 would check it; per_op=2 is spent
+        _op(8, {"person1Id": 1, "person2Id": 2, "creationDate": _CREATED}),
+    ]
+    report = replay.replay(_store(), iter(ops), ("IS1",), per_op=2, every=3)
+    assert (report.checked["IS1"], report.agreed["IS1"]) == (2, 2)
+    assert report.disagreements == []
+    # The run ends once every read has its per_op checks: the IU8 after is not applied.
+    assert report.updates_applied == {"IU1": 1}
+
+
+@pytest.mark.parametrize("every, per_op", [(0, 1), (1, 0)])
+def test_a_count_below_one_is_refused(every: int, per_op: int) -> None:
+    with pytest.raises(replay.ReplayError, match="must be at least 1"):
+        replay.replay(_store(), iter([]), ("IS1",), per_op=per_op, every=every)
+
+
 def test_a_disagreement_keeps_its_line_and_both_answers() -> None:
     wrong = dict(_IS1_ANSWER, firstName="Bea")
     report = replay.replay(
@@ -361,9 +388,11 @@ def test_the_command_leaves_is6_out_unless_asked(monkeypatch: pytest.MonkeyPatch
         reads: tuple[str, ...],
         per_op: int,
         keep: int = 5,
+        *,
+        every: int = 1,
     ) -> replay.ReplayReport:
         seen.append(reads)
-        return real(store, operations, reads, per_op, keep)
+        return real(store, operations, reads, per_op, keep, every=every)
 
     monkeypatch.setattr(replay, "replay", spy)
     assert replay.main(["--per-op", "1"]) == 0
