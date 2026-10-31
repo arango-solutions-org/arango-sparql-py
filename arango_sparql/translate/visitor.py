@@ -1849,6 +1849,22 @@ class AlgebraVisitor:
         self._apply_graph_scope(alias)
         return alias
 
+    def _graph_scope_test(self, alias: str) -> str | None:
+        """The FILTER the active named-graph scope puts on *alias*, without
+        binding anything; ``None`` when there is none to apply.
+
+        As :meth:`_apply_graph_scope`, except that a GRAPH variable not bound
+        yet is left free (whatever document binds it applies the scope).
+        """
+        lhs = attribute_ref(alias, self.resolver.graph_field)
+        if not self.state.graph_scope:
+            return None if self.resolver.default_graph_includes_named else f"{lhs} == null"
+        graph_term = self.state.graph_scope[-1]
+        if isinstance(graph_term, URIRef):
+            return f"{lhs} == {self.builder.bind(str(graph_term), hint='graph')}"
+        existing = self.state.var_to_expr.get(str(graph_term))
+        return None if existing is None else f"{lhs} == {existing}"
+
     def _apply_graph_scope(self, alias: str) -> None:
         """Attach the active named-graph scope to a freshly-opened FOR.
 
@@ -2503,9 +2519,10 @@ class AlgebraVisitor:
         finds them. The copies are looked up by an indexed ``_uri`` match in
         the collections of the property's declared ``rdfs:range`` (trusted
         as where the object is stored, PRD §6.1), each read as a document of
-        that class would be: its tenant FILTER, and the bound document's
-        named graph whenever a GRAPH scope or the strict default graph
-        applies (the bound document passed that scope already). The bound
+        that class would be: its tenant FILTER, and the active named-graph
+        scope (:meth:`_graph_scope_test`) — the scope's graph, not the bound
+        document's: an object bound outside ``GRAPH :g`` is walked inside it
+        from its copy in ``:g``. The bound
         document is kept too when it is in none of those collections, so an
         edge into it is never lost; the arms are disjoint, so each document
         is walked once (a plain ``UNION``: ``UNION_DISTINCT`` compares whole
@@ -2520,8 +2537,7 @@ class AlgebraVisitor:
         by_collection = self._range_classes(range_iri)
         if not by_collection:
             return alias
-        graph_field = self.resolver.graph_field
-        same_graph = bool(self.state.graph_scope) or not self.resolver.default_graph_includes_named
+        in_scope = self._graph_scope_test
         arms = []
         bound = self.builder.create_child()
         inner = bound.fresh_alias()
@@ -2537,10 +2553,9 @@ class AlgebraVisitor:
             inner = child.fresh_alias()
             child.for_(inner, collection)
             child.filter_raw(subject_matches_value(inner, subject_ref(alias)))
-            if same_graph:
-                child.filter_raw(
-                    f"{attribute_ref(inner, graph_field)} == {attribute_ref(alias, graph_field)}"
-                )
+            scope = in_scope(inner)
+            if scope is not None:
+                child.filter_raw(scope)
             for tenant in {(c.tenant_field, c.tenant_entity): c for c in classes}.values():
                 self._enforce_tenant_scope(inner, tenant, builder=child)
             child.return_scalar(inner)

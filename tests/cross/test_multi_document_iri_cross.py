@@ -171,6 +171,45 @@ NG_EDGES_STRICT = Store(
     _NG_ONTOLOGY, _NG_DOCS, _NG_DATA, trig=True, resolver_kwargs={"default_graph_includes_named": False}
 )
 
+#: The object bound outside ``GRAPH :g`` (its default-graph copy) and walked
+#: to inside it: the edge in ``:g`` points at ``:p1``'s copy in ``:g``.
+_OUTSIDE_ONTOLOGY = (
+    PREFIXES
+    + """
+:Person a owl:Class ; phys:collectionName "Person" .
+:Post a owl:Class ; phys:collectionName "Post" .
+:name a owl:DatatypeProperty ; rdfs:domain :Person .
+:hasCreator a owl:ObjectProperty ; phys:edgeCollectionName "hasCreator" ; rdfs:domain :Post ;
+    rdfs:range :Person .
+"""
+)
+_OUTSIDE_DOCS = {
+    "Person": [
+        {"_id": "Person/p0", "_uri": EX + "p1", "name": "P1"},
+        {"_id": "Person/pg", "_uri": EX + "p1", "_graph": EX + "g"},
+    ],
+    "Post": [
+        {"_id": "Post/m1", "_uri": EX + "m1"},
+        {"_id": "Post/m2", "_uri": EX + "m2", "_graph": EX + "g"},
+    ],
+    "hasCreator": [
+        {"_id": "hasCreator/1", "_from": "Post/m1", "_to": "Person/p0"},
+        {"_id": "hasCreator/2", "_from": "Post/m2", "_to": "Person/pg", "_graph": EX + "g"},
+    ],
+}
+_OUTSIDE_DATA = (
+    ':p1 a :Person ; :name "P1" . :m1 a :Post ; :hasCreator :p1 .\n'
+    ":g { :p1 a :Person . :m2 a :Post ; :hasCreator :p1 . }"
+)
+GRAPH_OUTSIDE = Store(_OUTSIDE_ONTOLOGY, _OUTSIDE_DOCS, _OUTSIDE_DATA, trig=True)
+GRAPH_OUTSIDE_STRICT = Store(
+    _OUTSIDE_ONTOLOGY,
+    _OUTSIDE_DOCS,
+    _OUTSIDE_DATA,
+    trig=True,
+    resolver_kwargs={"default_graph_includes_named": False},
+)
+
 #: The same IRI in two tenants; the oracle holds tenant t1's facts. ``knows``
 #: declares no domain, so nothing else keeps the walk inside the tenant.
 TENANTS = Store(
@@ -345,6 +384,48 @@ _CASES: list[tuple[str, Store, str, str | None]] = [
         "SELECT ?gg ?x WHERE { GRAPH ?gg { ?y a :Person . ?x :knows ?y } }",
         "#106",
     ),
+    (
+        "graph_outside_untyped_walk",
+        GRAPH_OUTSIDE_STRICT,
+        "SELECT ?m WHERE { ?p :name ?n . GRAPH :g { ?m :hasCreator ?p } }",
+        None,
+    ),
+    (
+        "graph_outside_typed",
+        GRAPH_OUTSIDE,
+        "SELECT ?m WHERE { ?p :name ?n . GRAPH :g { ?m a :Post . ?m :hasCreator ?p } }",
+        None,
+    ),
+    (
+        "graph_outside_typed_strict",
+        GRAPH_OUTSIDE_STRICT,
+        "SELECT ?m WHERE { ?p :name ?n . GRAPH :g { ?m a :Post . ?m :hasCreator ?p } }",
+        None,
+    ),
+    (
+        "graph_outside_constant_strict",
+        GRAPH_OUTSIDE_STRICT,
+        "SELECT ?m WHERE { :p1 :name ?n . GRAPH :g { ?m a :Post . ?m :hasCreator :p1 } }",
+        None,
+    ),
+    (
+        "graph_outside_optional",
+        GRAPH_OUTSIDE_STRICT,
+        "SELECT ?p ?m WHERE { ?p :name ?n OPTIONAL { GRAPH :g { ?m a :Post . ?m :hasCreator ?p } } }",
+        None,
+    ),
+    (
+        "graph_outside_exists",
+        GRAPH_OUTSIDE_STRICT,
+        "SELECT ?p WHERE { ?p :name ?n FILTER EXISTS { GRAPH :g { ?m a :Post . ?m :hasCreator ?p } } }",
+        None,
+    ),
+    (
+        "graph_inside_typed",
+        GRAPH_OUTSIDE,
+        "SELECT ?m WHERE { GRAPH :g { ?p a :Person . ?m a :Post . ?m :hasCreator ?p } }",
+        None,
+    ),
     ("tenant_reverse", TENANTS, "SELECT ?x ?y WHERE { ?y a :Person . ?x :knows ?y }", None),
     ("tenant_reverse_const", TENANTS, "SELECT ?x WHERE { :y a :Person . ?x :knows :y }", None),
     (
@@ -371,7 +452,7 @@ _CASES: list[tuple[str, Store, str, str | None]] = [
 
 #: Cases the AQL interpreter cannot run (a ``UNION`` inside an OPTIONAL
 #: sub-query); ``tests/integration/test_multi_document_iri_live.py`` runs them.
-_LIVE_ONLY = {"ng_strict_optional"}
+_LIVE_ONLY = {"ng_strict_optional", "graph_outside_optional"}
 
 
 def case_params(*, interpreter: bool = False) -> list[Any]:

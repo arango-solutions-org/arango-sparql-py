@@ -578,8 +578,10 @@ routes the subject (`translate/visitor.py`):
   be several documents (an entity of two classes, one per named graph) and
   the edge may point at another copy than the bound one. Each copy is
   looked up by an indexed `_uri` match in the range's collections and read
-  as a document of that class: its tenant FILTER, and the bound document's
-  named graph under a GRAPH scope or the strict default graph. The bound
+  as a document of that class: its tenant FILTER, and the active GRAPH
+  scope or the strict default graph (the scope's graph, not the bound
+  document's: an object bound outside `GRAPH :g` is walked inside it from
+  its copy in `:g`). The bound
   document is kept when it is in none of them, and the arms are disjoint,
   so each document is walked once. With **no declared range** the walk
   starts from the bound document alone: every mapped collection would

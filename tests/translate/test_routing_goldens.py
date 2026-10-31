@@ -10,6 +10,8 @@ the collections for a PG one: plan decision D9).
 
 from __future__ import annotations
 
+import re
+
 from arango_sparql.api import translate
 from arango_sparql.translate.resolver import SchemaResolver
 from tests.cross.test_routing_cross import LPG_ONTOLOGY, PG_ONTOLOGY
@@ -196,11 +198,11 @@ _SCOPED = """
 """
 
 
-def test_each_copy_is_read_as_its_class_in_the_bound_documents_graph() -> None:
+def test_each_copy_is_read_as_its_class_in_the_active_graph() -> None:
     # A copy is read as a document of the range class would be: its tenant
-    # FILTER, and under a GRAPH scope the bound document's graph (which that
-    # document passed already). Unscoped, the walk returned other tenants'
-    # and other graphs' edges.
+    # FILTER, and the active GRAPH scope (the scope's graph, not the bound
+    # document's: an object bound outside the scope has its copy inside it).
+    # Unscoped, the walk returned other tenants' and other graphs' edges.
     resolver = SchemaResolver.from_turtle(_SCOPED)
     result = translate(
         "PREFIX : <http://ex.org/>\nSELECT ?x WHERE { GRAPH :g { ?y a :Person . ?x :knows ?y } }",
@@ -208,5 +210,6 @@ def test_each_copy_is_read_as_its_class_in_the_bound_documents_graph() -> None:
         tenant_id="t1",
     )
     arm = result.aql.split("FOR doc3 IN @@c2_Person\n", 1)[1].split("RETURN doc3", 1)[0]
-    assert "FILTER doc3._graph == doc1._graph\n" in arm
+    graph = re.search(r"FILTER doc3\._graph == @(\w+)\n", arm)
+    assert graph is not None and result.bind_vars[graph.group(1)] == "http://ex.org/g"
     assert "FILTER doc3.org == @" in arm
