@@ -45,8 +45,9 @@ _IU1 = {
     "languages": ["es"],
     "emails": ["ana@example.org"],
     "tagIds": [5],
-    "studyAt": [[7, 2008]],
-    "workAt": [[7, 2011]],
+    # LDBC's shape (validation_params-sf0.1.csv, first IU1 at line 36,332).
+    "studyAt": [{"organizationId": 7, "year": 2008}],
+    "workAt": [{"organizationId": 7, "year": 2011}],
 }
 _IS1_ANSWER = {
     "firstName": "Ana",
@@ -112,7 +113,9 @@ def test_a_new_person_gets_new_study_and_work_nodes_and_is1_reads_it_back() -> N
     _apply(store, _op(0, _IU1))
     person = f"{SN}pers{1:020d}"
     assert _objects(store, person, "isLocatedIn") == {SN + "city5"}
-    assert _objects(store, person, "hasTag") == {replay.TAG_PREFIX + "Foo"}
+    # IU1's tagIds are interests: the Turtle never tags a person (IC10 reads them).
+    assert _objects(store, person, "hasInterest") == {replay.TAG_PREFIX + "Foo"}
+    assert _objects(store, person, "hasTag") == set()
     [study] = _objects(store, person, "studyAt")
     [work] = _objects(store, person, "workAt")
     assert study.startswith(replay.GENID + "study") and work.startswith(replay.GENID + "work")
@@ -153,6 +156,92 @@ def test_a_comment_replying_to_a_comment_points_at_that_comment() -> None:
     assert _objects(store, comment, "replyOf") == {f"{SN}comm{8:020d}"}
     assert _objects(store, comment, "isLocatedIn") == {SN + "country5"}
     assert _objects(store, comment, "content") == {"yes"}
+
+
+def _post(**overrides: Any) -> dict[str, Any]:
+    params = {
+        "postId": 3,
+        "imageFile": "",
+        "creationDate": _CREATED,
+        "locationIp": "1.2.3.4",
+        "browserUsed": "Chrome",
+        "language": "es",
+        "content": "hola",
+        "length": 4,
+        "authorPersonId": 1,
+        "forumId": 6,
+        "countryId": 5,
+        "tagIds": [5],
+    }
+    return params | overrides
+
+
+def test_a_post_with_content_has_its_length_and_language_and_is_in_its_forum() -> None:
+    store = _store()
+    _apply(store, _op(0, _post()))
+    post = f"{SN}post{3:020d}"
+    assert _objects(store, post, "content") == {"hola"}
+    assert _objects(store, post, "length") == {"4"}
+    assert _objects(store, post, "language") == {"es"}
+    assert _objects(store, post, "imageFile") == set()
+    assert _objects(store, post, "isLocatedIn") == {SN + "country5"}
+    assert _objects(store, post, "hasTag") == {replay.TAG_PREFIX + "Foo"}
+    assert _objects(store, f"{SN}forum{6:020d}", "containerOf") == {post}
+
+
+def test_an_image_post_has_no_content_length_or_language_as_in_the_turtle() -> None:
+    # LDBC sends an image post as ``"content": "", "length": 0, "language": ""``;
+    # the Turtle's image posts carry none of the three.
+    store = _store()
+    _apply(store, _op(0, _post(imageFile="photo3.jpg", content="", length=0, language="")))
+    post = f"{SN}post{3:020d}"
+    assert _objects(store, post, "imageFile") == {"photo3.jpg"}
+    for predicate in ("content", "length", "language"):
+        assert _objects(store, post, predicate) == set(), predicate
+
+
+@pytest.mark.parametrize(
+    "params, exit_, target",
+    [
+        ({"personId": 1, "postId": 3, "creationDate": _CREATED}, "hasPost", f"{SN}post{3:020d}"),
+        ({"personId": 1, "commentId": 9, "creationDate": _CREATED}, "hasComment", f"{SN}comm{9:020d}"),
+    ],
+)
+def test_a_like_is_a_node_pointing_at_the_message_with_its_date(
+    params: dict[str, Any], exit_: str, target: str
+) -> None:
+    store = _store()
+    _apply(store, _op(0, params))
+    [node] = _objects(store, f"{SN}pers{1:020d}", "likes")
+    assert node.startswith(replay.GENID + "like")
+    assert _objects(store, node, exit_) == {target}
+    assert _objects(store, node, "creationDate") == {"2010-01-01T00:00:00.123Z"}
+
+
+def test_a_new_forum_has_its_title_moderator_and_tags() -> None:
+    store = _store()
+    params = {
+        "forumId": 6,
+        "forumTitle": "Wall of Ana",
+        "creationDate": _CREATED,
+        "moderatorPersonId": 1,
+        "tagIds": [5],
+    }
+    _apply(store, _op(0, params))
+    forum = f"{SN}forum{6:020d}"
+    assert _objects(store, forum, "title") == {"Wall of Ana"}
+    assert _objects(store, forum, "id") == {"6"}
+    assert _objects(store, forum, "hasModerator") == {f"{SN}pers{1:020d}"}
+    assert _objects(store, forum, "hasTag") == {replay.TAG_PREFIX + "Foo"}
+
+
+def test_a_membership_is_a_node_with_the_person_and_join_date() -> None:
+    store = _store()
+    _apply(store, _op(0, {"forumId": 6, "personId": 1, "joinDate": _CREATED}))
+    [node] = _objects(store, f"{SN}forum{6:020d}", "hasMember")
+    assert node.startswith(replay.GENID + "mbs")
+    assert _objects(store, node, "hasPerson") == {f"{SN}pers{1:020d}"}
+    assert _objects(store, node, "joinDate") == {"2010-01-01T00:00:00.123Z"}
 
 
 def test_terms_normalise_to_ldbc_values() -> None:
@@ -219,6 +308,42 @@ def test_the_mapped_fields_are_the_ones_ldbc_publishes() -> None:
         if len(seen) == len(replay.READS):
             break
     assert {name: {ldbc for ldbc, _ in replay._READS[name][2]} for name in replay.READS} == seen
+
+
+def test_the_first_insert_of_each_kind_in_ldbcs_file_applies() -> None:
+    """Each insert kind, as LDBC writes it, against the code (when the file is present).
+
+    The hand-built IU1 above once paired studyAt/workAt as ``[id, year]``;
+    LDBC's are objects, and the replay crashed at the first IU1 (line 36,332),
+    past where a 50-per-read run stops.
+    """
+    try:
+        path = replay.validation_file("0.1")
+    except replay.ReplayError:
+        pytest.skip("LDBC's SF0.1 validation parameters are not unpacked")
+    firsts: dict[str, replay.Operation] = {}
+    for op in replay.read_operations(path):
+        if op.is_update:
+            firsts.setdefault(op.name, op)
+        if len(firsts) == 8:
+            break
+    assert sorted(firsts) == [f"IU{n}" for n in range(1, 9)]
+    iu1 = firsts["IU1"].params
+    orgs = [("dbo:University", s["organizationId"]) for s in iu1["studyAt"]]
+    orgs += [("dbo:Company", w["organizationId"]) for w in iu1["workAt"]]
+    store = _store()
+    store.load(
+        (
+            f"@prefix snvoc: <{SNVOC}> . @prefix dbo: <{replay.DBO}> . @prefix xsd: <{XSD}> .\n"
+            + "".join(f'<{SN}org{i}> a {cls} ; snvoc:id "{i}"^^xsd:int .\n' for cls, i in orgs)
+        ).encode(),
+        format=ox.RdfFormat.TURTLE,
+    )
+    for op in firsts.values():
+        _apply(store, op)
+    person = f"{SN}pers{iu1['personId']:020d}"
+    assert len(_objects(store, person, "studyAt")) == len(iu1["studyAt"])
+    assert len(_objects(store, person, "workAt")) == len(iu1["workAt"]) > 0
 
 
 def test_the_command_leaves_is6_out_unless_asked(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

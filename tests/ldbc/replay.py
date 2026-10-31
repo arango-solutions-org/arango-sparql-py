@@ -3,8 +3,8 @@
 
 LDBC publishes expected results for Interactive v1
 (``validation_params-sf0.1.csv``): one operation per line,
-``<parameters JSON>|<expected result JSON>``, with 18,626 inserts interleaved
-among ~120 k reads. Each expected answer describes the database *after* the
+``<parameters JSON>|<expected result JSON>``, with 7,996 inserts interleaved
+among 130,478 reads. Each expected answer describes the database *after* the
 inserts before it, which the Turtle snapshot does not contain — so the
 inserts are applied, in file order, to a copy of the normalised oracle store,
 and each sampled read runs at its own point in the stream.
@@ -226,9 +226,12 @@ class _Nodes:
         return f"<{GENID}{kind}replay{self.counter[kind]:014d}>"
 
 
-def _tags(subject: str, tag_ids: list[int]) -> list[str]:
+def _tags(subject: str, tag_ids: list[int], predicate: str = "hasTag") -> list[str]:
+    """Tag a forum or message (``hasTag``), or give a person interests
+    (``hasInterest``: the Turtle never tags a person)."""
     return [
-        f"INSERT {{ {subject} snvoc:hasTag ?tag }} WHERE {{ {_by_id('?tag', tag_id)} }}" for tag_id in tag_ids
+        f"INSERT {{ {subject} snvoc:{predicate} ?tag }} WHERE {{ {_by_id('?tag', tag_id)} }}"
+        for tag_id in tag_ids
     ]
 
 
@@ -250,18 +253,21 @@ def update_sparql(op: Operation, nodes: _Nodes) -> list[str]:
         out.append(
             f"INSERT {{ {person} snvoc:isLocatedIn ?city }} WHERE {{ {_by_id('?city', p['cityId'], 'dbo:City')} }}"
         )
-        out += _tags(person, p["tagIds"])
-        for org_id, year in p["studyAt"]:
+        out += _tags(person, p["tagIds"], "hasInterest")
+        # Each is ``{"organizationId": …, "year": …}`` in LDBC's file.
+        for study in p["studyAt"]:
             node = nodes("study")
             out.append(
                 f"INSERT {{ {person} snvoc:studyAt {node} . {node} snvoc:hasOrganisation ?org ; "
-                f'snvoc:classYear "{year}"^^xsd:integer }} WHERE {{ {_by_id("?org", org_id, "dbo:University")} }}'
+                f'snvoc:classYear "{int(study["year"])}"^^xsd:integer }} '
+                f"WHERE {{ {_by_id('?org', study['organizationId'], 'dbo:University')} }}"
             )
-        for org_id, year in p["workAt"]:
+        for work in p["workAt"]:
             node = nodes("work")
             out.append(
                 f"INSERT {{ {person} snvoc:workAt {node} . {node} snvoc:hasOrganisation ?org ; "
-                f'snvoc:workFrom "{year}"^^xsd:integer }} WHERE {{ {_by_id("?org", org_id, "dbo:Company")} }}'
+                f'snvoc:workFrom "{int(work["year"])}"^^xsd:integer }} '
+                f"WHERE {{ {_by_id('?org', work['organizationId'], 'dbo:Company')} }}"
             )
         return out
     if op.name in ("IU2", "IU3"):
@@ -293,11 +299,13 @@ def update_sparql(op: Operation, nodes: _Nodes) -> list[str]:
         data = [
             f'{message} rdf:type snvoc:{"Post" if is_post else "Comment"} ; snvoc:id "{ident}"^^xsd:long',
             f"snvoc:creationDate {_datetime(p['creationDate'])} ; snvoc:locationIP {_string(p['locationIp'])}",
-            f'snvoc:browserUsed {_string(p["browserUsed"])} ; snvoc:length "{p["length"]}"^^xsd:int',
+            f"snvoc:browserUsed {_string(p['browserUsed'])}",
             f"snvoc:hasCreator {_iri('pers', p['authorPersonId'])}",
         ]
+        # The Turtle gives a length only with content: an image post (LDBC's
+        # ``"content": "", "length": 0``) has neither.
         if p.get("content"):
-            data.append(f"snvoc:content {_string(p['content'])}")
+            data.append(f'snvoc:content {_string(p["content"])} ; snvoc:length "{p["length"]}"^^xsd:int')
         if is_post and p.get("imageFile"):
             data.append(f"snvoc:imageFile {_string(p['imageFile'])}")
         if is_post and p.get("language"):
@@ -490,7 +498,7 @@ class ReplayReport:
     seconds: float = 0.0
 
 
-#: Log progress after this many inserts (the stream has 18,626).
+#: Log progress after this many inserts (the SF0.1 stream has 7,996).
 PROGRESS_EVERY = 1000
 
 
