@@ -819,6 +819,19 @@ class AqlQueryBuilder:
         )
         return self
 
+    def let_first(self, alias: str, expression: str) -> AqlQueryBuilder:
+        """Emit ``LET <alias> = <expression>`` before every clause.
+
+        For a value that does not depend on any loop: ArangoDB's
+        ``sort-in-values`` rule pre-sorts an ``IN`` list only when the
+        list is a variable computed outside the loops that test it
+        (see :func:`arango_sparql.translate.subselect._emit_semi_join`).
+        """
+        if not _AQL_IDENT_RE.match(alias):
+            raise ValueError(f"invalid LET alias: {alias!r}")
+        self._body_clauses.insert(0, _Clause(_ClauseKind.LET, f"LET {alias} = {expression}"))
+        return self
+
     def open_one_row_scope_first(self, row_alias: str) -> AqlQueryBuilder:
         """Put ``FOR <row_alias> IN [1]`` before every clause, if there is no FOR.
 
