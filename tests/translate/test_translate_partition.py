@@ -92,14 +92,12 @@ def test_seed_bindings_become_values_pushdown() -> None:
             {"p": {"type": "uri", "value": "http://ex.org/bob"}},
         ],
     )
-    # The seed loop + equality join must appear in the AQL, with rows
-    # travelling as a bind variable (never inlined).
-    assert "IN @_p1_values" in result.aql
-    assert "row2.p == NOT_NULL(doc1._uri, doc1._id)" in result.aql
-    assert result.bind_vars["_p1_values"] == [
-        {"p": "http://ex.org/alice"},
-        {"p": "http://ex.org/bob"},
-    ]
+    # Distinct seeds on a variable the partition binds are a semi-join: an
+    # IN test on the subject against a list computed before the loop, with
+    # the keys travelling as a bind variable (never inlined).
+    assert result.aql.startswith("LET values2 = NOOPT(@_p1_values)\n")
+    assert "FILTER NOT_NULL(doc1._uri, doc1._id) IN values2" in result.aql
+    assert result.bind_vars["_p1_values"] == ["http://ex.org/alice", "http://ex.org/bob"]
     # Provenance records the effective query (what actually ran).
     assert "VALUES (?p)" in result.provenance.query_text
 
@@ -148,7 +146,7 @@ def test_seed_literal_escaping_survives_parse() -> None:
         seed_bindings=[{"name": hostile}],
     )
     binding_rows = result.bind_vars["_p1_values"]
-    assert binding_rows == [{"name": hostile}]
+    assert binding_rows == [hostile]
 
 
 def test_seed_unsafe_iri_rejected() -> None:

@@ -17,6 +17,9 @@ based on the inner pattern:
   (SPARQL 1.1 §10.2). Each row is converted to a Python dict,
   bound as a single AQL list-of-objects value, and iterated with
   ``FOR <row> IN @<bind>``. UNDEF in any row becomes JSON ``null``.
+  Distinct, fully bound rows on variables the pattern already binds
+  (a federation seed) are a semi-join instead: an ``IN`` test against
+  the rows, with no row loop.
 
 Both branches use the same outer-scope plumbing: each
 projected/declared variable becomes ``<row>.<var>`` in
@@ -242,17 +245,78 @@ def _emit_values(visitor: AlgebraVisitor, values_node: Any) -> None:
             }
         )
 
+    # A variable with UNDEF in some row is unbound in that solution.
+    unbound = {name for name in var_names if any(row[name] is None for row in rows_python)}
+    if _is_semi_join(visitor, var_names, rows_python, unbound):
+        _emit_semi_join(visitor, var_names, rows_python)
+        return
+
     values_bind = visitor.builder.bind(rows_python, hint="values")
     row_alias = visitor.builder.fresh_alias(prefix="row")
     visitor.builder.for_values(row_alias, values_bind)
 
-    # A variable with UNDEF in some row is unbound in that solution.
-    _bind_outer_scope(
-        visitor,
-        row_alias,
-        var_names,
-        unbound={name for name in var_names if any(row[name] is None for row in rows_python)},
-    )
+    _bind_outer_scope(visitor, row_alias, var_names, unbound=unbound)
+
+
+def _is_semi_join(
+    visitor: AlgebraVisitor,
+    var_names: list[str],
+    rows: list[dict[str, Any]],
+    unbound: set[str],
+) -> bool:
+    """Whether a VALUES block only keeps the solutions it matches.
+
+    It does when the pattern already binds every one of its variables,
+    none of them can be unbound on either side, and no two rows are the
+    same: each solution then joins with at most one row and takes nothing
+    from it. That is the shape of a federation seed (a trailing VALUES on
+    the leg's join keys). A repeated row multiplies its solutions (bag
+    semantics), and Python equality is at least as coarse as AQL's on
+    these JSON values, so a block Python finds distinct is distinct in AQL.
+    """
+    if unbound or not visitor.builder.has_for_clause():
+        return False
+    for name in var_names:
+        if name not in visitor.state.var_to_expr or name in visitor.state.maybe_unbound:
+            return False
+    return len({tuple(row[name] for name in var_names) for row in rows}) == len(rows)
+
+
+def _emit_semi_join(visitor: AlgebraVisitor, var_names: list[str], rows: list[dict[str, Any]]) -> None:
+    """A VALUES semi-join (:func:`_is_semi_join`) as an ``IN`` test.
+
+    AQL shape::
+
+        LET <values> = NOOPT(@<values_bind>)   -- before every FOR
+        ...
+        FILTER <bound expr> IN <values>              -- one variable
+        FILTER [<expr 1>, <expr 2>] IN <values>      -- several
+
+    The row loop it replaces compares every solution with every row; a
+    seeded federation leg of 10,000 keys against a 10,000-document
+    collection took 5.1 s that way. ArangoDB's ``sort-in-values`` rule
+    sorts an ``IN`` list once and binary-searches it, but only when the
+    list is a variable computed outside the loops; a constant list (a
+    bind value written in place, or a LET the optimizer folds into one)
+    after another FILTER on the same loop is searched linearly (197 ms
+    for the same leg). ``NOOPT`` keeps the LET a variable: 5 ms.
+
+    A subject is tested in its ``NOT_NULL(_uri, _id)`` form, not
+    :func:`~arango_sparql.translate.builder.subject_in`: the rule does not
+    sort an ``IN`` under an ``||``, so that form searched linearly (509 ms
+    for 10,000 subjects, against 18 ms).
+    """
+    if len(var_names) == 1:
+        (name,) = var_names
+        bound = [row[name] for row in rows]
+        tested = visitor.state.var_to_expr[name]
+    else:
+        bound = [[row[name] for name in var_names] for row in rows]
+        tested = "[" + ", ".join(visitor.state.var_to_expr[name] for name in var_names) + "]"
+    values_bind = visitor.builder.bind(bound, hint="values")
+    values_alias = visitor.builder.fresh_alias(prefix="values")
+    visitor.builder.let_first(values_alias, f"NOOPT({values_bind})")
+    visitor.builder.filter_raw(f"{tested} IN {values_alias}")
 
 
 def _bind_outer_scope(
