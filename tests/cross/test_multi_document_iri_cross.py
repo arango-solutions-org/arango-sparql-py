@@ -210,6 +210,98 @@ GRAPH_OUTSIDE_STRICT = Store(
     resolver_kwargs={"default_graph_includes_named": False},
 )
 
+#: One IRI as a document per graph, read inside and outside ``GRAPH :g``
+#: (#119): a document read on one side of the boundary is not reused on the
+#: other. Strict default graph; with and without domains on the properties.
+_SCOPE_ONTOLOGY = (
+    PREFIXES
+    + """
+:Person a owl:Class ; phys:collectionName "Person" .
+:name a owl:DatatypeProperty ; rdfs:domain :Person .
+:age a owl:DatatypeProperty ; rdfs:domain :Person .
+:knows a owl:ObjectProperty ; phys:edgeCollectionName "knows" ; rdfs:domain :Person ; rdfs:range :Person .
+"""
+)
+_SCOPE_DOCS = {
+    "Person": [
+        {"_id": "Person/s0", "_uri": EX + "s", "name": "S-default"},
+        {"_id": "Person/sg", "_uri": EX + "s", "_graph": EX + "g", "name": "S-g", "age": 5},
+        {"_id": "Person/t0", "_uri": EX + "t", "name": "T"},
+    ],
+    "knows": [{"_id": "knows/1", "_from": "Person/s0", "_to": "Person/t0"}],
+}
+_SCOPE_DATA = (
+    ':s a :Person ; :name "S-default" ; :knows :t . :t a :Person ; :name "T" .\n'
+    ':g { :s a :Person ; :name "S-g" ; :age 5 . }'
+)
+_STRICT = {"default_graph_includes_named": False, "default_collection": "Person"}
+GRAPH_SCOPES = Store(_SCOPE_ONTOLOGY, _SCOPE_DOCS, _SCOPE_DATA, trig=True, resolver_kwargs=_STRICT)
+GRAPH_SCOPES_NO_DOMAIN = Store(
+    _SCOPE_ONTOLOGY.replace(" ; rdfs:domain :Person .\n:age", " .\n:age").replace(
+        ":age a owl:DatatypeProperty ; rdfs:domain :Person .", ":age a owl:DatatypeProperty ."
+    ),
+    _SCOPE_DOCS,
+    _SCOPE_DATA,
+    trig=True,
+    resolver_kwargs=_STRICT,
+)
+
+#: A subject whose only document is in ``:g``, read through the union
+#: default graph, then inside ``GRAPH :g`` by a property with no domain
+#: (review R128-1): it is re-read in its own collection, not the (empty)
+#: default one.
+GRAPH_ONLY_NO_DOMAIN = Store(
+    ontology=PREFIXES
+    + """
+:Person a owl:Class ; phys:collectionName "Person" .
+:name a owl:DatatypeProperty .
+""",
+    docs={
+        "Person": [{"_id": "Person/s", "_uri": EX + "s", "_graph": EX + "g", "name": "S"}],
+        "Document": [],
+    },
+    data=':s a :Person .\n:g { :s :name "S" . }',
+    trig=True,
+    resolver_kwargs={"default_collection": "Document"},
+)
+
+#: A subject reached by an edge outside ``GRAPH :g``, read inside it by a
+#: property with no domain: re-read from the default collection (where its
+#: ``:g`` copy is), not from the edge collection its vertex came through.
+GRAPH_EDGE_REACHED = Store(
+    ontology=PREFIXES
+    + """
+:Person a owl:Class ; phys:collectionName "Person" .
+:Org a owl:Class ; phys:collectionName "Person" .
+:name a owl:DatatypeProperty .
+:age a owl:DatatypeProperty .
+:knows a owl:ObjectProperty ; phys:edgeCollectionName "knows" ; rdfs:domain :Person ; rdfs:range :Person .
+:worksFor a owl:ObjectProperty ; phys:edgeCollectionName "worksFor" ; rdfs:domain :Person .
+""",
+    docs={
+        "Person": [
+            {"_id": "Person/s0", "_uri": EX + "s"},
+            {"_id": "Person/t0", "_uri": EX + "t", "name": "T"},
+            {"_id": "Person/tg", "_uri": EX + "t", "_graph": EX + "g", "name": "T-g", "age": 7},
+        ],
+        "knows": [{"_id": "knows/1", "_from": "Person/s0", "_to": "Person/t0"}],
+        "worksFor": [{"_id": "worksFor/1", "_from": "Person/s0", "_to": "Person/t0"}],
+    },
+    data=':s a :Person ; :knows :t ; :worksFor :t . :t a :Person ; :name "T" .\n'
+    ':g { :t a :Person ; :name "T-g" ; :age 7 . }',
+    trig=True,
+    resolver_kwargs=_STRICT,
+)
+#: As above, with the default collection empty: a vertex reached by an edge
+#: is re-read in its property's range, not there.
+GRAPH_EDGE_REACHED_EMPTY_DEFAULT = Store(
+    GRAPH_EDGE_REACHED.ontology,
+    {**GRAPH_EDGE_REACHED.docs, "Document": []},
+    GRAPH_EDGE_REACHED.data,
+    trig=True,
+    resolver_kwargs={"default_graph_includes_named": False},
+)
+
 #: A repeated rdfs:domain / rdfs:range (#122): the shape arango-query-core's
 #: ``mapping_to_turtle`` and the schema analyzer's ``owl_export`` write for a
 #: property shared by several classes. Any of them holds subjects (objects).
@@ -675,6 +767,55 @@ _CASES: list[tuple[str, Store, str, str | None]] = [
         "SELECT ?m WHERE { GRAPH :g { ?p a :Person . ?m a :Post . ?m :hasCreator ?p } }",
         None,
     ),
+    (
+        "scope_graph_only_no_domain_var",
+        GRAPH_ONLY_NO_DOMAIN,
+        "SELECT ?n WHERE { ?s a :Person . GRAPH :g { ?s :name ?n } }",
+        None,
+    ),
+    (
+        "scope_graph_only_no_domain_const",
+        GRAPH_ONLY_NO_DOMAIN,
+        "SELECT ?n WHERE { :s a :Person . GRAPH :g { :s :name ?n } }",
+        None,
+    ),
+    *[
+        (f"scope_edge_reached{suffix}_{name}", store, query, None)
+        for suffix, store in (("", GRAPH_EDGE_REACHED), ("_empty_default", GRAPH_EDGE_REACHED_EMPTY_DEFAULT))
+        for name, query in [
+            ("plain", "SELECT ?x WHERE { ?s :knows ?t . GRAPH :g { ?t :name ?x } }"),
+            ("optional", "SELECT ?t ?x WHERE { ?s :knows ?t . OPTIONAL { GRAPH :g { ?t :name ?x } } }"),
+            ("union", "SELECT ?x WHERE { ?s :knows ?t . GRAPH :g { { ?t :name ?x } UNION { ?t :age ?x } } }"),
+        ]
+    ],
+    # No range: nothing says where the vertex is, so it is re-read in the
+    # default collection (here holding its copy; an empty one finds nothing).
+    (
+        "scope_edge_reached_no_range",
+        GRAPH_EDGE_REACHED,
+        "SELECT ?x WHERE { ?s :worksFor ?o . GRAPH :g { ?o :name ?x } }",
+        None,
+    ),
+    *[
+        (f"scope_{name}{suffix}", store, query, None)
+        for suffix, store in (("", GRAPH_SCOPES), ("_no_domain", GRAPH_SCOPES_NO_DOMAIN))
+        for name, query in [
+            ("const_in_then_out", "SELECT ?n WHERE { GRAPH :g { :s a :Person } :s :name ?n }"),
+            ("const_out_then_in", "SELECT ?n WHERE { :s a :Person . GRAPH :g { :s :name ?n } }"),
+            ("const_both", "SELECT ?n ?m WHERE { :s :name ?n . GRAPH :g { :s :name ?m } }"),
+            ("const_both_reversed", "SELECT ?n ?m WHERE { GRAPH :g { :s :name ?m } :s :name ?n }"),
+            ("var_outer_then_in", "SELECT ?x WHERE { ?s :knows ?t . GRAPH :g { ?s :name ?x } }"),
+            (
+                "union_arms_in_graph",
+                "SELECT ?x WHERE { ?s :knows ?t . GRAPH :g { { ?s :name ?x } UNION { ?s :age ?x } } }",
+            ),
+            (
+                "typed_union_arms_in_graph",
+                "SELECT ?x WHERE { ?s a :Person . ?s :knows ?t . GRAPH :g { { ?s :name ?x } UNION { ?s :age ?x } } }",
+            ),
+            ("optional_graph", "SELECT ?s ?x WHERE { ?s :knows ?t . OPTIONAL { GRAPH :g { ?s :name ?x } } }"),
+        ]
+    ],
     (
         "repeated_range_graph_variable",
         REPEATED_RANGE_GRAPHS,

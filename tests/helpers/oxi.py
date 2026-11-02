@@ -215,9 +215,13 @@ def assert_bindings_equal(
     expected: list[dict[str, str]],
     actual: list[dict[str, str]],
 ) -> None:
-    """Order-insensitive bag equality on SELECT bindings."""
-    exp = sorted(tuple(sorted(row.items())) for row in expected)
-    act = sorted(tuple(sorted(row.items())) for row in actual)
+    """Order-insensitive bag equality on SELECT bindings.
+
+    Rows are ordered by ``repr``: one variable can hold a string in one row
+    and a number in another (``{ ?s :name ?x } UNION { ?s :age ?x }``), which
+    Python cannot order against each other."""
+    exp = sorted((tuple(sorted(row.items())) for row in expected), key=repr)
+    act = sorted((tuple(sorted(row.items())) for row in actual), key=repr)
     assert exp == act, f"bindings differ:\n  expected={exp}\n  actual={act}"
 
 
