@@ -597,6 +597,11 @@ routes the subject (`translate/visitor.py`):
   carrying its own label test and, for a constant subject, its own indexed
   `_uri` match (`_open_class_union`, LDBC plan decision D9). A `UNION`
   supertype in the domain stands for its members.
+  A repeated `rdfs:domain` or `rdfs:range` (one triple per class, as
+  arango-query-core's `mapping_to_turtle` and the schema analyzer's
+  `owl_export` write for a shared property) means any of the classes, like
+  an `owl:unionOf`: routing, lookups and walks read all of them
+  (`SchemaResolver.class_list`, issue #122).
 
 The union refuses, with `E_SPARQL_UNSUPPORTED`, classes that disagree on
 tenant scoping (one tenant filter cannot serve them) and sharded classes.

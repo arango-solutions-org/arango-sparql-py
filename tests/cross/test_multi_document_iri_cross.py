@@ -210,6 +210,71 @@ GRAPH_OUTSIDE_STRICT = Store(
     resolver_kwargs={"default_graph_includes_named": False},
 )
 
+#: A repeated rdfs:domain / rdfs:range (#122): the shape arango-query-core's
+#: ``mapping_to_turtle`` and the schema analyzer's ``owl_export`` write for a
+#: property shared by several classes. Any of them holds subjects (objects).
+REPEATED_RANGE_DOMAIN = Store(
+    ontology=PREFIXES
+    + """
+:Person a owl:Class ; phys:collectionName "Person" .
+:Company a owl:Class ; phys:collectionName "Company" .
+:Post a owl:Class ; phys:collectionName "Post" .
+:Comment a owl:Class ; phys:collectionName "Comment" .
+:name a owl:DatatypeProperty ; rdfs:domain :Person ; rdfs:domain :Company .
+:likes a owl:ObjectProperty ; phys:edgeCollectionName "likes" ; rdfs:domain :Person ;
+    rdfs:range :Post ; rdfs:range :Comment .
+:hasCreator a owl:ObjectProperty ; phys:edgeCollectionName "hasCreator" ;
+    rdfs:domain :Post ; rdfs:domain :Comment ; rdfs:range :Person .
+""",
+    docs={
+        "Person": [
+            {"_id": "Person/a", "_uri": EX + "a", "name": "A"},
+            {"_id": "Person/b", "_uri": EX + "b", "name": "B"},
+        ],
+        "Company": [{"_id": "Company/c", "_uri": EX + "c", "name": "C"}],
+        "Post": [{"_id": "Post/m1", "_uri": EX + "m1"}],
+        "Comment": [{"_id": "Comment/k1", "_uri": EX + "k1"}],
+        "likes": [
+            {"_id": "likes/1", "_from": "Person/a", "_to": "Post/m1"},
+            {"_id": "likes/2", "_from": "Person/b", "_to": "Comment/k1"},
+        ],
+        "hasCreator": [
+            {"_id": "hasCreator/1", "_from": "Post/m1", "_to": "Person/a"},
+            {"_id": "hasCreator/2", "_from": "Comment/k1", "_to": "Person/a"},
+        ],
+    },
+    data=':a a :Person ; :name "A" ; :likes :m1 . :b a :Person ; :name "B" ; :likes :k1 . '
+    ':c a :Company ; :name "C" . :m1 a :Post ; :hasCreator :a . :k1 a :Comment ; :hasCreator :a .',
+    resolver_kwargs={"default_collection": "Person"},
+)
+
+#: The repeated range in named graphs: an object found by a lookup across
+#: the range's collections binds an unbound ``GRAPH ?g`` (it raised
+#: AqlEmitError: "?g was never bound").
+REPEATED_RANGE_GRAPHS = Store(
+    ontology=REPEATED_RANGE_DOMAIN.ontology,
+    docs={
+        "Person": [
+            {"_id": "Person/a", "_uri": EX + "a", "_graph": EX + "g"},
+            {"_id": "Person/b", "_uri": EX + "b", "_graph": EX + "g"},
+            {"_id": "Person/c", "_uri": EX + "c", "_graph": EX + "h"},
+        ],
+        "Post": [{"_id": "Post/m1", "_uri": EX + "m1", "_graph": EX + "g"}],
+        "Comment": [
+            {"_id": "Comment/k1", "_uri": EX + "k1", "_graph": EX + "g"},
+            {"_id": "Comment/k1h", "_uri": EX + "k1", "_graph": EX + "h"},
+        ],
+        "likes": [
+            {"_id": "likes/1", "_from": "Person/a", "_to": "Post/m1", "_graph": EX + "g"},
+            {"_id": "likes/2", "_from": "Person/b", "_to": "Comment/k1", "_graph": EX + "g"},
+            {"_id": "likes/3", "_from": "Person/c", "_to": "Comment/k1h", "_graph": EX + "h"},
+        ],
+    },
+    data=":g { :a a :Person ; :likes :m1 . :b a :Person ; :likes :k1 . :m1 a :Post . :k1 a :Comment . }\n"
+    ":h { :c a :Person ; :likes :k1 . :k1 a :Comment . }",
+    trig=True,
+)
+
 #: The same IRI in two tenants; the oracle holds tenant t1's facts. ``knows``
 #: declares no domain, so nothing else keeps the walk inside the tenant.
 TENANTS = Store(
@@ -591,6 +656,39 @@ _CASES: list[tuple[str, Store, str, str | None]] = [
         "SELECT ?m WHERE { GRAPH :g { ?p a :Person . ?m a :Post . ?m :hasCreator ?p } }",
         None,
     ),
+    (
+        "repeated_range_graph_variable",
+        REPEATED_RANGE_GRAPHS,
+        "SELECT ?g ?p WHERE { GRAPH ?g { ?p :likes :k1 } }",
+        None,
+    ),
+    (
+        "repeated_range_graph_variable_values",
+        REPEATED_RANGE_GRAPHS,
+        "SELECT ?g ?p ?m WHERE { VALUES ?m { :m1 :k1 } GRAPH ?g { ?p :likes ?m } }",
+        None,
+    ),
+    (
+        "repeated_range_graph_constant",
+        REPEATED_RANGE_GRAPHS,
+        "SELECT ?p WHERE { GRAPH :h { ?p :likes :k1 } }",
+        None,
+    ),
+    *[
+        (f"repeated_{name}", REPEATED_RANGE_DOMAIN, query, None)
+        for name, query in [
+            ("domain_untyped_subject", "SELECT ?s ?n WHERE { ?s :name ?n }"),
+            ("domain_constant_subject", "SELECT ?n WHERE { :c :name ?n }"),
+            ("domain_edge_subject", "SELECT ?p WHERE { :k1 :hasCreator ?p }"),
+            ("domain_reverse_walk", "SELECT ?m WHERE { ?m :hasCreator :a }"),
+            ("range_constant_object", "SELECT ?p WHERE { ?p :likes :k1 }"),
+            ("range_values_object", "SELECT ?p ?m WHERE { VALUES ?m { :m1 :k1 } ?p :likes ?m }"),
+            (
+                "range_subselect_object",
+                "SELECT ?p ?m WHERE { { SELECT ?m WHERE { ?m a :Comment } } ?p :likes ?m }",
+            ),
+        ]
+    ],
     ("tenant_reverse", TENANTS, "SELECT ?x ?y WHERE { ?y a :Person . ?x :knows ?y }", None),
     ("tenant_reverse_const", TENANTS, "SELECT ?x WHERE { :y a :Person . ?x :knows :y }", None),
     (
@@ -717,11 +815,13 @@ _CASES: list[tuple[str, Store, str, str | None]] = [
 
 
 #: Cases the AQL interpreter cannot run (a ``UNION`` inside an OPTIONAL
-#: sub-query, ``DOCUMENT()``); ``tests/integration/test_multi_document_iri_live.py`` runs them.
+#: sub-query, a sub-SELECT, ``DOCUMENT()``); ``tests/integration/test_multi_document_iri_live.py``
+#: runs them.
 _LIVE_ONLY = {
     "ng_strict_optional",
     "ng_strict_optional_class_walk",
     "graph_outside_optional",
+    "repeated_range_subselect_object",
     "tenant_relationship_node_alone",
 }
 

@@ -2577,8 +2577,8 @@ class AlgebraVisitor:
             # No such triple in RDF: no rows, but the object stays bound so
             # it can still be projected.
             self.builder.filter_raw("false")
-        elif prop.range_iri is not None:
-            classes = self._concrete_classes((prop.range_iri,))
+        elif prop.range_iris:
+            classes = self._concrete_classes(prop.range_iris)
             tests = []
             for collection in sorted({c.collection for c in classes}):
                 members = [c for c in classes if c.collection == collection]
@@ -2604,7 +2604,7 @@ class AlgebraVisitor:
         relationships = set(prop.edge_target_of) & self.state.bgp_entries.get(str(node), set())
         if len(relationships) != 1:
             return False
-        target = self._object_document(obj, prop.range_iri)
+        target = self._object_document(obj, prop.range_iris)
         if target is None:
             return False
         relationship = self.resolver.resolve_property(next(iter(relationships)))
@@ -2680,15 +2680,16 @@ class AlgebraVisitor:
         name = str(subject)
         if name in self.state.var_to_doc_alias or name in self.state.var_to_expr:
             return None
-        return self._object_document(obj, prop.range_iri)
+        return self._object_document(obj, prop.range_iris)
 
-    def _object_document(self, obj: Any, range_iri: str | None) -> str | None:
+    def _object_document(self, obj: Any, range_iris: tuple[str, ...]) -> str | None:
         """The alias of the document a known object is, opening it if needed.
 
         A variable bound to a document is that document. A variable known
         only by its value (a sub-select column, a VALUES row, a UNION row) or
-        a constant IRI is looked up in the property's ``rdfs:range`` class,
-        when that is a single document class, by an indexed ``_uri`` match:
+        a constant IRI is looked up in the property's ``rdfs:range`` classes
+        (every one of a repeated range, a supertype's members: issue #122),
+        when they are stored as documents, by an indexed ``_uri`` match:
         walking an edge backwards from it beats scanning every possible
         subject (LDBC: ``?m :hasCreator ?fr`` with ``?fr`` from a sub-select
         scanned every message). ``None`` when the object cannot be found
@@ -2702,48 +2703,63 @@ class AlgebraVisitor:
             name = str(obj)
             alias = self.state.var_to_doc_alias.get(name)
             if alias is not None:
-                return self._every_copy(alias, range_iri)
+                return self._every_copy(alias, range_iris)
             value = self.state.var_to_expr.get(name)
             if value is None:
                 return None
         elif isinstance(obj, URIRef):
             known = self.state.const_subject_alias.get(str(obj))
             if known is not None:
-                return self._every_copy(known, range_iri)
+                return self._every_copy(known, range_iris)
             value = None
         else:
             return None
-        if range_iri is None:
+        by_collection = self._range_classes(range_iris)
+        if not by_collection:
             return None
-        try:
-            resolved = self.resolver.resolve_class(range_iri)
-        except SchemaResolutionError:
-            return None
-        if resolved.style in ("RPT", "UNION"):
-            # A supertype range has no one collection to look the object up
-            # in; the forward plan reads it instead.
-            return None
-        alias = self._open_collection(resolved.collection, resolved=resolved)
-        if resolved.type_field and resolved.type_value:
-            type_bind = self.builder.bind(
-                resolved.type_value,
-                hint=resolved.type_field if is_aql_identifier(resolved.type_field) else None,
-            )
-            self.builder.filter_raw(
-                type_predicate(alias, resolved.type_field, type_bind, is_array=resolved.type_field_is_array)
-            )
-        self._enforce_tenant_scope(alias, resolved)
+        match = (
+            (lambda alias: subject_matches_value(alias, value))
+            if value is not None
+            else (lambda alias: subject_matches(alias, self.builder.bind(str(obj), hint="uri")))
+        )
+        if len(by_collection) == 1:
+            ((collection, classes),) = by_collection.items()
+            alias = self._open_collection(collection, resolved=classes[0])
+            for test in self._class_tests(self.builder, alias, classes, "the rdfs:range"):
+                self.builder.filter_raw(test)
+            for tenant in {(c.tenant_field, c.tenant_entity): c for c in classes}.values():
+                self._enforce_tenant_scope(alias, tenant)
+            self.builder.filter_raw(match(alias))
+        else:
+            # The range's classes span several collections: one indexed
+            # lookup per collection, each read as a document of its classes.
+            arms = []
+            for collection, classes in by_collection.items():
+                child = self.builder.create_child()
+                inner = child.fresh_alias()
+                child.for_(inner, collection)
+                for test in self._class_tests(child, inner, classes, "the rdfs:range"):
+                    child.filter_raw(test)
+                for tenant in {(c.tenant_field, c.tenant_entity): c for c in classes}.values():
+                    self._enforce_tenant_scope(inner, tenant, builder=child)
+                child.filter_raw(match(inner))
+                child.return_scalar(inner)
+                arms.append(self.builder.absorb_child(child))
+            alias = self.builder.fresh_alias()
+            self.builder.for_union(alias, arms, scans_documents=True)
+            # The named-graph scope applies to the union row, as one
+            # collection's scan applies it (:meth:`_open_collection`): an
+            # unbound ``GRAPH ?g`` is bound here. A per-arm test could only
+            # filter, and left ``?g`` unbound (AqlEmitError).
+            self._apply_graph_scope(alias)
         if value is not None:
             # The variable keeps its value expression; its document is this.
-            self.builder.filter_raw(subject_matches_value(alias, value))
             self.state.var_to_doc_alias[str(obj)] = alias
-            return alias
-        uri_bind = self.builder.bind(str(obj), hint="uri")
-        self.builder.filter_raw(subject_matches(alias, uri_bind))
-        self.state.const_subject_alias[str(obj)] = alias
+        else:
+            self.state.const_subject_alias[str(obj)] = alias
         return alias
 
-    def _every_copy(self, alias: str, range_iri: str | None) -> str:
+    def _every_copy(self, alias: str, range_iris: tuple[str, ...]) -> str:
         """The documents carrying the IRI of the document at *alias* that an
         edge can point at, as one alias to walk backwards from (issue #105).
 
@@ -2769,7 +2785,7 @@ class AlgebraVisitor:
         (ERR 1203, the ``Document`` default of the ``/sparql`` route among
         them), so an edge into another copy there is a known limit (#105).
         """
-        by_collection = self._range_classes(range_iri)
+        by_collection = self._range_classes(range_iris)
         if not by_collection:
             return alias
         in_scope = self._graph_scope_test
@@ -2847,7 +2863,7 @@ class AlgebraVisitor:
             or self.resolver.is_edge_exit(p)
             or resolved.style in ("RPT", "UNION")
             or resolved.shard_family is not None
-            or not self._range_classes(prop.range_iri)
+            or not self._range_classes(prop.range_iris)
         ):
             return None
         return pending[0]
@@ -2877,7 +2893,7 @@ class AlgebraVisitor:
             if isinstance(o, Variable)
             else self.state.const_subject_alias[str(o)]
         )
-        source = self._every_copy(target, prop.range_iri)
+        source = self._every_copy(target, prop.range_iris)
         v_alias = self.builder.fresh_alias(prefix="v")
         e_alias = self.builder.fresh_alias(prefix="e")
         self.builder.for_traversal(
@@ -2902,15 +2918,15 @@ class AlgebraVisitor:
         self.state.doc_to_collection[v_alias] = resolved.collection
         self._bind_subject(s, v_alias)
 
-    def _range_classes(self, range_iri: str | None) -> dict[str, list[ResolvedClass]]:
-        """The document classes of a declared ``rdfs:range`` (a supertype's
-        members), by the collection each is stored in (a sharded class in
-        each member of its family); empty when there is no range or it is
-        not stored as documents (RPT)."""
-        if range_iri is None:
+    def _range_classes(self, range_iris: tuple[str, ...]) -> dict[str, list[ResolvedClass]]:
+        """The document classes of a declared ``rdfs:range`` (each of a
+        repeated range, a supertype's members), by the collection each is
+        stored in (a sharded class in each member of its family); empty when
+        there is no range or it is not stored as documents (RPT)."""
+        if not range_iris:
             return {}
         try:
-            classes = self._concrete_classes((range_iri,))
+            classes = self._concrete_classes(range_iris)
         except SchemaResolutionError:
             return {}
         if not classes or any(c.style == "RPT" for c in classes):
