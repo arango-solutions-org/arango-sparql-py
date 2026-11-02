@@ -24,11 +24,16 @@ def _aql(ttl: str, body: str) -> str:
     return translate("PREFIX : <http://ex.org/>\n" + body, resolver=resolver).aql
 
 
-def test_a_symmetric_property_from_a_domain_routed_constant_traverses_any() -> None:
+def test_a_symmetric_property_from_a_domain_routed_constant_walks_both_directions() -> None:
+    # Each stored edge once from either end, by one edge-index lookup on
+    # ``_from`` or ``_to``. ArangoDB's ``ANY`` reached a self-loop twice
+    # (#121).
     assert _aql(PG_ONTOLOGY, "SELECT ?f WHERE { :alice :directKnows ?f }") == (
         "FOR doc1 IN @@c1_Person\n"
         "FILTER (doc1._uri == @_p1_uri || (doc1._uri == null && doc1._id == @_p1_uri))\n"
-        "FOR v2, e3 IN ANY doc1 @@c2_knows\n"
+        "FOR e3 IN @@c2_knows\n"
+        "FILTER e3._from == doc1._id || e3._to == doc1._id\n"
+        "LET v2 = DOCUMENT(e3._from == doc1._id ? e3._to : e3._from)\n"
         "RETURN { f: NOT_NULL(v2._uri, v2._id) }"
     )
 

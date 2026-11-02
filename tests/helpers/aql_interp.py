@@ -294,6 +294,16 @@ _AQL_BUILTINS: dict[str, Any] = {
     # folding the expression into a constant. A VALUES semi-join keeps its
     # ``IN`` list a variable that way (``LET values3 = NOOPT(@_p1_values)``).
     "NOOPT": lambda v: v,
+    # ``TRANSLATE(value, lookup, default)``: *lookup*'s entry for *value*,
+    # else *default*. The tenant test reads a collection's scoped labels so.
+    "TRANSLATE": lambda value, lookup, default=None: (
+        lookup.get(value, default) if isinstance(lookup, dict) and isinstance(value, str) else default
+    ),
+    # The tenant test of a walked document (issue #118).
+    "FIRST": lambda v: v[0] if isinstance(v, list) and v else None,
+    "SPLIT": lambda v, sep: None if v is None else str(v).split(sep),
+    "TO_ARRAY": lambda v: [] if v is None else (v if isinstance(v, list) else [v]),
+    "INTERSECTION": lambda a, b: [x for x in (a or []) if x in (b or [])],
     "LOWER": lambda v: None if v is None else str(v).lower(),
     "UPPER": lambda v: None if v is None else str(v).upper(),
     "LENGTH": lambda v: None if v is None else len(v),
@@ -684,6 +694,12 @@ def _eval_expr(
                 namespace[f"{alias}__{attr}"] = value
     namespace.update(bind_vars)
     namespace.update(scoped_let)
+    # A document bound by LET reads like one bound by FOR: ``LET v2 =
+    # DOCUMENT(…)`` (a symmetric step's far end) then ``v2._uri``.
+    for alias, value in scoped_let.items():
+        if isinstance(value, dict) and _DOC_ATTR_NAMESPACE_RE.match(f"{alias}__x"):
+            for attr, attr_value in value.items():
+                namespace.setdefault(f"{alias}__{attr}", attr_value)
     py = _TERNARY_RE.sub(r"((\2) if (\1) else \3)", expr)
     py = _QUOTED_ATTR_RE.sub(lambda m: f"_aql_attr({m.group(1)}, {m.group(2)!r})", py)
     py = _DOC_ATTR_RE.sub(_bare_attr, py)
@@ -1049,7 +1065,11 @@ def run_aql_subset(
             assert b is not None
             run_plan(idx + 1, env, {**let_env, b: _eval_expr(a, env, bind_vars, let_env)})
 
-    run_plan(0, dict(_outer_env or {}), dict(_outer_let or {}))
+    # ``DOCUMENT(id)`` reads the document a handle names, in any collection
+    # (a symmetric step's far end: ``DOCUMENT(e._from == s._id ? e._to :
+    # e._from)``); a missing one is null, as in ArangoDB.
+    root_let = {"DOCUMENT": lambda handle: id_index.get(handle), **(_outer_let or {})}
+    run_plan(0, dict(_outer_env or {}), root_let)
 
     if seen_collect:
         keys = collect_keys or []

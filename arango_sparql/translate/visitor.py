@@ -132,6 +132,9 @@ class _BindingState:
     Without the cache each FOR would mint its own bind, multiplying
     the bind-vars dict and obscuring the AQL."""
 
+    guard_binds: dict[tuple[str, str], str] = field(default_factory=dict)
+    """Bind parameters of the tenant test (:meth:`AlgebraVisitor._tenant_test`),
+    by value: made once per visitor instead of once per walked document."""
     pending_calls: dict[str, PredicateCall] = field(default_factory=dict)
     """Registered-predicate calls in the current BGP, by entity variable,
     waiting for the entity's type pattern to open the loop they shape."""
@@ -936,6 +939,7 @@ class AlgebraVisitor:
             if prop.mapping_style == "GENERIC_WITH_TYPE" and prop.type_field and prop.type_value:
                 bind = child.bind(prop.type_value, hint=prop.type_field)
                 child.filter_eq(attribute_ref(e_alias, prop.type_field), bind)
+            self._guard_tenants(v_alias, child)
             fields.append((var, subject_ref(v_alias)))
         for var, source_expr in attr_bindings:
             if self.resolver.fan_out_list_values:
@@ -1967,6 +1971,8 @@ class AlgebraVisitor:
         cannot, by definition, belong to a customer-declared shard
         family, so plain FOR is the only correct emission there.
         """
+        if resolved is not None and resolved.style == "RPT":
+            self._refuse_tenant_scoped_triples(resolved.collection)
         alias = self.builder.fresh_alias()
         if resolved is not None and resolved.shard_family is not None:
             # Sharded class: fan out over every member of the family.
@@ -1988,6 +1994,12 @@ class AlgebraVisitor:
         # one place so PG / LPG / RPT collections all share the same
         # scoping recipe. See ADR-0001.
         self._apply_graph_scope(alias)
+        if resolved is None:
+            # The default collection, opened for a subject no class placed
+            # (and by DESCRIBE): its documents can be of tenant-scoped
+            # classes (an LPG shared collection, a PG default set to one), so
+            # they are held to the tenant like a walked document (#118).
+            self._guard_tenants(alias)
         return alias
 
     def _graph_scope_test(self, alias: str) -> str | None:
@@ -2005,6 +2017,27 @@ class AlgebraVisitor:
             return f"{lhs} == {self.builder.bind(str(graph_term), hint='graph')}"
         existing = self.state.var_to_expr.get(str(graph_term))
         return None if existing is None else f"{lhs} == {existing}"
+
+    def _refuse_tenant_scoped_triples(self, collection: str) -> None:
+        """Refuse reading a triples table a tenant-scoped RPT class uses.
+
+        RPT rows live in a denormalised triples table whose columns are
+        fixed (subject_uri / predicate / object_uri / object_value); a
+        per-document ``tenant_field`` would not exist as a column. Refuse
+        rather than silently skip: every read of the table comes here (a
+        type pattern, a subject routed to a pure triple store, the
+        cross-subject OPTIONAL), whichever class it reads through, since
+        the table holds the tenant-scoped class's rows too (issue #118).
+        """
+        scoped = [c for c in self.resolver.tenant_scoped_classes(rpt=True) if c.collection == collection]
+        if not scoped:
+            return
+        cls = scoped[0]
+        raise CrossTenantJoinError(
+            f"RPT-style class {cls.iri!r} declares phys:tenantField {cls.tenant_field!r} on "
+            f"triples table {collection!r}, but RPT triples rows have fixed columns and no tenant "
+            f"discriminator; tenant scoping for RPT is not supported in v1.0 (PRD §6.5.1)"
+        )
 
     def _apply_graph_scope(self, alias: str) -> None:
         """Attach the active named-graph scope to a freshly-opened FOR.
@@ -2069,6 +2102,101 @@ class AlgebraVisitor:
             # Either way the join is the same shape: equality between
             # this alias's graph_field and the existing expression.
             self.builder.filter_raw(f"{lhs} == {existing}")
+
+    def _guard_tenants(self, doc: str, builder: AqlQueryBuilder | None = None) -> None:
+        """FILTER *doc* by :meth:`_tenant_test`, when the mapping scopes tenants."""
+        test = self._tenant_test(doc, builder)
+        if test is not None:
+            (builder or self.builder).filter_raw(test)
+
+    def _tenant_test(self, doc: str, builder: AqlQueryBuilder | None = None) -> str | None:
+        """Hold a document a walk reached to the tenant (issue #118).
+
+        *doc* is an AQL document expression: an edge's far vertex, the source
+        of a backward walk, a document read from the default collection, or
+        the endpoint of a relationship node read on its own
+        (``DOCUMENT(k._from)``). No class opened it, so no class applied its
+        tenant FILTER. A document of a tenant-scoped class (its collection,
+        and its label in a shared one) must carry the tenant; a document of
+        any other class passes. Without a tenant context such documents are
+        not visible, as a reader with no tenant sees none of them.
+
+        One ternary per tenant field, keyed by the collection read from
+        ``_id``: an AND of per-class ``(!in_class || tenant)`` terms over the
+        hops of a ``:p+`` path made ArangoDB's planner expand it until it
+        ran out of memory. Collection and label lists are bound once per
+        sub-query. Classes under several tenant roots (``phys:tenantEntity``)
+        cannot be scoped by one tenant, so such a walk is refused.
+        """
+        classes = self.resolver.tenant_scoped_classes()
+        if not classes:
+            return None
+        roots = sorted({c.tenant_entity for c in classes if c.tenant_entity})
+        if len(roots) > 1:
+            raise CrossTenantJoinError(
+                f"the mapping scopes classes under several tenant roots ({', '.join(roots)}); a walk "
+                f"can reach documents of any of them, and one tenant cannot scope them all (PRD §6.5.1)"
+            )
+        if self.tenant_id is not None and self.state.tenant_bind_placeholder is None:
+            self.state.tenant_bind_placeholder = self.builder.bind(self.tenant_id, hint="tenant")
+        # Per (tenant field, label field): the collections whose every
+        # document is scoped, and per shared collection the scoped labels. A
+        # label is scoped only in the collection that declares it: a
+        # non-tenant class may reuse it elsewhere (review P6).
+        groups: dict[tuple[str, str | None], dict[str, set[str]]] = {}
+        for cls in classes:
+            assert cls.tenant_field is not None  # tenant_scoped_classes guarantees it
+            label_field = cls.type_field if cls.type_field and cls.type_value else None
+            by_collection = groups.setdefault((cls.tenant_field, label_field), {})
+            for name in cls.shard_family or (cls.collection,):
+                labels = by_collection.setdefault(name, set())
+                if label_field and cls.type_value:
+                    labels.add(cls.type_value)
+        # Null-safe and warning-free for a missing document (a dangling edge
+        # end): PARSE_IDENTIFIER(null) and INTERSECTION(null, …) warn.
+        empty, slash = self._guard_bind("", "empty"), self._guard_bind("/", "slash")
+        collection = f"FIRST(SPLIT(NOT_NULL({doc}._id, {empty}), {slash}))"
+        terms = []
+        for (tenant_field, label_field), by_collection in sorted(groups.items(), key=repr):
+            condition = f"{collection} IN {self._guard_bind(sorted(by_collection), 'tenant_colls')}"
+            if label_field:
+                # The collection's own scoped labels, looked up in one bound
+                # object: one term per group, however many collections.
+                labels_by_collection = {
+                    name: sorted(labels) for name, labels in sorted(by_collection.items())
+                }
+                condition += (
+                    f" && LENGTH(INTERSECTION(TO_ARRAY({attribute_ref(doc, label_field)}), TRANSLATE("
+                    f"{collection}, {self._guard_bind(labels_by_collection, 'tenant_labels')}, "
+                    f"{self._guard_bind([], 'none')}))) > 0"
+                )
+            check = (
+                f"{attribute_ref(doc, tenant_field)} == {self.state.tenant_bind_placeholder}"
+                if self.tenant_id is not None
+                else "false"
+            )
+            terms.append(f"({condition} ? {check} : true)")
+        return " && ".join(terms)
+
+    def _guard_bind(self, value: Any, hint: str) -> str:
+        """A bind parameter for the tenant test's constants, made once per
+        visitor (one sub-query), so a long path does not mint one per hop.
+        Not shared with child visitors: a bind minted in a child that is
+        later discarded would be missing, and an unused one is refused."""
+        key = (hint, repr(value))
+        cached = self.state.guard_binds.get(key)
+        if cached is None:
+            cached = self.state.guard_binds[key] = self.builder.bind(value, hint=hint)
+        return cached
+
+    def _guard_relationship_endpoints(self, alias: str, classes: list[ResolvedClass]) -> None:
+        """A relationship node (D8) read on its own is an edge document:
+        both its endpoints are held to the tenant (issue #118). In a union
+        with vertex classes, a row with no ``_from`` is not an edge."""
+        if not any(c.style == "EDGE" for c in classes) or not self.resolver.tenant_scoped_classes():
+            return
+        tests = [self._tenant_test(f"DOCUMENT({alias}.{end})") for end in ("_from", "_to")]
+        self.builder.filter_raw(f"({alias}._from == null || ({' && '.join(t for t in tests if t)}))")
 
     def _enforce_tenant_scope(
         self, alias: str, resolved: ResolvedClass, builder: AqlQueryBuilder | None = None
@@ -2144,20 +2272,6 @@ class AlgebraVisitor:
         loop's first branch.
         """
         triples_alias = self._open_collection(resolved.collection, resolved=resolved)
-        if resolved.tenant_field is not None:
-            # RPT rows live in a denormalised triples table whose
-            # columns are fixed (subject_uri / predicate / object_uri
-            # / object_value); a per-document ``tenant_field`` would
-            # not exist as a column. Refuse rather than silently
-            # skip — a misconfigured tenant-scoped RPT class would
-            # otherwise leak rows across tenants.
-            raise CrossTenantJoinError(
-                f"RPT-style class {resolved.iri!r} declares "
-                f"phys:tenantField {resolved.tenant_field!r} but RPT "
-                f"triples rows have fixed columns and no tenant "
-                f"discriminator; tenant scoping for RPT is not "
-                f"supported in v1.0 (PRD §6.5.1)"
-            )
         rdf_type_bind = self.builder.bind(str(RDF.type), hint="rdftype")
         class_bind = self.builder.bind(str(class_iri), hint="cls")
         self.builder.filter_eq(attribute_ref(triples_alias, resolved.predicate_column), rdf_type_bind)
@@ -2401,6 +2515,7 @@ class AlgebraVisitor:
             )
             self._filter_edge_type(prop, e_alias)
             self._keep_subject_collections(v_alias, prop)
+            self._guard_tenants(v_alias)
             self.state.doc_to_collection[v_alias] = prop.edge_collection
             self._bind_subject(subject, v_alias)
             return
@@ -2416,6 +2531,7 @@ class AlgebraVisitor:
             direction="ANY" if prop.symmetric else "OUTBOUND",
         )
         self._filter_edge_type(prop, e_alias)
+        self._guard_tenants(v_alias)
         # ``v_alias`` is the traversal vertex and is what binds to the SPARQL
         # object (a reified relationship binds the edge instead:
         # :meth:`_emit_reified_entry`).
@@ -2453,6 +2569,7 @@ class AlgebraVisitor:
             direction="ANY" if prop.symmetric else "OUTBOUND",
         )
         self._filter_edge_type(prop, e_alias)
+        self._guard_tenants(v_alias)
         self.state.reified_edges[e_alias] = (prop.iri, v_alias)
         if isinstance(obj, Variable):
             self.state.relationship_nodes.setdefault(str(obj), set()).add(prop.iri)
@@ -2484,8 +2601,8 @@ class AlgebraVisitor:
             # No such triple in RDF: no rows, but the object stays bound so
             # it can still be projected.
             self.builder.filter_raw("false")
-        elif prop.range_iri is not None:
-            classes = self._concrete_classes((prop.range_iri,))
+        elif prop.range_iris:
+            classes = self._concrete_classes(prop.range_iris)
             tests = []
             for collection in sorted({c.collection for c in classes}):
                 members = [c for c in classes if c.collection == collection]
@@ -2511,7 +2628,7 @@ class AlgebraVisitor:
         relationships = set(prop.edge_target_of) & self.state.bgp_entries.get(str(node), set())
         if len(relationships) != 1:
             return False
-        target = self._object_document(obj, prop.range_iri)
+        target = self._object_document(obj, prop.range_iris)
         if target is None:
             return False
         relationship = self.resolver.resolve_property(next(iter(relationships)))
@@ -2526,6 +2643,7 @@ class AlgebraVisitor:
             direction="ANY" if relationship.symmetric else "INBOUND",
         )
         self._filter_edge_type(relationship, e_alias)
+        self._guard_tenants(src_alias)
         self.state.reified_edges[e_alias] = (relationship.iri, target)
         self.state.reified_sources[e_alias] = src_alias
         self.state.relationship_nodes.setdefault(str(node), set()).add(relationship.iri)
@@ -2586,15 +2704,16 @@ class AlgebraVisitor:
         name = str(subject)
         if name in self.state.var_to_doc_alias or name in self.state.var_to_expr:
             return None
-        return self._object_document(obj, prop.range_iri)
+        return self._object_document(obj, prop.range_iris)
 
-    def _object_document(self, obj: Any, range_iri: str | None) -> str | None:
+    def _object_document(self, obj: Any, range_iris: tuple[str, ...]) -> str | None:
         """The alias of the document a known object is, opening it if needed.
 
         A variable bound to a document is that document. A variable known
         only by its value (a sub-select column, a VALUES row, a UNION row) or
-        a constant IRI is looked up in the property's ``rdfs:range`` class,
-        when that is a single document class, by an indexed ``_uri`` match:
+        a constant IRI is looked up in the property's ``rdfs:range`` classes
+        (every one of a repeated range, a supertype's members: issue #122),
+        when they are stored as documents, by an indexed ``_uri`` match:
         walking an edge backwards from it beats scanning every possible
         subject (LDBC: ``?m :hasCreator ?fr`` with ``?fr`` from a sub-select
         scanned every message). ``None`` when the object cannot be found
@@ -2608,48 +2727,63 @@ class AlgebraVisitor:
             name = str(obj)
             alias = self.state.var_to_doc_alias.get(name)
             if alias is not None:
-                return self._every_copy(alias, range_iri)
+                return self._every_copy(alias, range_iris)
             value = self.state.var_to_expr.get(name)
             if value is None:
                 return None
         elif isinstance(obj, URIRef):
             known = self.state.const_subject_alias.get(str(obj))
             if known is not None:
-                return self._every_copy(known, range_iri)
+                return self._every_copy(known, range_iris)
             value = None
         else:
             return None
-        if range_iri is None:
+        by_collection = self._range_classes(range_iris)
+        if not by_collection:
             return None
-        try:
-            resolved = self.resolver.resolve_class(range_iri)
-        except SchemaResolutionError:
-            return None
-        if resolved.style in ("RPT", "UNION"):
-            # A supertype range has no one collection to look the object up
-            # in; the forward plan reads it instead.
-            return None
-        alias = self._open_collection(resolved.collection, resolved=resolved)
-        if resolved.type_field and resolved.type_value:
-            type_bind = self.builder.bind(
-                resolved.type_value,
-                hint=resolved.type_field if is_aql_identifier(resolved.type_field) else None,
-            )
-            self.builder.filter_raw(
-                type_predicate(alias, resolved.type_field, type_bind, is_array=resolved.type_field_is_array)
-            )
-        self._enforce_tenant_scope(alias, resolved)
+        match = (
+            (lambda alias: subject_matches_value(alias, value))
+            if value is not None
+            else (lambda alias: subject_matches(alias, self.builder.bind(str(obj), hint="uri")))
+        )
+        if len(by_collection) == 1:
+            ((collection, classes),) = by_collection.items()
+            alias = self._open_collection(collection, resolved=classes[0])
+            for test in self._class_tests(self.builder, alias, classes, "the rdfs:range"):
+                self.builder.filter_raw(test)
+            for tenant in {(c.tenant_field, c.tenant_entity): c for c in classes}.values():
+                self._enforce_tenant_scope(alias, tenant)
+            self.builder.filter_raw(match(alias))
+        else:
+            # The range's classes span several collections: one indexed
+            # lookup per collection, each read as a document of its classes.
+            arms = []
+            for collection, classes in by_collection.items():
+                child = self.builder.create_child()
+                inner = child.fresh_alias()
+                child.for_(inner, collection)
+                for test in self._class_tests(child, inner, classes, "the rdfs:range"):
+                    child.filter_raw(test)
+                for tenant in {(c.tenant_field, c.tenant_entity): c for c in classes}.values():
+                    self._enforce_tenant_scope(inner, tenant, builder=child)
+                child.filter_raw(match(inner))
+                child.return_scalar(inner)
+                arms.append(self.builder.absorb_child(child))
+            alias = self.builder.fresh_alias()
+            self.builder.for_union(alias, arms, scans_documents=True)
+            # The named-graph scope applies to the union row, as one
+            # collection's scan applies it (:meth:`_open_collection`): an
+            # unbound ``GRAPH ?g`` is bound here. A per-arm test could only
+            # filter, and left ``?g`` unbound (AqlEmitError).
+            self._apply_graph_scope(alias)
         if value is not None:
             # The variable keeps its value expression; its document is this.
-            self.builder.filter_raw(subject_matches_value(alias, value))
             self.state.var_to_doc_alias[str(obj)] = alias
-            return alias
-        uri_bind = self.builder.bind(str(obj), hint="uri")
-        self.builder.filter_raw(subject_matches(alias, uri_bind))
-        self.state.const_subject_alias[str(obj)] = alias
+        else:
+            self.state.const_subject_alias[str(obj)] = alias
         return alias
 
-    def _every_copy(self, alias: str, range_iri: str | None) -> str:
+    def _every_copy(self, alias: str, range_iris: tuple[str, ...]) -> str:
         """The documents carrying the IRI of the document at *alias* that an
         edge can point at, as one alias to walk backwards from (issue #105).
 
@@ -2675,7 +2809,7 @@ class AlgebraVisitor:
         (ERR 1203, the ``Document`` default of the ``/sparql`` route among
         them), so an edge into another copy there is a known limit (#105).
         """
-        by_collection = self._range_classes(range_iri)
+        by_collection = self._range_classes(range_iris)
         if not by_collection:
             return alias
         in_scope = self._graph_scope_test
@@ -2753,7 +2887,7 @@ class AlgebraVisitor:
             or self.resolver.is_edge_exit(p)
             or resolved.style in ("RPT", "UNION")
             or resolved.shard_family is not None
-            or not self._range_classes(prop.range_iri)
+            or not self._range_classes(prop.range_iris)
         ):
             return None
         return pending[0]
@@ -2783,7 +2917,7 @@ class AlgebraVisitor:
             if isinstance(o, Variable)
             else self.state.const_subject_alias[str(o)]
         )
-        source = self._every_copy(target, prop.range_iri)
+        source = self._every_copy(target, prop.range_iris)
         v_alias = self.builder.fresh_alias(prefix="v")
         e_alias = self.builder.fresh_alias(prefix="e")
         self.builder.for_traversal(
@@ -2808,15 +2942,15 @@ class AlgebraVisitor:
         self.state.doc_to_collection[v_alias] = resolved.collection
         self._bind_subject(s, v_alias)
 
-    def _range_classes(self, range_iri: str | None) -> dict[str, list[ResolvedClass]]:
-        """The document classes of a declared ``rdfs:range`` (a supertype's
-        members), by the collection each is stored in (a sharded class in
-        each member of its family); empty when there is no range or it is
-        not stored as documents (RPT)."""
-        if range_iri is None:
+    def _range_classes(self, range_iris: tuple[str, ...]) -> dict[str, list[ResolvedClass]]:
+        """The document classes of a declared ``rdfs:range`` (each of a
+        repeated range, a supertype's members), by the collection each is
+        stored in (a sharded class in each member of its family); empty when
+        there is no range or it is not stored as documents (RPT)."""
+        if not range_iris:
             return {}
         try:
-            classes = self._concrete_classes((range_iri,))
+            classes = self._concrete_classes(range_iris)
         except SchemaResolutionError:
             return {}
         if not classes or any(c.style == "RPT" for c in classes):
@@ -2912,6 +3046,7 @@ class AlgebraVisitor:
         for test in self._class_tests(self.builder, alias, classes, what):
             self.builder.filter_raw(test)
         self._enforce_tenant_scope(alias, anchor)
+        self._guard_relationship_endpoints(alias, classes)
         self._bind_opened_subject(subject, alias, matched=False)
         return alias
 
@@ -3034,6 +3169,7 @@ class AlgebraVisitor:
         self.builder.for_union(alias, arm_aqls, scans_documents=True)
         self._apply_graph_scope(alias)
         self._enforce_tenant_scope(alias, classes[0])
+        self._guard_relationship_endpoints(alias, classes)
         self._bind_opened_subject(subject, alias, matched=match_in_arms)
         return alias
 

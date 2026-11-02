@@ -199,6 +199,12 @@ class ResolvedProperty:
     type_value: str | None = None
     domain_iri: str | None = None
     range_iri: str | None = None
+    """The first of :attr:`range_iris`; ``None`` when there is none."""
+    range_iris: tuple[str, ...] = ()
+    """Every class ``rdfs:range`` names: each value of a repeated
+    ``rdfs:range`` (the shape the schema analyzer's ``owl_export`` writes for
+    a relationship with several target classes), and each member of an
+    ``owl:unionOf`` (issue #122)."""
     symmetric: bool = False
     """``owl:SymmetricProperty``: ``a p b`` holds exactly when ``b p a`` does.
 
@@ -379,6 +385,8 @@ class SchemaResolver:
     _triple_store_class: ResolvedClass | None = field(default=None)
     """Cached result of :meth:`triple_store_class`."""
     _triple_store_checked: bool = field(default=False)
+    _tenant_scoped_classes: tuple[ResolvedClass, ...] | None = field(default=None)
+    """Cached result of :meth:`tenant_scoped_classes`."""
     _nested_properties: tuple[str, ...] | None = field(default=None)
     """Lazily-built IRIs of datatype properties stored in a nested object."""
     _shard_family_by_collection: dict[str, tuple[str, ...]] = field(default_factory=dict)
@@ -743,7 +751,7 @@ class SchemaResolver:
             elif edge_collection:
                 mapping_style = "DEDICATED_COLLECTION"
         domain_iri = self._first_object(ref, RDFS.domain)
-        range_iri = self._first_object(ref, RDFS.range)
+        range_iris = self.class_list(ref, RDFS.range)
         # ``phys:attributeName`` maps an OWL-style conceptual property name to
         # its stored document field (CDF CC-12: ``accountId`` → ``account_id``).
         # Absent the annotation, the local name doubles as the attribute —
@@ -765,7 +773,8 @@ class SchemaResolver:
             type_field=type_field,
             type_value=type_value,
             domain_iri=domain_iri,
-            range_iri=range_iri,
+            range_iri=range_iris[0] if range_iris else None,
+            range_iris=range_iris,
             symmetric=is_object and (ref, RDF.type, OWL.SymmetricProperty) in self.ontology,
             nested_path=nested_path,
             reified_edge=is_object and parse_flag(self._physical_string(ref, "reifiedEdge")) is True,
@@ -881,22 +890,39 @@ class SchemaResolver:
         return mapping
 
     def domain_classes(self, property_iri: str) -> tuple[str, ...]:
-        """The class IRIs ``rdfs:domain`` gives *property_iri*: one class, or
-        the members of an ``owl:unionOf``. Empty when no domain is declared
-        (or it is something else, such as an intersection).
+        """The class IRIs ``rdfs:domain`` gives *property_iri*: every value of a
+        repeated ``rdfs:domain`` and every member of an ``owl:unionOf``
+        (:meth:`class_list`). Empty when no domain is declared (or it is
+        something else, such as an intersection).
 
         The visitor routes a subject that no type pattern names by it: in
         RDF a domain means every subject of the property *is* of that class.
         """
-        domain = self.ontology.value(URIRef(property_iri), RDFS.domain)
-        if isinstance(domain, URIRef):
-            return (str(domain),)
-        if domain is None:
-            return ()
-        members = self.ontology.value(domain, OWL.unionOf)
-        if members is None:
-            return ()
-        return tuple(str(m) for m in Collection(self.ontology, members) if isinstance(m, URIRef))
+        return self.class_list(URIRef(property_iri), RDFS.domain)
+
+    def class_list(self, subject: URIRef, predicate: URIRef) -> tuple[str, ...]:
+        """Every class *predicate* (``rdfs:domain`` / ``rdfs:range``) names on
+        *subject*, in IRI order: each value of a repeated triple and each
+        member of an ``owl:unionOf``; anything else (an intersection) is
+        left out.
+
+        A repeated ``rdfs:domain`` or ``rdfs:range`` is what mapping
+        producers write for a property shared by several classes
+        (arango-query-core's ``mapping_to_turtle``, the schema analyzer's
+        ``owl_export``, :func:`_synthesize_graph_from_bundle`), and it means
+        where the subjects or objects are stored: any of them.
+        ``ontology.value()`` returned one of them, arbitrarily, and routing
+        or a backward walk missed the others (issue #122).
+        """
+        out: set[str] = set()
+        for value in self.ontology.objects(subject, predicate):
+            if isinstance(value, URIRef):
+                out.add(str(value))
+                continue
+            members = self.ontology.value(value, OWL.unionOf)
+            if members is not None:
+                out.update(str(m) for m in Collection(self.ontology, members) if isinstance(m, URIRef))
+        return tuple(sorted(out))
 
     def triple_store_class(self) -> ResolvedClass | None:
         """The triples table, when the whole mapping is one triple store.
@@ -938,6 +964,52 @@ class SchemaResolver:
             return None
         self._triple_store_class = replace(resolved[0], iri=TRIPLE_STORE_IRI)
         return self._triple_store_class
+
+    def tenant_scoped_classes(self, *, rpt: bool = False) -> tuple[ResolvedClass, ...]:
+        """The classes that declare ``phys:tenantField``: stored as documents,
+        or with *rpt* the triples-table (RPT) ones.
+
+        A document a walk reaches (an edge's far vertex, the source of a
+        backward walk) is not opened by its class, so nothing applied that
+        class's tenant FILTER; the visitor tests it against every document
+        class here (issue #118), and refuses reading a triples table that an
+        RPT class here uses. A class that does not resolve still counts, from
+        its ``phys:collectionName``, so its documents are not left unguarded.
+        Resolving the classes reports no advisory and caches nothing, so a
+        class the query names later still gets its own.
+        """
+        if self._tenant_scoped_classes is None:
+            found: list[ResolvedClass] = []
+            warnings, warned, cache = list(self.warnings), set(self._warned_keys), dict(self._class_cache)
+            try:
+                for cls in sorted(self.ontology.subjects(RDF.type, OWL.Class), key=str):
+                    if not isinstance(cls, URIRef):
+                        continue
+                    tenant_field = self._physical_string(cls, "tenantField")
+                    if tenant_field is None:
+                        continue
+                    try:
+                        resolved = self.resolve_class(cls)
+                    except SchemaResolutionError:
+                        collection = self._physical_string(cls, "collectionName")
+                        if not collection:
+                            continue
+                        resolved = ResolvedClass(
+                            iri=str(cls),
+                            collection=collection,
+                            tenant_field=tenant_field,
+                            tenant_entity=self._physical_string(cls, "tenantEntity"),
+                        )
+                    if resolved.tenant_field and resolved.style != "UNION" and resolved.collection:
+                        found.append(resolved)
+            finally:
+                self.warnings[:] = warnings
+                self._warned_keys.clear()
+                self._warned_keys.update(warned)
+                self._class_cache.clear()
+                self._class_cache.update(cache)
+            self._tenant_scoped_classes = tuple(found)
+        return tuple(c for c in self._tenant_scoped_classes if (c.style == "RPT") == rpt)
 
     def edge_properties(self) -> tuple[ResolvedProperty, ...]:
         """Return edge-backed object properties in deterministic IRI order.

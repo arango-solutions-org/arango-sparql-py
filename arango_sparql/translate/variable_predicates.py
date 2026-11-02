@@ -342,6 +342,8 @@ def _emit_document_edge_union(
                 )
             type_bind = child.bind(prop.type_value, hint=prop.type_field)
             child.filter_eq(attribute_ref(edge_alias, prop.type_field), type_bind)
+        # The far vertex is held to the tenant like any walked document (#118).
+        visitor._guard_tenants(vertex_alias, child)
         predicate_bind = child.bind(prop.iri, hint="predicate")
         child.return_object(
             [
