@@ -142,8 +142,8 @@ deploy = [
 [package.metadata]
 requires-dist = [
     { name = "anthropic", marker = "extra == 'nl'", specifier = ">=0.20.0" },
-    { name = "arango-query-core", marker = "extra == 'nl'", specifier = ">=0.2.0,<0.3.0" },
-    { name = "arango-query-core", extras = ["dense"], marker = "extra == 'dense'", specifier = ">=0.2.0,<0.3.0" },
+    { name = "arango-query-core", marker = "extra == 'nl'", specifier = ">=0.2.3,<0.3.0" },
+    { name = "arango-query-core", extras = ["dense"], marker = "extra == 'dense'", specifier = ">=0.2.3,<0.3.0" },
     { name = "arango-sparql-py", extras = ["analyzer"], marker = "extra == 'dev'" },
     { name = "arango-sparql-py", extras = ["analyzer"], marker = "extra == 'service'" },
     { name = "arango-sparql-py", extras = ["nl"], marker = "extra == 'dense'" },
