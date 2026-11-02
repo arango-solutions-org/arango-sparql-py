@@ -16,7 +16,13 @@ import pytest
 
 from arango_sparql.api import translate
 from arango_sparql.translate.resolver import SchemaResolver
-from tests.helpers.oxi import assert_bindings_equal, drop_null_bindings, normalize_oxi_row, oxi_bindings
+from tests.helpers.oxi import (
+    assert_bindings_equal,
+    assert_bindings_equal_ordered,
+    drop_null_bindings,
+    normalize_oxi_row,
+    oxi_bindings,
+)
 from tests.integration.conftest import (
     DEFAULT_ARANGO_DB,
     DEFAULT_ARANGO_PASSWORD,
@@ -215,3 +221,114 @@ def test_a_shifted_date_matches_oxigraph_in_any_form(mixed_db: Any, mixed_store:
 def test_a_date_shift_follows_xpath(mixed_db: Any, body: str, expected: dict[str, str]) -> None:
     rows = _arango_mixed(mixed_db, f"SELECT ?x ?n WHERE {{ ?x a :Day ; :d ?d ; :t ?t BIND({body} AS ?n) }}")
     assert {r["x"].rsplit("/", 1)[1]: r["n"] for r in rows} == expected
+
+
+# Review of #123: three zones out of lexical order, and inputs at the edges.
+_ODD = "DateArithmeticOdd"
+_ODD_TTL = f"""
+@prefix :     <http://example.org/> .
+@prefix owl:  <http://www.w3.org/2002/07/owl#> .
+@prefix phys: <https://arango.solutions/phys#> .
+:Odd a owl:Class ; phys:collectionName "{_ODD}" .
+:v a owl:DatatypeProperty .
+:w a owl:DatatypeProperty .
+"""
+_ODD_DOCS = [
+    {"_key": "a", "_uri": _EVENT + "a", "v": "2020-01-31T23:30:00+02:00", "w": "abc"},
+    {"_key": "b", "_uri": _EVENT + "b", "v": "2020-01-31T22:00:00-05:00", "w": "abc"},
+    {"_key": "c", "_uri": _EVENT + "c", "v": "2020-01-31T12:00:00Z", "w": "abc"},
+]
+
+
+@pytest.fixture(scope="module")
+def odd_db(db: Any) -> Iterator[Any]:
+    if db.has_collection(_ODD):
+        db.delete_collection(_ODD)
+    db.create_collection(_ODD).insert_many(_ODD_DOCS)
+    yield db
+    db.delete_collection(_ODD)
+
+
+@pytest.fixture(scope="module")
+def odd_store() -> Any:
+    store = oxi.Store()
+    triples = "\n".join(
+        f"<{d['_uri']}> a <http://example.org/Odd> ; "
+        f'<http://example.org/v> "{d["v"]}"^^<{_XSD}dateTime> ; <http://example.org/w> "{d["w"]}" .'
+        for d in _ODD_DOCS
+    )
+    store.load(triples.encode("utf-8"), oxi.RdfFormat.TURTLE)
+    return store
+
+
+def _arango_odd(db: Any, body: str) -> list[dict[str, Any]]:
+    res = translate(_PREFIX + body, resolver=SchemaResolver.from_turtle(_ODD_TTL))
+    db.aql.validate(res.aql)
+    cursor = db.aql.execute(res.aql, bind_vars=res.bind_vars)
+    assert not cursor.warnings(), cursor.warnings()
+    return [drop_null_bindings(r) for r in cursor]
+
+
+_SHIFT = '?v + "PT1H"^^xsd:dayTimeDuration'
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # By instant, not by the zoned text (c, a, b; the text sorts c, b, a).
+        f"SELECT ?x WHERE {{ ?x a :Odd ; :v ?v }} ORDER BY ({_SHIFT})",
+        f"SELECT ?x WHERE {{ ?x a :Odd ; :v ?v }} ORDER BY DESC({_SHIFT}) LIMIT 1",
+        f"SELECT ?x WHERE {{ ?x a :Odd ; :v ?v BIND({_SHIFT} AS ?y) }} ORDER BY ?y",
+    ],
+)
+def test_a_shift_sorts_by_instant(odd_db: Any, odd_store: Any, body: str) -> None:
+    assert_bindings_equal_ordered(_oxigraph(odd_store, body), _arango_odd(odd_db, body))
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        f"SELECT (MAX({_SHIFT}) AS ?m) WHERE {{ ?x a :Odd ; :v ?v }}",
+        f"SELECT (MIN({_SHIFT}) AS ?m) WHERE {{ ?x a :Odd ; :v ?v }}",
+        # A non-date is never a date's equal: ``!=`` holds, ``=`` does not.
+        f"SELECT ?x WHERE {{ ?x a :Odd ; :v ?v ; :w ?w FILTER({_SHIFT} != ?w) }}",
+        f'SELECT ?x WHERE {{ ?x a :Odd ; :v ?v FILTER({_SHIFT} != "2020-02-01T00:30:00+02:00") }}',
+        f"SELECT ?x WHERE {{ ?x a :Odd ; :v ?v FILTER({_SHIFT} != 5) }}",
+    ],
+)
+def test_a_shift_aggregates_and_differs_as_oxigraph_does(odd_db: Any, odd_store: Any, body: str) -> None:
+    expected = _oxigraph(odd_store, body)
+    assert expected, "the case must have a non-empty answer to prove anything"
+    assert_bindings_equal(expected, _arango_odd(odd_db, body))
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        f"SELECT ?x WHERE {{ ?x a :Odd ; :v ?v ; :w ?w FILTER({_SHIFT} = ?w) }}",
+        f"SELECT ?x WHERE {{ ?x a :Odd ; :v ?v FILTER({_SHIFT} > 5) }}",
+        f'SELECT ?x WHERE {{ ?x a :Odd ; :v ?v FILTER({_SHIFT} > "2020-01-01") }}',
+    ],
+)
+def test_a_shift_against_a_non_date_is_an_error(odd_db: Any, odd_store: Any, body: str) -> None:
+    assert _oxigraph(odd_store, body) == [] == _arango_odd(odd_db, body)
+
+
+@pytest.mark.parametrize(
+    ("value", "shift", "expected"),
+    [
+        ("0999-01-31", '"P1D"^^xsd:dayTimeDuration', "0999-02-01"),  # the year keeps its zeros
+        ("2020-01-01T24:00:00Z", '"P1M"^^xsd:yearMonthDuration', "2020-02-02T00:00:00Z"),  # 24:00 is next day
+        ("9999-12-31", '"P1D"^^xsd:dayTimeDuration', None),  # past ArangoDB's last year
+        ("2020-02-30", '"P1D"^^xsd:dayTimeDuration', None),  # no such day
+        ("2020-01-01T24:30:00Z", '"P1D"^^xsd:dayTimeDuration', None),  # 24:30 is no time
+    ],
+)
+def test_a_shift_at_the_edges(db: Any, value: str, shift: str, expected: str | None) -> None:
+    res = translate(
+        _PREFIX + f'SELECT ?n WHERE {{ BIND("{value}" AS ?d) BIND(?d + {shift} AS ?n) }}',
+        resolver=SchemaResolver.from_turtle(_ODD_TTL),
+    )
+    cursor = db.aql.execute(res.aql, bind_vars=res.bind_vars)
+    assert not cursor.warnings(), cursor.warnings()
+    assert [r.get("n") for r in cursor] == [expected]

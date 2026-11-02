@@ -19,7 +19,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
-from rdflib import RDF, BNode, Literal, URIRef, Variable
+from rdflib import RDF, XSD, BNode, Literal, URIRef, Variable
 from rdflib.paths import Path
 
 from ..errors import (
@@ -39,7 +39,7 @@ from .builder import (
     subject_ref,
     type_predicate,
 )
-from .date_arithmetic import compare_instants, date_shift, is_date_shift, is_duration_literal
+from .date_arithmetic import compare_instants, date_shift, instant, is_date_shift, is_duration_literal
 from .filter_builtins import translate_builtin, translate_function
 from .minus_exists import emit_minus
 from .optional_crosssubject import (
@@ -135,6 +135,10 @@ class _BindingState:
     pending_calls: dict[str, PredicateCall] = field(default_factory=dict)
     """Registered-predicate calls in the current BGP, by entity variable,
     waiting for the entity's type pattern to open the loop they shape."""
+    date_shift_vars: set[str] = field(default_factory=set)
+    """SPARQL variables bound to ``date ± duration`` (a BIND of one): their
+    lexical form keeps the input's zone, so they compare, sort and aggregate
+    by instant (:mod:`date_arithmetic`, #123)."""
     maybe_unbound: set[str] = field(default_factory=set)
     """SPARQL variables that can be unbound in a solution: bound by an
     OPTIONAL, a UNION arm that not every arm binds, a VALUES ``UNDEF``, a
@@ -1004,6 +1008,8 @@ class AlgebraVisitor:
             self.state.var_to_expr[var_name] = self.state.var_to_expr[str(expr)]
             if str(expr) in self.state.maybe_unbound:
                 self.state.maybe_unbound.add(var_name)
+            if str(expr) in self.state.date_shift_vars:
+                self.state.date_shift_vars.add(var_name)
             return
 
         if var_name in self.state.var_to_expr:
@@ -1024,6 +1030,8 @@ class AlgebraVisitor:
         self.state.var_to_expr[var_name] = alias
         if _expression_variable_names(expr) & self.state.maybe_unbound:
             self.state.maybe_unbound.add(var_name)
+        if self._is_date_valued(expr):
+            self.state.date_shift_vars.add(var_name)
 
     # ------------------------------------------------------------------
     # GROUP BY + aggregates — AggregateJoin(A=[…aggs…], p=Group(p=BGP, expr=keys|None))
@@ -1256,8 +1264,20 @@ class AlgebraVisitor:
                         f"DISTINCT is only supported on COUNT aggregates; got DISTINCT inside {agg.name!r}"
                     )
                 arg_expr = self._aggregate_arg_expr(agg, pattern_scope)
-                aggregates.append((agg_alias, f"{aql_func}({arg_expr})"))
                 read = agg_alias
+                if agg.name in ("Aggregate_Min", "Aggregate_Max") and self._is_date_valued(agg.vars):
+                    # A shifted date keeps its input's zone: the least or greatest
+                    # instant, read back as its value (#123). ``[instant, value]``
+                    # pairs order by instant; an unbound value stays null.
+                    aggregates.append(
+                        (
+                            agg_alias,
+                            f"{aql_func}({arg_expr} == null ? null : [{instant(self.builder, arg_expr)}, {arg_expr}])",
+                        )
+                    )
+                    read = f"{agg_alias}[1]"
+                else:
+                    aggregates.append((agg_alias, f"{aql_func}({arg_expr})"))
                 if not keys and agg.name in ("Aggregate_Sum", "Aggregate_Avg"):
                     # Ungrouped over no rows, AQL's SUM / AVG are null; SPARQL's
                     # Sum and Avg of an empty group are 0 (SPARQL 1.1
@@ -1383,6 +1403,9 @@ class AlgebraVisitor:
             if inner is None:
                 raise UnsupportedSparqlError("ORDER BY condition is missing its expression")
             aql_expr = self._translate_expr(inner)
+            if self._is_date_valued(inner):
+                # A shifted date keeps its input's zone: sort by instant (#123).
+                aql_expr = instant(self.builder, aql_expr)
             order = (getattr(cond, "order", None) or "ASC").upper()
             if order not in ("ASC", "DESC"):
                 raise UnsupportedSparqlError(
@@ -3277,10 +3300,18 @@ class AlgebraVisitor:
             if op in self._RELATIONAL_OP_MAP:
                 left = self._translate_expr(expr.expr)
                 right = self._translate_expr(expr.other)
-                if is_date_shift(expr.expr) or is_date_shift(expr.other):
+                shifted = (self._is_date_valued(expr.expr), self._is_date_valued(expr.other))
+                if any(shifted):
                     # ``date ± duration`` is a date in its operand's form: compare
                     # instants, not strings (#123).
-                    return compare_instants(left, right, self._RELATIONAL_OP_MAP[op])
+                    return compare_instants(
+                        self.builder,
+                        left,
+                        right,
+                        self._RELATIONAL_OP_MAP[op],
+                        shifted=shifted,
+                        not_a_date=(_is_non_date_literal(expr.expr), _is_non_date_literal(expr.other)),
+                    )
                 return f"({left} {self._RELATIONAL_OP_MAP[op]} {right})"
             if op in ("IN", "NOT IN"):
                 left = self._translate_expr(expr.expr)
@@ -3363,6 +3394,12 @@ class AlgebraVisitor:
                 f"? ({left_alias} {op} {right_alias}) : null)[0]"
             )
         return result
+
+    def _is_date_valued(self, node: Any) -> bool:
+        """Whether *node* is ``date ± duration``, or a variable bound to one."""
+        if isinstance(node, Variable):
+            return str(node) in self.state.date_shift_vars
+        return is_date_shift(node)
 
     def _date_shift(self, op: str, date_expr: str, duration: Literal) -> str:
         """``date ± duration``, as XPath adds them (:func:`date_shift`)."""
@@ -3589,6 +3626,15 @@ def _walk_for_bgp_triples(node: Any, out: list[tuple[Any, Any, Any]]) -> None:
         child = getattr(node, attr, None)
         if child is not None and hasattr(child, "name"):
             _walk_for_bgp_triples(child, out)
+
+
+_DATE_TYPES = frozenset({str(XSD.date), str(XSD.dateTime)})
+
+
+def _is_non_date_literal(term: Any) -> bool:
+    """A literal the query writes with a type other than xsd:date /
+    xsd:dateTime (a plain string, a number): never a date's equal."""
+    return isinstance(term, Literal) and str(term.datatype or XSD.string) not in _DATE_TYPES
 
 
 def _term_to_python(term: Any) -> Any:

@@ -14,6 +14,7 @@ serialise (LDBC IC3 / IC4, PRD §13.6). Live semantics are checked in
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 import pytest
@@ -47,7 +48,7 @@ def test_date_plus_duration_binds_months_and_milliseconds() -> None:
     result = _translate(f'SELECT ?e WHERE {{ BIND({_START} + "P1Y2M3DT4H5M6.5S"^^xsd:duration AS ?e) }}')
     assert _binds(result, "months") == [14]
     assert _binds(result, "millis") == [((3 * 24 + 4) * 60 + 5) * 60_000 + 6_500]
-    assert "DATE_ADD(DATE_ISO8601(" in result.aql
+    assert "DATE_ISO8601(DATE_TIMESTAMP(" not in result.aql and "DATE_ISO8601(moment" in result.aql
     json.dumps(result.bind_vars)  # the driver must be able to send it
 
 
@@ -70,7 +71,27 @@ def test_a_comparison_with_a_shifted_date_compares_instants() -> None:
     result = _translate(
         f'SELECT ?x WHERE {{ ?x a :Event ; :at ?at . FILTER(?at + "P1D"^^xsd:dayTimeDuration = {_START}) }}'
     )
-    assert "DATE_TIMESTAMP(" in result.aql and " == DATE_TIMESTAMP(@" in result.aql
+    assert "DATE_TIMESTAMP(" in result.aql
+    # Read only after a shape test, so a non-date is null without a warning.
+    assert re.search(r"REGEX_TEST\((ts\d+), @\w+\) \? DATE_TIMESTAMP\(\1\)", result.aql)
+    assert result.aql.count("RETURN lts") == 1 and " == rts" in result.aql
+
+
+def test_a_non_date_literal_against_a_shift_is_never_equal() -> None:
+    eq = _translate('SELECT ?x WHERE { ?x a :Event ; :at ?at . FILTER(?at + "P1D"^^xsd:duration = "abc") }')
+    ne = _translate('SELECT ?x WHERE { ?x a :Event ; :at ?at . FILTER(?at + "P1D"^^xsd:duration != 5) }')
+    assert "RETURN false)" in eq.aql
+    assert "RETURN lts" in ne.aql and "!= null)" in ne.aql and "RETURN false" not in ne.aql
+
+
+def test_order_by_and_max_of_a_shift_read_instants() -> None:
+    shift = '?at + "PT1H"^^xsd:dayTimeDuration'
+    ordered = _translate(f"SELECT ?x WHERE {{ ?x a :Event ; :at ?at }} ORDER BY ({shift})")
+    assert "SORT (FOR ts" in ordered.aql
+    bound = _translate(f"SELECT ?x WHERE {{ ?x a :Event ; :at ?at BIND({shift} AS ?y) }} ORDER BY ?y")
+    assert "SORT (FOR ts" in bound.aql
+    top = _translate(f"SELECT (MAX({shift}) AS ?m) WHERE {{ ?x a :Event ; :at ?at }}")
+    assert "MAX(" in top.aql and "[1]" in top.aql
 
 
 @pytest.mark.parametrize(

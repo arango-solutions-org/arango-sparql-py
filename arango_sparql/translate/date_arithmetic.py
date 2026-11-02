@@ -60,6 +60,9 @@ _SHIFTABLE = (
 _ZONE = r"^.*?(Z|[+-][0-9]{2}:[0-9]{2})?$"
 _TRAILING_ZEROS = "0+$"
 _DATE_LENGTH = len("2020-01-31")
+# ArangoDB's dates, as epoch milliseconds: 0000-01-01T00:00:00.000Z to
+# 9999-12-31T23:59:59.999Z (outside them its date functions warn and fail).
+_FIRST_INSTANT, _LAST_INSTANT = -62_167_219_200_000, 253_402_300_799_999
 
 
 def is_duration_literal(term: Any) -> bool:
@@ -104,8 +107,10 @@ def date_shift(builder: AqlQueryBuilder, op: str, date_expr: str, duration: Lite
 
     Only a string is shifted: AQL reads a number as epoch milliseconds
     (``DATE_ADD(7, "P1D")`` is a date), where SPARQL's number + duration is
-    a type error. Anything else — and a string that is no date — yields
-    null, SPARQL's "error → unbound".
+    a type error. Anything else yields null, SPARQL's "error → unbound": a
+    string that is no date, a day the month does not have (``2020-02-30``,
+    which ArangoDB would read as March 1), a result outside ArangoDB's years
+    0–9999. ``24:00:00`` is the next day's midnight (XSD).
     """
     months, millis = duration_parts(duration)
     if op == "-":
@@ -114,45 +119,107 @@ def date_shift(builder: AqlQueryBuilder, op: str, date_expr: str, duration: Lite
     shiftable = b(_SHIFTABLE, hint="date_shape")
     zone_re, zone_ref = b(_ZONE, hint="zone_shape"), b("$1", hint="zone_group")
     midnight, utc = b("T00:00:00Z", hint="midnight"), b("Z", hint="utc")
-    months_bind, millis_bind, unit = b(months, hint="months"), b(millis, hint="millis"), b("f", hint="unit")
-    date_format = b("%yyyy-%mm-%dd", hint="date_format")
-    time_format = b("%yyyy-%mm-%ddT%hh:%ii:%ss", hint="datetime_format")
+    hour_24, on_the_hour = b("24", hint="hour_24"), b(":00:00", hint="on_the_hour")
+    months_bind, millis_bind = b(months, hint="months"), b(millis, hint="millis")
+    day_unit = b("d", hint="day_unit")
+    first, last = b(_FIRST_INSTANT, hint="first_instant"), b(_LAST_INSTANT, hint="last_instant")
     dot, zeros, trailing, empty = (
         b(".", hint="dot"),
         b("00", hint="zeros"),
         b(_TRAILING_ZEROS, hint="trailing_zeros"),
         b("", hint="empty"),
     )
-    dt, zone, local, clock = (builder.fresh_alias(prefix=p) for p in ("dt", "zone", "local", "clock"))
-    month_index, year, month, day, shifted, ms = (
-        builder.fresh_alias(prefix=p) for p in ("mi", "year", "month", "day", "shifted", "ms")
+    dt, zone, local, is_24, clock = (
+        builder.fresh_alias(prefix=p) for p in ("dt", "zone", "local", "h24", "clock")
     )
+    month_index, year, month, day, moment, shifted, ms = (
+        builder.fresh_alias(prefix=p) for p in ("mi", "year", "month", "day", "moment", "shifted", "ms")
+    )
+    is_date = f"LENGTH({local}) == {_DATE_LENGTH}"
     fraction = f"({ms} == 0 ? {empty} : CONCAT({dot}, REGEX_REPLACE(RIGHT(CONCAT({zeros}, {ms}), 3), {trailing}, {empty})))"
+    # ``shifted`` is the ISO 8601 string of the local clock's result
+    # (``"0999-02-01T00:00:00.000Z"``, the year zero-padded): its first 10 or
+    # 19 characters are the result's date or date and time. The day-time
+    # part is added as epoch milliseconds, checked against ArangoDB's range
+    # before it is turned back into a date.
     return (
         f"(FOR {dt} IN [{date_expr}] "
         f"FILTER IS_STRING({dt}) && REGEX_TEST({dt}, {shiftable}) "
         f"LET {zone} = REGEX_REPLACE({dt}, {zone_re}, {zone_ref}) "
         f"LET {local} = LEFT({dt}, LENGTH({dt}) - LENGTH({zone})) "
-        f"LET {clock} = CONCAT({local}, LENGTH({local}) == {_DATE_LENGTH} ? {midnight} : {utc}) "
+        f"FILTER DATE_DAY(CONCAT(LEFT({local}, {_DATE_LENGTH}), {midnight})) == "
+        f"TO_NUMBER(SUBSTRING({local}, 8, 2)) "
+        f"LET {is_24} = SUBSTRING({local}, 11, 2) == {hour_24} "
+        f"FILTER !{is_24} || SUBSTRING({local}, 13, 6) == {on_the_hour} "
+        f"LET {clock} = {is_24} ? DATE_ADD(CONCAT(LEFT({local}, {_DATE_LENGTH}), {midnight}), 1, {day_unit}) "
+        f": CONCAT({local}, {is_date} ? {midnight} : {utc}) "
         f"LET {month_index} = DATE_YEAR({clock}) * 12 + DATE_MONTH({clock}) - 1 + {months_bind} "
         f"LET {year} = FLOOR({month_index} / 12) "
+        f"FILTER {year} >= 0 && {year} <= 9999 "
         f"LET {month} = {month_index} - {year} * 12 + 1 "
         f"LET {day} = MIN([DATE_DAY({clock}), DATE_DAYS_IN_MONTH(DATE_ISO8601({year}, {month}, 1))]) "
-        f"LET {shifted} = DATE_ADD(DATE_ISO8601({year}, {month}, {day}, DATE_HOUR({clock}), "
-        f"DATE_MINUTE({clock}), DATE_SECOND({clock}), DATE_MILLISECOND({clock})), {millis_bind}, {unit}) "
+        f"LET {moment} = DATE_TIMESTAMP({year}, {month}, {day}, DATE_HOUR({clock}), "
+        f"DATE_MINUTE({clock}), DATE_SECOND({clock}), DATE_MILLISECOND({clock})) + {millis_bind} "
+        f"FILTER {moment} >= {first} && {moment} <= {last} "
+        f"LET {shifted} = DATE_ISO8601({moment}) "
         f"LET {ms} = DATE_MILLISECOND({shifted}) "
-        f"RETURN LENGTH({local}) == {_DATE_LENGTH} ? CONCAT(DATE_FORMAT({shifted}, {date_format}), {zone}) "
-        f": CONCAT(DATE_FORMAT({shifted}, {time_format}), {fraction}, {zone}))[0]"
+        f"RETURN {is_date} ? CONCAT(LEFT({shifted}, {_DATE_LENGTH}), {zone}) "
+        f": CONCAT(LEFT({shifted}, 19), {fraction}, {zone}))[0]"
     )
 
 
-def compare_instants(left: str, right: str, operator: str) -> str:
-    """``left operator right`` on the instants two dates name.
+def instant(builder: AqlQueryBuilder, expr: str) -> str:
+    """The epoch milliseconds a date or dateTime string names; null for
+    anything else (a number, a non-date string, null), without the warning
+    ``DATE_TIMESTAMP`` raises for those. A local (zoneless) value is read as
+    UTC."""
+    value = builder.fresh_alias(prefix="ts")
+    shape = builder.bind(_SHIFTABLE, hint="date_shape")
+    return (
+        f"(FOR {value} IN [{expr}] RETURN IS_STRING({value}) && REGEX_TEST({value}, {shape}) "
+        f"? DATE_TIMESTAMP({value}) : null)[0]"
+    )
 
-    Used when either side is a shifted date: its lexical form need not match
-    the other side's (``"2020-02-01"`` against ``"2020-02-01T00:00:00Z"``, or
-    two zones). A side that is no date has no instant, and the comparison is
-    then an error, false in a FILTER. A local (zoneless) value is read as UTC.
+
+def compare_instants(
+    builder: AqlQueryBuilder,
+    left: str,
+    right: str,
+    operator: str,
+    *,
+    shifted: tuple[bool, bool],
+    not_a_date: tuple[bool, bool] = (False, False),
+) -> str:
+    """``left operator right`` where at least one side is a shifted date.
+
+    The instants are compared, not the strings: a shift's lexical form need
+    not match the other side's (``"2020-02-01"`` against
+    ``"2020-02-01T00:00:00Z"``, or two zones). *shifted* says which sides are
+    shifts: one that failed (null) makes the comparison an error, false in a
+    FILTER. *not_a_date* marks a side the query writes as a literal of
+    another type (a plain string, a number): then the terms differ, so
+    ``!=`` holds and every other operator is an error. A side known only at
+    run time that is no date (``"abc"``) differs from the date too (``!=``
+    holds; pyoxigraph agrees), unless it is unbound.
     """
-    left, right = f"DATE_TIMESTAMP({left})", f"DATE_TIMESTAMP({right})"
-    return f"({left} != null && {right} != null && {left} {operator} {right})"
+    l_value, r_value = builder.fresh_alias(prefix="lhs"), builder.fresh_alias(prefix="rhs")
+    l_time, r_time = builder.fresh_alias(prefix="lts"), builder.fresh_alias(prefix="rts")
+    guards = [f"{t} != null" for t, is_shift in ((l_time, shifted[0]), (r_time, shifted[1])) if is_shift]
+    if any(not_a_date):
+        test = " && ".join(guards) if operator == "!=" and guards else "false"
+    elif operator == "!=":
+        test = " && ".join(
+            [
+                *guards,
+                f"{l_value} != null",
+                f"{r_value} != null",
+                f"({l_time} == null || {r_time} == null || {l_time} != {r_time})",
+            ]
+        )
+    else:
+        test = f"{l_time} != null && {r_time} != null && {l_time} {operator} {r_time}"
+    return (
+        f"(FOR {l_value} IN [{left}] FOR {r_value} IN [{right}] "
+        f"LET {l_time} = {instant(builder, l_value)} LET {r_time} = {instant(builder, r_value)} "
+        f"RETURN {test})[0]"
+    )
