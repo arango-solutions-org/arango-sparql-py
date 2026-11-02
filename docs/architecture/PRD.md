@@ -1127,6 +1127,29 @@ FOR doc1 IN @@coll_Person
 }
 ```
 
+**Documents a walk reaches are scoped too** (issue #118). An edge's far
+vertex, the source of a backward walk, a document read from the default
+collection (a subject no class places, DESCRIBE), and the endpoints of a
+relationship node read on its own (D8, `DOCUMENT(k._from)` /
+`DOCUMENT(k._to)`) are not opened by their class, so no class applies its
+filter there. Each such document gets one test per tenant field, keyed by
+the collection in its `_id` (and, in a shared collection, its label: the
+labels scoped in that collection, looked up with `TRANSLATE(coll,
+@labels_by_collection, [])`, so a non-tenant class reusing a label value in
+another collection is not held to the tenant): a document of a
+tenant-scoped class must carry the tenant, any other passes —
+`FILTER (FIRST(SPLIT(NOT_NULL(v._id, @e), @s)) IN @tenant_colls ? v.tenant
+== @tenant_id : true)`. (A per-class `(!in_class || tenant)` AND over the
+hops of a `:p+` path made ArangoDB's planner run out of memory.) Without a
+tenant context, documents of tenant-scoped classes are not visible to a
+walk (`? false : true`), as opening such a class is refused. Classes under
+several tenant roots (`phys:tenantEntity`) cannot be scoped by one tenant,
+so a walk is refused in such a mapping. A mapping with no tenant-scoped
+class emits nothing. The triples table of an RPT class has no tenant
+column, so any read of a table a tenant-scoped RPT class uses is refused,
+whichever class it reads through: a type pattern, an untyped subject
+routed to a pure triple store, the cross-subject OPTIONAL.
+
 **Cross-tenant joins are forbidden.** When two BGP triples touch two
 entities that have different `tenantEntity` values, the translator
 raises `E_TRANSLATE_CROSS_TENANT_JOIN` (HTTP 422) rather than emit a
