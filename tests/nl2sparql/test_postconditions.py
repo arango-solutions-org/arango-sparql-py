@@ -234,6 +234,30 @@ def test_a_soft_postcondition_returns_the_candidate_and_says_so() -> None:
     assert "(soft_require_limit)" in result.explanation
 
 
+def test_the_declared_query_core_floor_ships_soft_postconditions() -> None:
+    """``PostconditionViolation.soft`` arrived in arango-query-core 0.2.3. A
+    floor below it lets pip resolve 0.2.0-0.2.2, where a soft check silently
+    fails closed (the two soft tests above fail; they did locally on 0.2.0)."""
+    import tomllib
+    from pathlib import Path
+
+    from packaging.requirements import Requirement
+    from packaging.version import Version
+
+    pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
+    project = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]
+    requirements = [Requirement(r) for r in project.get("dependencies", [])]
+    for extra in project.get("optional-dependencies", {}).values():
+        requirements.extend(Requirement(r) for r in extra)
+    core = [r for r in requirements if r.name == "arango-query-core"]
+    assert core, "arango-query-core is not declared in pyproject.toml"
+    for req in core:
+        floors = [Version(s.version) for s in req.specifier if s.operator == ">="]
+        assert floors and min(floors) >= Version("0.2.3"), (
+            f"{req} allows an arango-query-core without PostconditionViolation.soft (needs >=0.2.3)"
+        )
+
+
 def test_a_hard_postcondition_still_fails_closed_beside_the_soft_path() -> None:
     provider = ScriptedProvider([f"```sparql\n{_NO_LIMIT}\n```"])
     result = nl_to_sparql(

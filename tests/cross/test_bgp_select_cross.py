@@ -554,3 +554,51 @@ def test_an_ungrouped_sample_is_one_row_holding_one_of_the_values() -> None:
     rows = run_aql_subset(result.aql, result.bind_vars, ARANGO_DOCS)
     assert len(rows) == 1
     assert rows[0]["x"] in {"eng", "ops"}
+
+
+# A VALUES row joined to variables the pattern binds: an UNDEF cell, or a
+# variable a failed OPTIONAL left unbound, is compatible with any value
+# (SPARQL §18.3; W3C bindings/values4, 5, 7, 8).
+VALUES_CASES = [
+    pytest.param(
+        "PREFIX : <http://ex.org/> SELECT ?s ?n WHERE { ?s a :Person ; :name ?n } VALUES ?s { :alice UNDEF }",
+        id="undef_subject_after_the_pattern",
+    ),
+    pytest.param(
+        'PREFIX : <http://ex.org/> SELECT ?s ?n WHERE { ?s a :Person ; :name ?n } VALUES ?n { "Bob" UNDEF }',
+        id="undef_literal_after_the_pattern",
+    ),
+    pytest.param(
+        "PREFIX : <http://ex.org/> SELECT ?s ?n WHERE { ?s a :Person ; :name ?n } "
+        'VALUES (?s ?n) { (:alice UNDEF) (UNDEF "Carol") (:bob "X") }',
+        id="undef_in_either_column",
+    ),
+    pytest.param(
+        "PREFIX : <http://ex.org/> SELECT ?s ?e WHERE { ?s a :Person OPTIONAL { ?s :email ?e } } "
+        'VALUES ?e { "x@example.com" }',
+        id="values_binds_a_failed_optional",
+    ),
+    pytest.param(
+        "PREFIX : <http://ex.org/> SELECT ?s ?e WHERE { ?s a :Person OPTIONAL { ?s :email ?e } } "
+        'VALUES ?e { "alice@example.com" UNDEF }',
+        id="both_sides_can_be_unbound",
+    ),
+    pytest.param(
+        "PREFIX : <http://ex.org/> SELECT ?s ?n WHERE { VALUES ?s { :alice UNDEF } ?s a :Person ; :name ?n }",
+        id="undef_subject_before_the_pattern",
+        marks=pytest.mark.xfail(
+            strict=True,
+            reason="#100: a later triple joined on a variable that can be unbound drops the UNDEF row",
+        ),
+    ),
+]
+
+
+@pytest.mark.cross
+@pytest.mark.parametrize("sparql", VALUES_CASES)
+def test_values_joins_match_oxigraph(oxi_store: Any, sparql: str) -> None:
+    resolver = SchemaResolver.from_turtle(ONTOLOGY_TTL)
+    result = translate(sparql, resolver=resolver)
+    actual = [_normalize_arango_row(r) for r in run_aql_subset(result.aql, result.bind_vars, ARANGO_DOCS)]
+    expected = [_normalize_oxi_row(r) for r in oxi_bindings(oxi_store, sparql)]
+    assert_bindings_equal(expected, actual)

@@ -143,8 +143,8 @@ Reference repositories examined (via the GitHub API, 2026-10-23):
    - Note for the sister plan: its §2.4 says LDBC does not publish validation
      files. That holds for v2, not for v1.
    - **Checked 2026-10-24: not usable as they stand.** The SF0.1 file
-     (`validation_params-sf0.1.csv`, 138,474 lines) interleaves **18,626
-     updates with 119,848 reads, starting on its first line**. Each expected
+     (`validation_params-sf0.1.csv`, 138,474 lines) interleaves **7,996
+     inserts with 130,478 reads, starting on its first line**. Each expected
      answer describes the database *after* the inserts before it, which the
      Turtle snapshot does not contain (the first short read already returns
      a comment the first line inserts). Using them means replaying those
@@ -152,6 +152,24 @@ Reference repositories examined (via the GitHub API, 2026-10-23):
      and the reference `interactive-update-*.rq` templates exist — which is
      follow-up work package WP-LDBC-REPLAY. **Until then pyoxigraph is the
      only oracle**, and the `oracle_disagrees` state is unused.
+   - **Replay, increment 1 (2026-10-30).** `python -m tests.ldbc.replay`
+     applies each insert to a copy of the normalised oracle store, in file
+     order, and checks the first *N* reads of each short read at their
+     point in the stream. The inserts are written to match the Turtle model,
+     not taken from the reference `interactive-update-*.rq` templates (those
+     reuse an existing `studyAt` / `workAt` node). At SF0.1, 50 each of IS1–IS5
+     and IS7 agree with LDBC (300/300): the short reads' SPARQL text and the
+     normalisation are right. Those 300 reads end at line 1,586, after only
+     86 inserts and before the first new person (IU1, line 36,332), so they
+     say little about the inserts: `--every 100 --per-op 100` applies all
+     7,996 inserts and checks every 100th short read, and agrees 405/405
+     (2026-10-31). Its first attempt
+     crashed at that IU1, whose `studyAt` / `workAt` entries are objects;
+     a unit test now applies the first insert of each kind from LDBC's file.
+     IS6 is left out by default: pyoxigraph does
+     not answer it within 10 minutes and has no query timeout. Complex reads
+     and replaying the inserts on the ArangoDB layouts are the next
+     increments.
 
 The two oracles separate the failure classes cleanly (once both exist):
 
@@ -359,6 +377,19 @@ What it found, beyond §3.1, §3.2 and §3.4:
   collection), so `sparqldl-07/08/09` returned their answer twice. The
   vertex is now kept to the collections the forward plan reads, with the
   tenant filter the forward plan's class would have.
+- **IC10 and IC4: a walk into the subject's class (2026-10-31).**
+  `?post :hasCreator ?foaf ; a :Post` with `?foaf` a document scanned every
+  post per friend (IC10 timed out on every layout). The edge is now walked
+  backwards from `?foaf` first, and the walk applies the type pattern's
+  tests to the vertex it reaches (PRD §6.1, "Join order"). IC10 matches the
+  oracle on PG (0.3–3.5 s) and LPG (1.7–12 s); IC4 went from 5–13 s to
+  0.01 s on both. A first attempt (#101) tested the already-bound document
+  in place of a class scan and gave silent wrong answers where one IRI is
+  several documents; it was reverted (#103). The redo landed in three
+  steps: index-friendly IRI joins (#108), backward walks from every copy of
+  the object in its range, scoped by graph and tenant (#109, part of #105),
+  then this ordering, each checked against pyoxigraph on multi-document
+  stores and on ArangoDB. IC10 on RPT still times out.
 - **The benchmark runner crashed on the first EXPLAIN error** and looked
   up pyoxigraph times under the wrong cache key; both fixed (`a17b0a8`).
 
@@ -423,6 +454,7 @@ tests/ldbc/
   test_ldbc_ratchet.py     # default suite: translation tier, no DB, < 5 s
   test_ldbc_execution.py   # integration: execute on ArangoDB + compare to pyoxigraph
   test_ldbc_validation.py  # integration: pyoxigraph vs LDBC validation parameters
+  replay.py                # LDBC's update stream on the oracle, short reads vs LDBC (WP-LDBC-REPLAY)
   bench.py                 # perf runner: python -m tests.ldbc.bench --sf 0.1 --layout rpt,lpg,pg
   report.py                # results JSON → docs/ldbc_results.md (with disclaimer)
 tests/ldbc/mappings/

@@ -199,3 +199,24 @@ def test_a_handler_sees_the_call_resolved() -> None:
 def test_a_text_index_needs_a_view_an_analyzer_and_fields() -> None:
     with pytest.raises(ValueError, match="needs a view"):
         TextIndex("v", "text_en", ())
+
+
+def test_an_entity_with_an_edge_to_a_known_document_still_opens_through_its_predicate() -> None:
+    # ``?c :about ?d`` with ?d a document could walk ``about`` backwards into
+    # ?c's class (the join order's walk into a class); the predicate's
+    # entity opens first instead, so its loop is the one the handler shapes.
+    ttl = _TTL + ":about rdfs:range :Document .\n"
+    ttl = ttl.replace(
+        "@prefix phys:", "@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n@prefix phys:"
+    )
+    resolver = SchemaResolver.from_turtle(
+        ttl,
+        predicates={MATCHES: text_match_handler({"chunks": TextIndex("chunks_text", "text_en", ("text",))})},
+    )
+    result = translate(
+        _PREFIX
+        + 'SELECT ?c WHERE { { ?d a :Document } { ?c a :Chunk ; :about ?d ; f:matchesText (:text "x") } }',
+        resolver=resolver,
+    )
+    assert " SEARCH " in result.aql
+    assert " IN INBOUND " not in result.aql
