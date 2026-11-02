@@ -265,6 +265,43 @@ GRAPH_ONLY_NO_DOMAIN = Store(
     resolver_kwargs={"default_collection": "Document"},
 )
 
+#: A subject reached by an edge outside ``GRAPH :g``, read inside it by a
+#: property with no domain: re-read from the default collection (where its
+#: ``:g`` copy is), not from the edge collection its vertex came through.
+GRAPH_EDGE_REACHED = Store(
+    ontology=PREFIXES
+    + """
+:Person a owl:Class ; phys:collectionName "Person" .
+:Org a owl:Class ; phys:collectionName "Person" .
+:name a owl:DatatypeProperty .
+:age a owl:DatatypeProperty .
+:knows a owl:ObjectProperty ; phys:edgeCollectionName "knows" ; rdfs:domain :Person ; rdfs:range :Person .
+:worksFor a owl:ObjectProperty ; phys:edgeCollectionName "worksFor" ; rdfs:domain :Person .
+""",
+    docs={
+        "Person": [
+            {"_id": "Person/s0", "_uri": EX + "s"},
+            {"_id": "Person/t0", "_uri": EX + "t", "name": "T"},
+            {"_id": "Person/tg", "_uri": EX + "t", "_graph": EX + "g", "name": "T-g", "age": 7},
+        ],
+        "knows": [{"_id": "knows/1", "_from": "Person/s0", "_to": "Person/t0"}],
+        "worksFor": [{"_id": "worksFor/1", "_from": "Person/s0", "_to": "Person/t0"}],
+    },
+    data=':s a :Person ; :knows :t ; :worksFor :t . :t a :Person ; :name "T" .\n'
+    ':g { :t a :Person ; :name "T-g" ; :age 7 . }',
+    trig=True,
+    resolver_kwargs=_STRICT,
+)
+#: As above, with the default collection empty: a vertex reached by an edge
+#: is re-read in its property's range, not there.
+GRAPH_EDGE_REACHED_EMPTY_DEFAULT = Store(
+    GRAPH_EDGE_REACHED.ontology,
+    {**GRAPH_EDGE_REACHED.docs, "Document": []},
+    GRAPH_EDGE_REACHED.data,
+    trig=True,
+    resolver_kwargs={"default_graph_includes_named": False},
+)
+
 #: The same IRI in two tenants; the oracle holds tenant t1's facts. ``knows``
 #: declares no domain, so nothing else keeps the walk inside the tenant.
 TENANTS = Store(
@@ -551,6 +588,23 @@ _CASES: list[tuple[str, Store, str, str | None]] = [
         "scope_graph_only_no_domain_const",
         GRAPH_ONLY_NO_DOMAIN,
         "SELECT ?n WHERE { :s a :Person . GRAPH :g { :s :name ?n } }",
+        None,
+    ),
+    *[
+        (f"scope_edge_reached{suffix}_{name}", store, query, None)
+        for suffix, store in (("", GRAPH_EDGE_REACHED), ("_empty_default", GRAPH_EDGE_REACHED_EMPTY_DEFAULT))
+        for name, query in [
+            ("plain", "SELECT ?x WHERE { ?s :knows ?t . GRAPH :g { ?t :name ?x } }"),
+            ("optional", "SELECT ?t ?x WHERE { ?s :knows ?t . OPTIONAL { GRAPH :g { ?t :name ?x } } }"),
+            ("union", "SELECT ?x WHERE { ?s :knows ?t . GRAPH :g { { ?t :name ?x } UNION { ?t :age ?x } } }"),
+        ]
+    ],
+    # No range: nothing says where the vertex is, so it is re-read in the
+    # default collection (here holding its copy; an empty one finds nothing).
+    (
+        "scope_edge_reached_no_range",
+        GRAPH_EDGE_REACHED,
+        "SELECT ?x WHERE { ?s :worksFor ?o . GRAPH :g { ?o :name ?x } }",
         None,
     ),
     *[

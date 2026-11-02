@@ -89,7 +89,7 @@ class _BindingState:
     doc_to_class: dict[str, ResolvedClass] = field(default_factory=dict)
     """AQL alias → the class whose collection it was opened as, when one was
     given (:meth:`AlgebraVisitor._open_collection`)."""
-    outer_subject_homes: dict[str, tuple[str, ResolvedClass | None]] = field(default_factory=dict)
+    outer_subject_homes: dict[str, tuple[str, ResolvedClass]] = field(default_factory=dict)
     """Inside a GRAPH: a subject (variable name or IRI) bound to a document
     outside it → that document's collection and class. A subject with no
     domain to route it is re-read there, on its IRI, under the scope's filter
@@ -1476,9 +1476,12 @@ class AlgebraVisitor:
         outer_homes = self.state.outer_subject_homes
         homes = dict(outer_homes)
         for key, alias in [*outer_docs.items(), *outer_consts.items()]:
-            collection = self.state.doc_to_collection.get(alias)
-            if collection is not None:  # a union row has no one collection
-                homes[key] = (collection, self.state.doc_to_class.get(alias))
+            # Only a document opened as a class has a known home: an edge's
+            # far vertex is recorded under the edge collection, and a union
+            # row has no one collection (review of 43ee964).
+            resolved = self.state.doc_to_class.get(alias)
+            if resolved is not None:
+                homes[key] = (resolved.collection, resolved)
         self.state.outer_subject_homes = homes
         self.state.var_to_doc_alias, self.state.const_subject_alias = {}, {}
         try:
@@ -1925,6 +1928,7 @@ class AlgebraVisitor:
             coll = self.builder.bind(resolved.collection, hint="coll")
             self.builder.filter_raw(f"IS_SAME_COLLECTION({coll}, {alias})")
         self.state.doc_to_collection[alias] = resolved.collection
+        self.state.doc_to_class[alias] = resolved
         self._apply_graph_scope(alias)
         return alias, plan
 
@@ -2407,6 +2411,7 @@ class AlgebraVisitor:
             self._filter_edge_type(prop, e_alias)
             self._keep_subject_collections(v_alias, prop)
             self.state.doc_to_collection[v_alias] = prop.edge_collection
+            self._record_vertex_home(v_alias, self.resolver.domain_classes(prop.iri))
             self._bind_subject(subject, v_alias)
             return
 
@@ -2425,6 +2430,7 @@ class AlgebraVisitor:
         # object (a reified relationship binds the edge instead:
         # :meth:`_emit_reified_entry`).
         self.state.doc_to_collection[v_alias] = prop.edge_collection
+        self._record_vertex_home(v_alias, (prop.range_iri,) if prop.range_iri else ())
         self._bind_vertex_object(obj, v_alias, prop, triple)
 
     def _emit_reified_entry(self, subject: Any, prop: Any, obj: Any) -> None:
@@ -2811,7 +2817,26 @@ class AlgebraVisitor:
             )
         self._enforce_tenant_scope(v_alias, resolved)
         self.state.doc_to_collection[v_alias] = resolved.collection
+        self.state.doc_to_class[v_alias] = resolved
         self._bind_subject(s, v_alias)
+
+    def _record_vertex_home(self, v_alias: str, class_iris: tuple[str, ...]) -> None:
+        """Record the class a traversal vertex is a document of, when the
+        property's domain or range (*class_iris*) puts it in one collection
+        under one tenant scoping, so a GRAPH scope can re-read it there
+        (:meth:`_reopen_at_home`). The traversal itself reaches any
+        collection; with no such class the vertex has no known home."""
+        try:
+            classes = self._concrete_classes(class_iris)
+        except SchemaResolutionError:
+            return
+        if (
+            classes
+            and all(c.style != "RPT" for c in classes)
+            and len({c.collection for c in classes}) == 1
+            and len({(c.tenant_field, c.tenant_entity) for c in classes}) == 1
+        ):
+            self.state.doc_to_class[v_alias] = classes[0]
 
     def _range_classes(self, range_iri: str | None) -> dict[str, list[ResolvedClass]]:
         """The document classes of a declared ``rdfs:range`` (a supertype's
@@ -3139,8 +3164,7 @@ class AlgebraVisitor:
             return None
         collection, resolved = home
         alias = self._open_collection(collection, resolved=resolved)
-        if resolved is not None:
-            self._enforce_tenant_scope(alias, resolved)
+        self._enforce_tenant_scope(alias, resolved)
         if isinstance(subject, Variable):
             self._bind_subject(subject, alias)
         else:
