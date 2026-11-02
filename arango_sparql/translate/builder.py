@@ -381,6 +381,14 @@ class AqlQueryBuilder:
         self._bind_vars[f"@{name}"] = collection_name
         return f"@@{name}"
 
+    def collection_bound_to(self, placeholder: str) -> str | None:
+        """The collection or view a ``@@name`` placeholder from
+        :meth:`bind_collection` stands for; ``None`` for anything else."""
+        if not placeholder.startswith("@@"):
+            return None
+        value = self._bind_vars.get(placeholder[1:])
+        return value if isinstance(value, str) else None
+
     # ------------------------------------------------------------------
     # Clause emission
     # ------------------------------------------------------------------

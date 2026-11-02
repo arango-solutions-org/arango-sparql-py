@@ -1889,6 +1889,14 @@ class AlgebraVisitor:
         if unknown:
             raise call.refuse(f"the handler bound variables not in its subject list: {unknown}")
         self.builder.for_source(alias, plan.source, search=plan.search, options=plan.options)
+        if self.builder.collection_bound_to(plan.source) != resolved.collection:
+            # Another source (a view can link several collections): only the
+            # class's own documents are its members, whatever the handler
+            # restricts. Before the plan's SORT / LIMIT, so they count the
+            # class's matches. Left out on the collection itself, where it
+            # would only stand between a vector index and its SORT.
+            coll = self.builder.bind(resolved.collection, hint="coll")
+            self.builder.filter_raw(f"IS_SAME_COLLECTION({coll}, {alias})")
         self.state.doc_to_collection[alias] = resolved.collection
         self._apply_graph_scope(alias)
         return alias, plan

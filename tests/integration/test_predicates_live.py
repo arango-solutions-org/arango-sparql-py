@@ -158,3 +158,21 @@ def test_a_match_joins_with_the_rest_of_the_pattern(db: Any) -> None:
         'SELECT ?c ?acct WHERE { ?c a :Chunk ; :account ?acct ; f:matchesText (:text "price") . FILTER(?acct = "globex") }',
     )
     assert _keys(rows) == ["c"]
+
+
+def test_a_handler_that_does_not_restrict_the_view_still_answers_chunks_only(db: Any) -> None:
+    # The view also links the notes; a caller's handler may leave out
+    # ``OPTIONS { collections }``, and the seam keeps the class's own documents.
+    from arango_sparql.translate.predicates import LoopEmitter, LoopPlan, PredicateCall
+
+    def unrestricted(call: PredicateCall, emit: LoopEmitter) -> LoopPlan:
+        analyzer = emit.bind("text_en", hint="analyzer")
+        return LoopPlan(
+            source=emit.bind_source(_VIEW),
+            search=f"ANALYZER(TOKENS({emit.bind('frustrated price')}, {analyzer}) ALL == {emit.field(('text',))}, {analyzer})",
+        )
+
+    resolver = SchemaResolver.from_turtle(_TTL, predicates={"urn:fn#anyText": unrestricted})
+    result = translate(_PREFIX + 'SELECT ?c WHERE { ?c a :Chunk ; f:anyText (:text "x") }', resolver=resolver)
+    rows = list(db.aql.execute(result.aql, bind_vars=result.bind_vars))
+    assert _keys(rows) == ["a", "c"]  # not the note "n"

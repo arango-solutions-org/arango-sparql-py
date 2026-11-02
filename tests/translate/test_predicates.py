@@ -80,6 +80,7 @@ def test_a_text_match_iterates_the_view_and_binds_bm25() -> None:
         "FOR doc1 IN @@c1_chunks_text "
         "SEARCH ANALYZER(TOKENS(@_p1_text, @_p2_analyzer) ALL == doc1.text, @_p2_analyzer) "
         "OPTIONS { collections: [@_p3_collection] }\n"
+        "FILTER IS_SAME_COLLECTION(@_p4_coll, doc1)\n"
         "RETURN { c: NOT_NULL(doc1._uri, doc1._id), score: BM25(doc1) }"
     )
     assert result.bind_vars == {
@@ -87,14 +88,20 @@ def test_a_text_match_iterates_the_view_and_binds_bm25() -> None:
         "_p1_text": "late renewal",
         "_p2_analyzer": "text_en",
         "_p3_collection": "chunks",
+        "_p4_coll": "chunks",
     }
 
 
 def test_a_text_match_with_a_limit_keeps_the_best_scored_before_the_rest_of_the_pattern() -> None:
     result = _translate('SELECT ?c WHERE { ?c :seq ?n . ?c a :Chunk . ?c f:matchesText (:text "renewal" 3) }')
     lines = result.aql.splitlines()
-    assert lines[1:3] == ["SORT BM25(doc1) DESC", "LIMIT @_p4_limit"]
-    assert lines[3] == 'FILTER HAS(doc1, "seq")'
+    # The class test comes before SORT / LIMIT, so the limit counts chunks only.
+    assert lines[1:4] == [
+        "FILTER IS_SAME_COLLECTION(@_p5_coll, doc1)",
+        "SORT BM25(doc1) DESC",
+        "LIMIT @_p4_limit",
+    ]
+    assert lines[4] == 'FILTER HAS(doc1, "seq")'
     assert result.bind_vars["_p4_limit"] == 3
 
 
@@ -199,6 +206,33 @@ def test_a_handler_sees_the_call_resolved() -> None:
 def test_a_text_index_needs_a_view_an_analyzer_and_fields() -> None:
     with pytest.raises(ValueError, match="needs a view"):
         TextIndex("v", "text_en", ())
+
+
+def _view_without_options(call: PredicateCall, emit: LoopEmitter) -> LoopPlan:
+    """A caller's handler that iterates a view and does not restrict it to
+    the entity's collection (no ``OPTIONS { collections }``)."""
+    return LoopPlan(
+        source=emit.bind_source("all_text"),
+        search=f"ANALYZER({emit.field(('text',))} == {emit.bind('x')}, {emit.bind('text_en')})",
+    )
+
+
+def test_a_loop_over_another_source_keeps_only_the_classs_documents() -> None:
+    # A view can link several collections; without this test every document
+    # it holds would answer as a :Chunk.
+    resolver = SchemaResolver.from_turtle(_TTL, predicates={"urn:fn#t": _view_without_options})
+    result = translate(_PREFIX + 'SELECT ?c WHERE { ?c a :Chunk ; f:t (:text "x") }', resolver=resolver)
+    lines = result.aql.splitlines()
+    assert lines[0].startswith("FOR doc1 IN @@c1_all_text SEARCH ")
+    assert lines[1] == "FILTER IS_SAME_COLLECTION(@_p3_coll, doc1)"
+    assert result.bind_vars["_p3_coll"] == "chunks"
+
+
+def test_a_loop_over_the_classs_own_collection_needs_no_collection_test() -> None:
+    # Nothing to restrict, and a FILTER there would stand between a vector
+    # index and its SORT.
+    result = _translate("SELECT ?c WHERE { ?c a :Chunk . (?c ?sim) f:nearVector (:embedding 5) }")
+    assert "IS_SAME_COLLECTION" not in result.aql
 
 
 def test_an_entity_with_an_edge_to_a_known_document_still_opens_through_its_predicate() -> None:
