@@ -39,6 +39,7 @@ from .builder import (
     subject_ref,
     type_predicate,
 )
+from .date_arithmetic import compare_instants, date_shift, is_date_shift, is_duration_literal
 from .filter_builtins import translate_builtin, translate_function
 from .minus_exists import emit_minus
 from .optional_crosssubject import (
@@ -3276,6 +3277,10 @@ class AlgebraVisitor:
             if op in self._RELATIONAL_OP_MAP:
                 left = self._translate_expr(expr.expr)
                 right = self._translate_expr(expr.other)
+                if is_date_shift(expr.expr) or is_date_shift(expr.other):
+                    # ``date ± duration`` is a date in its operand's form: compare
+                    # instants, not strings (#123).
+                    return compare_instants(left, right, self._RELATIONAL_OP_MAP[op])
                 return f"({left} {self._RELATIONAL_OP_MAP[op]} {right})"
             if op in ("IN", "NOT IN"):
                 left = self._translate_expr(expr.expr)
@@ -3338,14 +3343,14 @@ class AlgebraVisitor:
         ``head=?a, ops=['+', '-'], tail=[1, 2]``.
         """
         pairs = list(zip(ops, tail, strict=True))
-        if pairs and pairs[0][0] == "+" and _is_duration_literal(head):
+        if pairs and pairs[0][0] == "+" and is_duration_literal(head):
             # ``duration + date`` is ``date + duration`` (addition commutes).
             result = self._date_shift("+", self._translate_expr(pairs[0][1]), head)
             pairs = pairs[1:]
         else:
             result = self._translate_expr(head)
         for op, operand in pairs:
-            if op in ("+", "-") and _is_duration_literal(operand):
+            if op in ("+", "-") and is_duration_literal(operand):
                 result = self._date_shift(op, result, operand)
                 continue
             right = self._translate_expr(operand)
@@ -3360,26 +3365,8 @@ class AlgebraVisitor:
         return result
 
     def _date_shift(self, op: str, date_expr: str, duration: Literal) -> str:
-        """``date ± duration`` as AQL ``DATE_ADD`` / ``DATE_SUBTRACT``.
-
-        XPath's ``op:add-yearMonthDuration-to-dateTime`` family (SPARQL 1.1
-        §17.3 via XPath operators). AQL takes the ISO 8601 duration string
-        itself (``P30D``), so the duration is bound as its lexical form — never
-        as the ``timedelta`` rdflib parses it into, which is not JSON and
-        failed at the driver (LDBC IC3 / IC4).
-
-        Only a string is shifted: AQL reads a number as epoch milliseconds
-        (``DATE_ADD(7, "P1D")`` is a date), where SPARQL's number + duration is
-        a type error. Anything else — and a string that is not a date, for
-        which AQL returns null — yields null, SPARQL's "error → unbound".
-        """
-        duration_bind = self.builder.bind(str(duration), hint="duration")
-        function = "DATE_ADD" if op == "+" else "DATE_SUBTRACT"
-        operand = self.builder.fresh_alias(prefix="dt")
-        return (
-            f"(FOR {operand} IN [{date_expr}] "
-            f"RETURN IS_STRING({operand}) ? {function}({operand}, {duration_bind}) : null)[0]"
-        )
+        """``date ± duration``, as XPath adds them (:func:`date_shift`)."""
+        return date_shift(self.builder, op, date_expr, duration)
 
     # ------------------------------------------------------------------
     # Internal: projection / RETURN
@@ -3604,20 +3591,6 @@ def _walk_for_bgp_triples(node: Any, out: list[tuple[Any, Any, Any]]) -> None:
             _walk_for_bgp_triples(child, out)
 
 
-#: XSD duration datatypes (XSD 1.1 §3.3.6, §3.4.26, §3.4.27).
-_DURATION_TYPES = frozenset(
-    {
-        "http://www.w3.org/2001/XMLSchema#duration",
-        "http://www.w3.org/2001/XMLSchema#dayTimeDuration",
-        "http://www.w3.org/2001/XMLSchema#yearMonthDuration",
-    }
-)
-
-
-def _is_duration_literal(term: Any) -> bool:
-    return isinstance(term, Literal) and term.datatype is not None and str(term.datatype) in _DURATION_TYPES
-
-
 def _term_to_python(term: Any) -> Any:
     """Convert an rdflib Literal/URIRef into a JSON-safe Python value.
 
@@ -3631,7 +3604,7 @@ def _term_to_python(term: Any) -> Any:
     and refused anywhere else rather than bound as a ``timedelta`` the
     driver cannot serialise.
     """
-    if _is_duration_literal(term):
+    if is_duration_literal(term):
         raise UnsupportedSparqlError(
             f"an xsd:duration value ({term}) is supported only when added to or "
             "subtracted from a date or dateTime"

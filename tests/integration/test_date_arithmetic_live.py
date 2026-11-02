@@ -119,3 +119,98 @@ def test_date_arithmetic_matches_oxigraph(db: Any, oxi_store: Any, body: str) ->
     expected = _oxigraph(oxi_store, body)
     assert expected, "the case must have a non-empty answer to prove anything"
     assert_bindings_equal(expected, _arango(db, body))
+
+
+# Issue #123: a date or dateTime in another lexical form than DATE_ADD's
+# (``…T00:00:00.000Z``) — an xsd:date, a zone other than Z, no milliseconds.
+_MIXED = "DateArithmeticMixed"
+_MIXED_TTL = f"""
+@prefix :     <http://example.org/> .
+@prefix owl:  <http://www.w3.org/2002/07/owl#> .
+@prefix phys: <https://arango.solutions/phys#> .
+:Day a owl:Class ; phys:collectionName "{_MIXED}" .
+:d a owl:DatatypeProperty .
+:t a owl:DatatypeProperty .
+"""
+_MIXED_DOCS = [
+    {"_key": "e1", "_uri": _EVENT + "e1", "d": "2020-01-31", "t": "2020-01-01T23:30:00Z"},
+    {"_key": "e2", "_uri": _EVENT + "e2", "d": "2020-03-01", "t": "2020-01-02T10:00:00+02:00"},
+    {"_key": "e3", "_uri": _EVENT + "e3", "d": "2019-12-31", "t": "2020-01-31T10:00:00.500-05:00"},
+]
+_XSD = "http://www.w3.org/2001/XMLSchema#"
+
+
+@pytest.fixture(scope="module")
+def mixed_db(db: Any) -> Iterator[Any]:
+    if db.has_collection(_MIXED):
+        db.delete_collection(_MIXED)
+    db.create_collection(_MIXED).insert_many(_MIXED_DOCS)
+    yield db
+    db.delete_collection(_MIXED)
+
+
+@pytest.fixture(scope="module")
+def mixed_store() -> Any:
+    store = oxi.Store()
+    triples = "\n".join(
+        f"<{d['_uri']}> a <http://example.org/Day> ; "
+        f'<http://example.org/d> "{d["d"]}"^^<{_XSD}date> ; '
+        f'<http://example.org/t> "{d["t"]}"^^<{_XSD}dateTime> .'
+        for d in _MIXED_DOCS
+    )
+    store.load(triples.encode("utf-8"), oxi.RdfFormat.TURTLE)
+    return store
+
+
+def _arango_mixed(db: Any, body: str) -> list[dict[str, Any]]:
+    res = translate(_PREFIX + body, resolver=SchemaResolver.from_turtle(_MIXED_TTL))
+    db.aql.validate(res.aql)
+    cursor = db.aql.execute(res.aql, bind_vars=res.bind_vars)
+    assert not cursor.warnings(), cursor.warnings()
+    return [drop_null_bindings(r) for r in cursor]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # A shifted xsd:date equals, or follows, a date literal (it compared as
+        # ``"2020-02-01T00:00:00.000Z"`` against ``"2020-02-01"``).
+        'SELECT ?x WHERE { ?x a :Day ; :d ?d FILTER(?d + "P1D"^^xsd:dayTimeDuration = "2020-02-01"^^xsd:date) }',
+        'SELECT ?x WHERE { ?x a :Day ; :d ?d FILTER(?d + "P1D"^^xsd:dayTimeDuration > "2020-02-01"^^xsd:date) }',
+        # A shifted dateTime against another zone: instants, not text.
+        'SELECT ?x WHERE { ?x a :Day ; :t ?t FILTER(?t + "PT1H"^^xsd:dayTimeDuration < "2020-01-02T08:30:00Z"^^xsd:dateTime) }',
+        'SELECT ?x WHERE { ?x a :Day ; :t ?t FILTER(?t + "PT1H"^^xsd:dayTimeDuration = "2020-01-02T00:30:00Z"^^xsd:dateTime) }',
+        'SELECT ?x WHERE { ?x a :Day ; :t ?t FILTER(?t + "PT1H"^^xsd:dayTimeDuration >= "2020-01-02T00:30:00Z"^^xsd:dateTime) }',
+        # The projected dateTime keeps its zone and canonical seconds.
+        'SELECT ?x ?n WHERE { ?x a :Day ; :t ?t BIND(?t - "PT30M"^^xsd:dayTimeDuration AS ?n) }',
+    ],
+)
+def test_a_shifted_date_matches_oxigraph_in_any_form(mixed_db: Any, mixed_store: Any, body: str) -> None:
+    expected = _oxigraph(mixed_store, body)
+    assert expected, "the case must have a non-empty answer to prove anything"
+    assert_bindings_equal(expected, _arango_mixed(mixed_db, body))
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        # XPath clamps a month end (op:add-yearMonthDuration-to-date); ArangoDB's
+        # DATE_ADD overflows (``2020-03-02``). pyoxigraph answers no
+        # date + duration at all, so the values are XPath's, written out.
+        ('?d + "P1M"^^xsd:yearMonthDuration', {"e1": "2020-02-29", "e2": "2020-04-01", "e3": "2020-01-31"}),
+        ('?d - "P1Y1M"^^xsd:yearMonthDuration', {"e1": "2018-12-31", "e2": "2019-02-01", "e3": "2018-11-30"}),
+        ('?d + "P1D"^^xsd:dayTimeDuration', {"e1": "2020-02-01", "e2": "2020-03-02", "e3": "2020-01-01"}),
+        # A dateTime month shift runs on the local clock and keeps the zone.
+        (
+            '?t + "P1M"^^xsd:yearMonthDuration',
+            {
+                "e1": "2020-02-01T23:30:00Z",
+                "e2": "2020-02-02T10:00:00+02:00",
+                "e3": "2020-02-29T10:00:00.5-05:00",
+            },
+        ),
+    ],
+)
+def test_a_date_shift_follows_xpath(mixed_db: Any, body: str, expected: dict[str, str]) -> None:
+    rows = _arango_mixed(mixed_db, f"SELECT ?x ?n WHERE {{ ?x a :Day ; :d ?d ; :t ?t BIND({body} AS ?n) }}")
+    assert {r["x"].rsplit("/", 1)[1]: r["n"] for r in rows} == expected
