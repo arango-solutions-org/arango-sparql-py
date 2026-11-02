@@ -23,10 +23,15 @@ dependency, `arangodb-schema-analyzer[...]` — whose band is declared only in
 
 ```toml
 # [nl] extra
-"arango-query-core>=0.2.0,<0.3.0"
+"arango-query-core>=0.2.3,<0.3.0"
 # [dense] extra
-"arango-query-core[dense]>=0.2.0,<0.3.0"
+"arango-query-core[dense]>=0.2.3,<0.3.0"
 ```
+
+The floor is 0.2.3, the first release with `PostconditionViolation.soft`
+(PRD §7.3.1): on 0.2.0–0.2.2 a soft postcondition silently fails closed.
+`tests/nl2sparql/test_postconditions.py::test_the_declared_query_core_floor_ships_soft_postconditions`
+fails if a declared floor drops below it.
 
 `arango-query-core 0.2.0` is on PyPI and verified to contain
 `nl/postconditions.py` (the merged `f2f3061` work) plus the `dense`/`nl` extras.

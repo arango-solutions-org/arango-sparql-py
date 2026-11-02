@@ -549,7 +549,12 @@ identity can be pasted back as a constant (`<aws_iam_role/0123>`). A scan
 joined to a value computed at run time (a sub-select column, a VALUES row, a
 probe's outer row) uses the same index-friendly form, guarded against a null
 value, which `NOT_NULL(...) ==` never matched (`subject_matches_value`); for a
-subject read across several collections it runs inside each arm. Known limit:
+subject read across several collections it runs inside each arm. So does a
+class opened for a subject already bound to a document (`:a :knows ?y . ?y a
+:Person`, a second class for one variable or constant): it joins on the
+IRI, not the document, because one IRI can be several documents (an entity of
+two classes, the W3C loader's copies, one document per named graph), and the
+index serves it instead of a class scan per row. Known limit:
 a constant subject is still looked up in the default collection, not in the
 collection its `_id` names; and `isIRI()` is false for an `_id` identity.
 
@@ -567,7 +572,23 @@ routes the subject (`translate/visitor.py`):
   trusted as where the object is stored, as the domain is for subjects: an
   object stored outside its range class is not found, so the triple matches
   nothing for it. A mapping the schema analyzer builds agrees with its data
-  (ranges come from the edges' `_to` collections); a hand-written one must;
+  (ranges come from the edges' `_to` collections); a hand-written one must.
+  An object already bound to a document is walked from **every document
+  carrying its IRI in the range** (`_every_copy`, issue #105): one IRI can
+  be several documents (an entity of two classes, one per named graph) and
+  the edge may point at another copy than the bound one. Each copy is
+  looked up by an indexed `_uri` match in the range's collections and read
+  as a document of that class: its tenant FILTER, and the active GRAPH
+  scope or the strict default graph (the scope's graph, not the bound
+  document's: an object bound outside `GRAPH :g` is walked inside it from
+  its copy in `:g`). The bound
+  document is kept when it is in none of them, and the arms are disjoint,
+  so each document is walked once. With **no declared range** the walk
+  starts from the bound document alone: every mapped collection would
+  include ones the database may not have (ERR 1203, such as the
+  `/sparql` route's default `Document`), so an edge into another copy
+  there is a known limit (#105; the W3C loader's layout declares no
+  ranges);
 - otherwise the property's `rdfs:domain` opens the subject's collection
   (`_route_by_domain`): one class opens its collection, with its label test in
   LPG; an `owl:unionOf` of LABEL classes in one collection is an any-of label
@@ -588,6 +609,26 @@ IC3: 164 MB to over the cap). The planned fix is arms that return only the
 attributes the query reads.
 Without a domain, a subject reads the default collection, or under
 `strict_subject_resolution` is refused.
+
+**Join order: a walk into the subject's class.** A type pattern on an
+unbound subject normally comes before that subject's other triples: it
+places the subject in its class's collection at the cost of a class scan
+(`translate/visitor.py::_iter_bgp_order`). When an edge's object is already
+a document, the edge declares an `rdfs:range`, and the subject has exactly
+one type pattern in the group, of a class stored as documents in one
+collection, the edge is walked backwards **first** and the walk applies the
+type pattern itself (`_walk_back_into_class`): it starts from the object's
+copies in the range (`_every_copy`) and keeps the vertices the class scan
+would have read — the class's collection, label, named-graph scope and
+tenant. The vertex is that class's document, never a copy tested in its
+place (one IRI can be several documents; PR #101 tested the bound document
+instead, gave silent wrong answers, and was reverted in #103). It is the
+forward plan's (document, edge) pairs, reached from the other end; only an
+edge into a copy of the object stored outside the declared range and not
+the bound document is not found (the range is trusted as for any backward
+walk). LDBC IC10's `OPTIONAL { ?post :hasCreator ?foaf ; a :Post }`
+scanned every post per friend and timed out; it now reaches the friend's
+posts (PG, LPG match the oracle), and IC4 went from 5–13 s to 0.01 s.
 
 **Label fields** (`LABEL` style). The type test depends on the field's shape,
 because each form is served by a different index (`translate/builder.py::
@@ -1185,7 +1226,7 @@ deployments.
 | **Mixed-model BGP** (RPT + PG, RPT + LPG, PG + LPG, all three) | 🟡 v1.0 | Criterion §3.4; fixture corpus `tests/translate/hybrid.yml` |
 | **Property-path expansion** — `SequencePath` (`:p/:q`) and `InvPath` (`^:p`) ship in v1 as pure desugarings via `arango_sparql/translate/paths.py`; `MulPath` (`:p*`, `:p+`, `:p?`), `AlternativePath` (`:p\|:q`), and `NegatedPath` (`!:p`) remain v1.1 deliverables. | 🟡 v1 partial / v1.1 full | `tests/translate/property_paths.yml`; remaining buckets tracked in `COVERAGE_REPORT.md` under per-operator XFAIL rows (`:p+`, `:p*`, `:p\|:q`) |
 | **Variable predicates (`?s ?p ?o`)** — RPT subject projects the predicate column directly and is W3C-spec-correct; PG/LPG/default-collection subject fans out via `FOR k IN ATTRIBUTES(doc, true)`. When the ontology declares `owl:DatatypeProperty` terms, the resolver's reverse index (`SchemaResolver.attribute_uri_map`) is bound into the query (`LET p = @attr_uris[k] FILTER p != null`) and `?p` binds to the **predicate IRI** — the W3C-spec-correct shape; local-name collisions resolve deterministically (lexically-smallest IRI) with a `W_SCHEMA_AMBIGUOUS_ATTRIBUTE` advisory. RESIDUAL CARVE-OUT (empty-ontology fallback only): with no declared datatype properties `?p` binds to the attribute **name** string. | ✅ shipped (v1.1 "resolver-driven URI mapping" slice landed; string fallback only when the ontology declares no properties) | `tests/translate/variable_predicate.yml` (11 cases incl. `bare_spo_with_declared_datatype_properties`); `tests/translate/test_attribute_uri_map.py`; live W3C aggregates/bind/functions cases now in `tests/w3c/test_w3c_live_execution.py::EXPECTED_LIVE_PASSES` |
-| **Sub-SELECT (`{ SELECT … WHERE { … } }`) + `VALUES`** — both wrap in rdflib's `ToMultiSet` algebra node. Sub-SELECTs spawn a child `AqlQueryBuilder` whose counters are seeded from the parent's (`create_child` / `absorb_child` enforce disjoint alias/bind-name pools across nested scopes), translate the inner Project into a self-contained AQL block, then emit `FOR <row> IN (<inner AQL>)` at the outer level. `Slice` / `OrderBy` / `Distinct` wrappers around the inner Project are honoured, and `Distinct` is applied before `Slice` (issue #39). `VALUES` binds the inline rows as a single AQL list-of-objects (`@_pN_values`) and emits `FOR <row> IN @_pN_values`; UNDEF becomes JSON `null` per W3C semantics. Shared variables between outer and inner scope produce equality FILTERs to enforce the SPARQL join. | ✅ shipped | `tests/translate/subselect.yml` (11 cases) + `tests/translate/test_translate_subselect_goldens.py` (4 Python interaction cases — class-bound subject, sibling sub-SELECTs alias disjointness, two-level nesting, `absorb_child` bind-collision guard). Live-executable without carve-out. |
+| **Sub-SELECT (`{ SELECT … WHERE { … } }`) + `VALUES`** — both wrap in rdflib's `ToMultiSet` algebra node. Sub-SELECTs spawn a child `AqlQueryBuilder` whose counters are seeded from the parent's (`create_child` / `absorb_child` enforce disjoint alias/bind-name pools across nested scopes), translate the inner Project into a self-contained AQL block, then emit `FOR <row> IN (<inner AQL>)` at the outer level. `Slice` / `OrderBy` / `Distinct` wrappers around the inner Project are honoured, and `Distinct` is applied before `Slice` (issue #39). `VALUES` binds the inline rows as a single AQL list-of-objects (`@_pN_values`) and emits `FOR <row> IN @_pN_values`; UNDEF becomes JSON `null` per W3C semantics. Shared variables between outer and inner scope produce FILTERs that enforce SPARQL's compatible join (§18.3): a side that can be unbound — a VALUES `UNDEF` cell, a sub-select column that can be unbound, a variable a failed OPTIONAL left unbound — passes when it is null (`row.n == null || row.n == doc.name`), and the variable then reads whichever side is bound (`NOT_NULL(existing, row.v)`); W3C `bindings/values4`, `5`, `7`, `8`. Known limit: a VALUES block *before* the pattern that binds the same variable as a triple's subject or object still drops its `UNDEF` row (the triple's join is null-safe; #100). | ✅ shipped | `tests/translate/subselect.yml` (13 cases) + `tests/translate/test_translate_subselect_goldens.py` (4 Python interaction cases — class-bound subject, sibling sub-SELECTs alias disjointness, two-level nesting, `absorb_child` bind-collision guard); cross `tests/cross/test_bgp_select_cross.py::test_values_joins_match_oxigraph`, `tests/cross/test_partition_cross.py`. Live-executable without carve-out. |
 | **`MINUS` / `FILTER EXISTS` / `FILTER NOT EXISTS`** — all three share one AQL recipe: spawn a child `AqlQueryBuilder` over the inner pattern with the outer scope's `var_to_expr` pre-seeded so shared variables turn into equality FILTERs against the outer's expressions, short-circuit the child with `LIMIT 1 RETURN 1`, then probe with `LET <p> = LENGTH((<inner>))` and FILTER `<p> == 0` (MINUS / NOT EXISTS) or `<p> > 0` (EXISTS). MINUS honours the SPARQL 1.1 §8.3.4 disjoint-vars no-op (skips emission entirely when the patterns share no variables); NOT EXISTS does NOT (per §17.4.1.10) — the divergence is golden-tested explicitly. | ✅ shipped | `tests/translate/minus_exists.yml` (7 cases) + `tests/translate/test_translate_minus_exists_goldens.py` (3 Python interaction cases — multi-shared-var MINUS, NOT EXISTS in a compound `&&` FILTER, empty-BGP CONSTRUCT WHERE refusal). Live-executable without carve-out. |
 | **`CONSTRUCT WHERE { … }`** — template-less short-form (SPARQL 1.1 §16.2.1). The visitor walks every BGP descendant in the WHERE, collects its triples, and synthesises the implicit template before driving the existing `return_triples` path. | ✅ shipped | Bundled with the MINUS slice's golden tests above. |
 | **`UNION` + `AlternativePath` (`:p\|:q`)** — both lower to the same AQL recipe via a shared two-phase emitter in `arango_sparql.translate.union_paths`: (1) probe each arm in a throwaway child to collect its bound variables; (2) emit each arm again with the full union-schema projection (vars not bound in this arm get JSON `null`); then `FOR <row> IN UNION((arm1), (arm2), …)` at the outer scope. AlternativePath is desugared to a UNION of single-triple BGPs and routed through the same emitter, so `?s :p\|:q ?o` produces byte-for-byte identical AQL to the explicit `{ ?s :p ?o } UNION { ?s :q ?o }`. Outer-bound variables are pre-seeded into each arm's child visitor (mirrors MINUS / EXISTS / ToMultiSet), so shared variables become equality FILTERs into the outer scope's expressions. | ✅ shipped | `tests/translate/union_paths.yml` (5 cases) + `tests/translate/test_translate_union_paths_goldens.py` (3 Python interaction cases — explicit-UNION-vs-AlternativePath byte-equivalence, UNION inside a sub-SELECT, per-arm FILTER isolation). Live-executable without carve-out. |
@@ -3354,9 +3395,14 @@ layout.
   - **`pyoxigraph`** runs the same SPARQL text on the same normalised data. It
     is the translator's oracle (hard rule 5).
   - **LDBC's published Interactive v1 validation parameters** check the SPARQL
-    text itself. They interleave updates with reads, so they apply only once
-    those updates are replayed on the oracle (plan §2.4); until then
-    pyoxigraph is the only oracle.
+    text itself. They interleave updates with reads, so each answer applies
+    only at its point in the update stream: `python -m tests.ldbc.replay`
+    applies the inserts (IU1–IU8, written as the Turtle models them) to a copy
+    of the normalised oracle store, in file order, and checks each sampled
+    read there (plan §2.4). The short reads IS1–IS5 and IS7 are checked this
+    way; IS6 is opt-in (pyoxigraph does not answer it in 10 minutes). For the
+    complex reads, and on the ArangoDB layouts, pyoxigraph is still the only
+    oracle.
   - The oracle MUST NOT make network calls: a query that uses `SERVICE` is
     refused, not sent.
 

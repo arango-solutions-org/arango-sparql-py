@@ -100,9 +100,11 @@ nl = [
   # PostconditionViolation,PostconditionContext,run_postconditions,
   # postcondition_prompt_sections}) — a superset of the former f2f3061 git pin,
   # verified on PyPI to ship nl/postconditions.py + the [nl]/[dense] extras.
+  # 0.2.3 added PostconditionViolation.soft (PRD §7.3.1); on 0.2.0-0.2.2 a soft
+  # check silently fails closed, so 0.2.3 is the floor.
   # Bump the lower bound deliberately (CC-9: consumers re-run goldens); the
   # <0.3.0 ceiling holds the semver-minor compatibility band.
-  "arango-query-core>=0.2.0,<0.3.0",
+  "arango-query-core>=0.2.3,<0.3.0",
 ]
 # Torch-free-by-default packaging (D-05 packaging discretion, Phase 7 07-03):
 # a plain `pip install '.[nl]'` never pulls sentence-transformers/torch — the
@@ -112,7 +114,7 @@ nl = [
 # extra (sentence-transformers) on top of `[nl]`'s deps.
 dense = [
   "arango-sparql-py[nl]",
-  "arango-query-core[dense]>=0.2.0,<0.3.0",
+  "arango-query-core[dense]>=0.2.3,<0.3.0",
 ]
 dev = [
   "pytest>=8.0.0",
