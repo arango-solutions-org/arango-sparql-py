@@ -2871,6 +2871,29 @@ per row in `tests/security/`):
     styles in one query. The cross-check proves every model emits
     identical bindings for identical facts — the storage shape is
     invisible to the result.
+- **Where pyoxigraph has no answer, the spec's value is written out.**
+  `date ± duration` (XPath `op:add-yearMonthDuration-to-date` and its
+  family) is lowered by `translate/date_arithmetic.py`, not by ArangoDB's
+  `DATE_ADD`, which answers in UTC with `.000`, overflows a month end
+  (`2020-01-31` + `P1M` → `2020-03-02`) and drops the input's zone (#123).
+  The shift runs on the input's local clock (months first, the day clamped
+  to the new month's length, then the day-time part in milliseconds) and
+  is written back in the input's form: a date stays a date (`2020-02-29`),
+  the zone is kept (`2020-01-02T09:30:00+02:00`), and the seconds are
+  canonical. A comparison with a shifted date compares instants
+  (`DATE_TIMESTAMP`, read only after a shape test, so a non-date is null
+  without a warning), never strings; so do ORDER BY and MIN / MAX of one,
+  or of a variable BIND bound to one. A literal of another type (a plain
+  string, a number) is never a shifted date's equal: `!=` holds, every
+  other operator is an error. A day the month does not have, or a result
+  outside ArangoDB's years 0–9999, is unbound; `24:00:00` is the next day.
+  Fractions finer than a millisecond are truncated (ArangoDB's resolution). pyoxigraph (0.5.9) returns nothing
+  for a year-month duration added to a date or dateTime, so
+  `tests/integration/test_date_arithmetic_live.py` checks those against
+  XPath's values; the day-time cases are checked against pyoxigraph. Known limit: a comparison with no shifted side
+  (`?t < "…"^^xsd:dateTime`) still compares the stored lexical forms, which
+  is right only when they share one form (LDBC's do; #131), and keeps the
+  comparison indexable.
 
 ### 13.3 Schema-detection corpus
 
