@@ -317,6 +317,25 @@ NO_DEFAULT_COLLECTION = Store(
     data=":y a :Person . :a a :Person . :a :knows :y .",
 )
 
+#: A symmetric property with a self-loop: ``:a :knows :a`` is one triple,
+#: however many ends the edge has (#121). The oracle holds the closure.
+SYMMETRIC_SELF_LOOP = Store(
+    ontology=PREFIXES
+    + """
+:Person a owl:Class ; phys:collectionName "Person" .
+:knows a owl:ObjectProperty, owl:SymmetricProperty ; phys:edgeCollectionName "knows" ;
+    rdfs:domain :Person ; rdfs:range :Person .
+""",
+    docs={
+        "Person": [{"_id": "Person/a", "_uri": EX + "a"}, {"_id": "Person/b", "_uri": EX + "b"}],
+        "knows": [
+            {"_id": "knows/0", "_from": "Person/a", "_to": "Person/a"},
+            {"_id": "knows/1", "_from": "Person/a", "_to": "Person/b"},
+        ],
+    },
+    data=":a a :Person ; :knows :a, :b . :b a :Person ; :knows :a .",
+)
+
 #: The W3C loader's layout with a symmetric property: one ``:y :knows :x``
 #: stored as an edge from each copy of ``:y``; the oracle holds the closure.
 W3C_SYMMETRIC = Store(
@@ -763,6 +782,21 @@ _CASES: list[tuple[str, Store, str, str | None]] = [
         "lpg_class_walk_const",
         LPG_LABELS,
         "SELECT ?x WHERE { :y a :Person . ?x :knows :y . ?x a :Person }",
+        None,
+    ),
+    ("symmetric_self_loop_from", SYMMETRIC_SELF_LOOP, "SELECT ?f WHERE { :a :knows ?f }", None),
+    ("symmetric_self_loop_to", SYMMETRIC_SELF_LOOP, "SELECT ?f WHERE { ?f :knows :a }", None),
+    ("symmetric_self_loop_both", SYMMETRIC_SELF_LOOP, "SELECT ?x ?y WHERE { ?x :knows ?y }", None),
+    (
+        "symmetric_self_loop_count",
+        SYMMETRIC_SELF_LOOP,
+        "SELECT ?x (COUNT(?y) AS ?n) WHERE { ?x a :Person . ?x :knows ?y } GROUP BY ?x",
+        None,
+    ),
+    (
+        "symmetric_self_loop_path",
+        SYMMETRIC_SELF_LOOP,
+        "SELECT ?f WHERE { :b :knows/:knows ?f }",
         None,
     ),
     # Tenant scoping of walked documents (issue #118); every one leaked T2.

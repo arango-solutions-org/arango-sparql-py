@@ -480,7 +480,8 @@ class AqlQueryBuilder:
         triple. ``vertex_alias`` and ``edge_alias`` are minted by the
         caller via :meth:`fresh_alias` so they're guaranteed unique.
 
-        ``direction`` is one of ``OUTBOUND`` / ``INBOUND`` / ``ANY``;
+        ``direction`` is one of ``OUTBOUND`` / ``INBOUND`` / ``ANY``
+        (``ANY`` is emitted as an edge lookup, not a traversal: see below);
         the SPARQL→AQL visitor uses ``OUTBOUND`` for plain
         ``?s :rel ?o`` triples and would route ``INBOUND`` for inverse
         property paths once those land. We validate the literal here so
@@ -497,6 +498,23 @@ class AqlQueryBuilder:
         if direction not in ("OUTBOUND", "INBOUND", "ANY"):
             raise ValueError(f"invalid traversal direction: {direction!r}")
         coll_ref = self.bind_collection(edge_collection)
+        if direction == "ANY":
+            # An owl:SymmetricProperty: each stored edge is one pair, read in
+            # both directions. ArangoDB's ``ANY`` reaches a self-loop once per
+            # direction, so ``a :knows a`` came back twice (#121). Read each
+            # edge touching the start once instead: the edge index answers
+            # ``_from == id || _to == id`` as one lookup per end, with no
+            # duplicates. A UNION of an OUTBOUND and an INBOUND walk did the
+            # same but held each step's rows in memory, which on a path of
+            # several steps ran LDBC IC1/IC6 out of their memory limit.
+            start_id = f"{start_alias}._id"
+            self._body_clauses.append(_Clause(_ClauseKind.FOR, f"FOR {edge_alias} IN {coll_ref}"))
+            self.filter_raw(f"{edge_alias}._from == {start_id} || {edge_alias}._to == {start_id}")
+            self.let(
+                vertex_alias,
+                f"DOCUMENT({edge_alias}._from == {start_id} ? {edge_alias}._to : {edge_alias}._from)",
+            )
+            return self
         self._body_clauses.append(
             _Clause(
                 _ClauseKind.FOR,
