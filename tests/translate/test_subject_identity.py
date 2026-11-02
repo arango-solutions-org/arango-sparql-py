@@ -47,9 +47,14 @@ def test_projected_subject_uses_the_identity() -> None:
 
 def test_edge_target_and_bound_object_compare_the_same_identity() -> None:
     aql = _aql("SELECT ?o ?a WHERE { ?a a :Asset . ?o a :Owner ; :owns ?a . }")
-    # The traversal vertex is joined to the already-bound ?a with the SAME
-    # identity expression on both sides — not _uri on one and _id on the other.
-    assert "FILTER NOT_NULL(v3._uri, v3._id) == NOT_NULL(doc1._uri, doc1._id)" in aql
+    # ``owns`` is walked backwards from the already-bound ?a, starting from
+    # every document of the range with ?a's identity: each copy is matched on the SAME
+    # identity expression — not _uri on one side and _id on the other.
+    assert (
+        "doc3._uri == NOT_NULL(doc1._uri, doc1._id) || (doc3._uri == null && doc3._id == NOT_NULL(doc1._uri, doc1._id))"
+        in aql
+    )
+    assert "RETURN { o: NOT_NULL(v5._uri, v5._id), a: NOT_NULL(doc1._uri, doc1._id) }" in aql
 
 
 @pytest.mark.parametrize(

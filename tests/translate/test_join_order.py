@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from rdflib import RDF, Literal, URIRef, Variable
 
-from arango_sparql.translate.visitor import _order_bgp
+from arango_sparql.translate.visitor import _iter_bgp_order, _order_bgp
 
 EX = "http://ex.org/"
 
@@ -71,3 +71,35 @@ def test_every_triple_is_emitted_once() -> None:
     triples = [_t("?a", "p", "?b"), _t("?b", "a", "C"), _t("x", "q", "?a"), _t("?c", "r", "?d")]
     ordered = _order_bgp(triples, set())
     assert sorted(map(str, ordered)) == sorted(map(str, triples))
+
+
+def test_a_walk_into_a_class_comes_before_that_class_is_scanned() -> None:
+    # ``?post :hasCreator ?foaf ; a :Post`` with ?foaf known (LDBC IC10):
+    # walking hasCreator backwards from ?foaf (rank 2) reaches the friend's
+    # posts; scanning Post first (rank 3) would read every post per friend.
+    creator = _t("?post", "hasCreator", "?foaf")
+    post_type = _t("?post", "a", "Post")
+    walks = {creator}.__contains__
+    assert list(_iter_bgp_order([post_type, creator], {"foaf"}, walks=walks)) == [creator, post_type]
+    assert _order_bgp([post_type, creator], {"foaf"}) == [post_type, creator]
+
+
+def test_whether_a_triple_walks_is_asked_again_after_each_emitted_triple() -> None:
+    # The visitor decides from what is bound *now* (a document, not just a
+    # value), so the order asks after each triple it has handed out.
+    asked: list[tuple] = []
+    person_type = _t("?y", "a", "Person")
+    knows = _t("?x", "knows", "?y")
+    x_type = _t("?x", "a", "Person")
+
+    def walks(t: tuple) -> bool:
+        asked.append(t)
+        return t == knows and person_type in emitted
+
+    emitted: list[tuple] = []
+    for t in _iter_bgp_order([person_type, x_type, knows], set(), walks=walks):
+        emitted.append(t)
+    # ?y's type first (a tie, kept in order); then knows walks into ?x's class
+    # ahead of ?x's own scan, which it no longer needs.
+    assert emitted == [person_type, knows, x_type]
+    assert asked.count(knows) >= 2
