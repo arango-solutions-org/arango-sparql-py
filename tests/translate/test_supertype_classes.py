@@ -184,16 +184,19 @@ def test_members_with_different_tenant_scoping_are_refused() -> None:
         _aql(ttl, "SELECT ?m WHERE { ?m a :Message }", tenant_id="t1")
 
 
-def test_a_supertype_range_does_not_start_a_reverse_walk() -> None:
-    # A constant object whose range is a supertype has no one collection to
-    # be looked up in, so the forward plan reads the subject instead.
+def test_a_supertype_range_looks_the_object_up_in_each_member() -> None:
+    # A constant object whose range is a supertype is looked up in each
+    # member's collection, and the edge is walked backwards from it (#122;
+    # it used to fall back to reading every Person forwards).
     ttl = (
         UNION_TTL + ':Person a owl:Class ; phys:collectionName "Person" .'
         ' :likes a owl:ObjectProperty ; phys:edgeCollectionName "likes" ; rdfs:domain :Person ;'
         " rdfs:range :Message ."
     )
     aql = _aql(ttl, "SELECT ?p WHERE { ?p :likes :post1 }")
-    assert aql.startswith("FOR doc1 IN @@c1_Person\nFOR v2, e3 IN OUTBOUND doc1 @@c2_likes")
+    assert aql.startswith("FOR doc3 IN UNION(\n(\n  FOR doc1 IN @@c1_Comment\n")
+    assert "  FOR doc2 IN @@c2_Post\n" in aql
+    assert "FOR v4, e5 IN INBOUND doc3 @@c3_likes\n" in aql
 
 
 # -- one model with arango-query-core ------------------------------------------

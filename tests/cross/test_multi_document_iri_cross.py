@@ -302,6 +302,71 @@ GRAPH_EDGE_REACHED_EMPTY_DEFAULT = Store(
     resolver_kwargs={"default_graph_includes_named": False},
 )
 
+#: A repeated rdfs:domain / rdfs:range (#122): the shape arango-query-core's
+#: ``mapping_to_turtle`` and the schema analyzer's ``owl_export`` write for a
+#: property shared by several classes. Any of them holds subjects (objects).
+REPEATED_RANGE_DOMAIN = Store(
+    ontology=PREFIXES
+    + """
+:Person a owl:Class ; phys:collectionName "Person" .
+:Company a owl:Class ; phys:collectionName "Company" .
+:Post a owl:Class ; phys:collectionName "Post" .
+:Comment a owl:Class ; phys:collectionName "Comment" .
+:name a owl:DatatypeProperty ; rdfs:domain :Person ; rdfs:domain :Company .
+:likes a owl:ObjectProperty ; phys:edgeCollectionName "likes" ; rdfs:domain :Person ;
+    rdfs:range :Post ; rdfs:range :Comment .
+:hasCreator a owl:ObjectProperty ; phys:edgeCollectionName "hasCreator" ;
+    rdfs:domain :Post ; rdfs:domain :Comment ; rdfs:range :Person .
+""",
+    docs={
+        "Person": [
+            {"_id": "Person/a", "_uri": EX + "a", "name": "A"},
+            {"_id": "Person/b", "_uri": EX + "b", "name": "B"},
+        ],
+        "Company": [{"_id": "Company/c", "_uri": EX + "c", "name": "C"}],
+        "Post": [{"_id": "Post/m1", "_uri": EX + "m1"}],
+        "Comment": [{"_id": "Comment/k1", "_uri": EX + "k1"}],
+        "likes": [
+            {"_id": "likes/1", "_from": "Person/a", "_to": "Post/m1"},
+            {"_id": "likes/2", "_from": "Person/b", "_to": "Comment/k1"},
+        ],
+        "hasCreator": [
+            {"_id": "hasCreator/1", "_from": "Post/m1", "_to": "Person/a"},
+            {"_id": "hasCreator/2", "_from": "Comment/k1", "_to": "Person/a"},
+        ],
+    },
+    data=':a a :Person ; :name "A" ; :likes :m1 . :b a :Person ; :name "B" ; :likes :k1 . '
+    ':c a :Company ; :name "C" . :m1 a :Post ; :hasCreator :a . :k1 a :Comment ; :hasCreator :a .',
+    resolver_kwargs={"default_collection": "Person"},
+)
+
+#: The repeated range in named graphs: an object found by a lookup across
+#: the range's collections binds an unbound ``GRAPH ?g`` (it raised
+#: AqlEmitError: "?g was never bound").
+REPEATED_RANGE_GRAPHS = Store(
+    ontology=REPEATED_RANGE_DOMAIN.ontology,
+    docs={
+        "Person": [
+            {"_id": "Person/a", "_uri": EX + "a", "_graph": EX + "g"},
+            {"_id": "Person/b", "_uri": EX + "b", "_graph": EX + "g"},
+            {"_id": "Person/c", "_uri": EX + "c", "_graph": EX + "h"},
+        ],
+        "Post": [{"_id": "Post/m1", "_uri": EX + "m1", "_graph": EX + "g"}],
+        "Comment": [
+            {"_id": "Comment/k1", "_uri": EX + "k1", "_graph": EX + "g"},
+            {"_id": "Comment/k1h", "_uri": EX + "k1", "_graph": EX + "h"},
+        ],
+        "likes": [
+            {"_id": "likes/1", "_from": "Person/a", "_to": "Post/m1", "_graph": EX + "g"},
+            {"_id": "likes/2", "_from": "Person/b", "_to": "Comment/k1", "_graph": EX + "g"},
+            {"_id": "likes/3", "_from": "Person/c", "_to": "Comment/k1h", "_graph": EX + "h"},
+        ],
+    },
+    data=":g { :a a :Person ; :likes :m1 . :b a :Person ; :likes :k1 . :m1 a :Post . :k1 a :Comment . }\n"
+    ":h { :c a :Person ; :likes :k1 . :k1 a :Comment . }",
+    trig=True,
+)
+
 #: The same IRI in two tenants; the oracle holds tenant t1's facts. ``knows``
 #: declares no domain, so nothing else keeps the walk inside the tenant.
 TENANTS = Store(
@@ -342,6 +407,25 @@ NO_DEFAULT_COLLECTION = Store(
         "knows": [{"_id": "knows/1", "_from": "Person/a", "_to": "Person/y"}],
     },
     data=":y a :Person . :a a :Person . :a :knows :y .",
+)
+
+#: A symmetric property with a self-loop: ``:a :knows :a`` is one triple,
+#: however many ends the edge has (#121). The oracle holds the closure.
+SYMMETRIC_SELF_LOOP = Store(
+    ontology=PREFIXES
+    + """
+:Person a owl:Class ; phys:collectionName "Person" .
+:knows a owl:ObjectProperty, owl:SymmetricProperty ; phys:edgeCollectionName "knows" ;
+    rdfs:domain :Person ; rdfs:range :Person .
+""",
+    docs={
+        "Person": [{"_id": "Person/a", "_uri": EX + "a"}, {"_id": "Person/b", "_uri": EX + "b"}],
+        "knows": [
+            {"_id": "knows/0", "_from": "Person/a", "_to": "Person/a"},
+            {"_id": "knows/1", "_from": "Person/a", "_to": "Person/b"},
+        ],
+    },
+    data=":a a :Person ; :knows :a, :b . :b a :Person ; :knows :a .",
 )
 
 #: The W3C loader's layout with a symmetric property: one ``:y :knows :x``
@@ -400,6 +484,105 @@ TENANTS_CROSS_EDGE = Store(
     tenant_id="t1",
 )
 
+#: Every class tenant-scoped (issue #118): documents of tenants T1 and T2,
+#: edges between them, and a reified relationship (D8). The oracle holds what
+#: tenant T1 may see: its own documents and the edges between them.
+_TENANT_ONTOLOGY = (
+    PREFIXES
+    + """
+:Person a owl:Class ; phys:collectionName "Person" ; phys:tenantField "tenant" .
+:Forum a owl:Class ; phys:collectionName "Forum" ; phys:tenantField "tenant" .
+:Post a owl:Class ; phys:collectionName "Post" ; phys:tenantField "tenant" .
+:Comment a owl:Class ; phys:collectionName "Comment" ; phys:tenantField "tenant" .
+:Message a owl:Class ; phys:mappingStyle "UNION" .
+:Post rdfs:subClassOf :Message . :Comment rdfs:subClassOf :Message .
+:name a owl:DatatypeProperty ; rdfs:domain :Person .
+:knows a owl:ObjectProperty ; phys:edgeCollectionName "knows" ; rdfs:domain :Person ; rdfs:range :Person .
+:hasCreator a owl:ObjectProperty ; phys:edgeCollectionName "hasCreator" ;
+    rdfs:domain [ a owl:Class ; owl:unionOf ( :Post :Comment ) ] ; rdfs:range :Person .
+:hasMember a owl:ObjectProperty ; phys:edgeCollectionName "hasMember" ; phys:reifiedEdge "true" ; rdfs:domain :Forum .
+:hasPerson a owl:ObjectProperty ; phys:edgeTargetOf :hasMember ; rdfs:range :Person .
+:joinDate a owl:DatatypeProperty ; rdfs:domain :hasMember .
+"""
+)
+TENANT_WALKS = Store(
+    ontology=_TENANT_ONTOLOGY,
+    docs={
+        "Person": [
+            {"_id": "Person/a", "_uri": EX + "a", "name": "A", "tenant": "T1"},
+            {"_id": "Person/b", "_uri": EX + "b", "name": "B", "tenant": "T2"},
+            {"_id": "Person/c", "_uri": EX + "c", "name": "C", "tenant": "T1"},
+        ],
+        "Forum": [
+            {"_id": "Forum/f1", "_uri": EX + "f1", "tenant": "T1"},
+            {"_id": "Forum/f2", "_uri": EX + "f2", "tenant": "T2"},
+        ],
+        "Post": [
+            {"_id": "Post/m1", "_uri": EX + "m1", "tenant": "T1"},
+            {"_id": "Post/m2", "_uri": EX + "m2", "tenant": "T2"},
+        ],
+        "Comment": [{"_id": "Comment/k1", "_uri": EX + "k1", "tenant": "T2"}],
+        "knows": [
+            {"_id": "knows/1", "_from": "Person/a", "_to": "Person/b"},
+            {"_id": "knows/2", "_from": "Person/b", "_to": "Person/c"},
+        ],
+        "hasCreator": [
+            {"_id": "hasCreator/1", "_from": "Post/m1", "_to": "Person/a"},
+            {"_id": "hasCreator/2", "_from": "Post/m2", "_to": "Person/a"},
+            {"_id": "hasCreator/3", "_from": "Comment/k1", "_to": "Person/a"},
+        ],
+        "hasMember": [
+            {
+                "_id": "hasMember/1",
+                "_uri": EX + "hm1",
+                "_from": "Forum/f1",
+                "_to": "Person/b",
+                "joinDate": "2020",
+            },
+            {
+                "_id": "hasMember/2",
+                "_uri": EX + "hm2",
+                "_from": "Forum/f2",
+                "_to": "Person/a",
+                "joinDate": "2021",
+            },
+        ],
+    },
+    data=':a a :Person ; :name "A" . :c a :Person ; :name "C" . :f1 a :Forum . '
+    ":m1 a :Post, :Message ; :hasCreator :a .",
+    tenant_id="T1",
+)
+
+#: A label reused across collections (review P6): ``:Person`` is
+#: tenant-scoped in ``Nodes``, while ``:Contact`` in ``Things`` carries the
+#: same label value and no tenant. ``Things/d2`` is another tenant's device.
+TENANT_SHARED_LABEL = Store(
+    ontology=PREFIXES
+    + """
+:Person a owl:Class ; phys:collectionName "Nodes" ; phys:typeField "label" ; phys:typeValue "Person" ;
+    phys:tenantField "tenant" .
+:Device a owl:Class ; phys:collectionName "Things" ; phys:typeField "label" ; phys:typeValue "Device" ;
+    phys:tenantField "tenant" .
+:Contact a owl:Class ; phys:collectionName "Things" ; phys:typeField "label" ; phys:typeValue "Person" .
+:owns a owl:ObjectProperty ; phys:edgeCollectionName "owns" .
+""",
+    docs={
+        "Nodes": [{"_id": "Nodes/a", "_uri": EX + "a", "label": "Person", "tenant": "T1"}],
+        "Things": [
+            {"_id": "Things/c1", "_uri": EX + "c1", "label": "Person"},
+            {"_id": "Things/d1", "_uri": EX + "d1", "label": "Device", "tenant": "T1"},
+            {"_id": "Things/d2", "_uri": EX + "d2", "label": "Device", "tenant": "T2"},
+        ],
+        "owns": [
+            {"_id": "owns/1", "_from": "Nodes/a", "_to": "Things/c1"},
+            {"_id": "owns/2", "_from": "Nodes/a", "_to": "Things/d1"},
+            {"_id": "owns/3", "_from": "Nodes/a", "_to": "Things/d2"},
+        ],
+    },
+    data=":a a :Person ; :owns :c1, :d1 . :c1 a :Contact . :d1 a :Device .",
+    tenant_id="T1",
+)
+
 #: LPG: one collection, classes as labels. ``:c`` is a Person and an Employee.
 LPG_LABELS = Store(
     ontology=PREFIXES
@@ -428,6 +611,12 @@ LPG_LABELS = Store(
 
 _CASES: list[tuple[str, Store, str, str | None]] = [
     # (id, store, query, issue it is wrong under on main — or None)
+    (
+        "tenant_label_in_another_collection",
+        TENANT_SHARED_LABEL,
+        "SELECT ?t WHERE { ?p a :Person . ?p :owns ?t }",
+        None,
+    ),
     ("pg_two_types", PG_TWO_CLASSES, "SELECT ?s WHERE { ?s a :Person . ?s a :Employee }", None),
     ("pg_edge_then_type", PG_TWO_CLASSES, "SELECT ?s WHERE { :a :knows ?s . ?s a :Employee }", None),
     (
@@ -627,6 +816,39 @@ _CASES: list[tuple[str, Store, str, str | None]] = [
             ("optional_graph", "SELECT ?s ?x WHERE { ?s :knows ?t . OPTIONAL { GRAPH :g { ?s :name ?x } } }"),
         ]
     ],
+    (
+        "repeated_range_graph_variable",
+        REPEATED_RANGE_GRAPHS,
+        "SELECT ?g ?p WHERE { GRAPH ?g { ?p :likes :k1 } }",
+        None,
+    ),
+    (
+        "repeated_range_graph_variable_values",
+        REPEATED_RANGE_GRAPHS,
+        "SELECT ?g ?p ?m WHERE { VALUES ?m { :m1 :k1 } GRAPH ?g { ?p :likes ?m } }",
+        None,
+    ),
+    (
+        "repeated_range_graph_constant",
+        REPEATED_RANGE_GRAPHS,
+        "SELECT ?p WHERE { GRAPH :h { ?p :likes :k1 } }",
+        None,
+    ),
+    *[
+        (f"repeated_{name}", REPEATED_RANGE_DOMAIN, query, None)
+        for name, query in [
+            ("domain_untyped_subject", "SELECT ?s ?n WHERE { ?s :name ?n }"),
+            ("domain_constant_subject", "SELECT ?n WHERE { :c :name ?n }"),
+            ("domain_edge_subject", "SELECT ?p WHERE { :k1 :hasCreator ?p }"),
+            ("domain_reverse_walk", "SELECT ?m WHERE { ?m :hasCreator :a }"),
+            ("range_constant_object", "SELECT ?p WHERE { ?p :likes :k1 }"),
+            ("range_values_object", "SELECT ?p ?m WHERE { VALUES ?m { :m1 :k1 } ?p :likes ?m }"),
+            (
+                "range_subselect_object",
+                "SELECT ?p ?m WHERE { { SELECT ?m WHERE { ?m a :Comment } } ?p :likes ?m }",
+            ),
+        ]
+    ],
     ("tenant_reverse", TENANTS, "SELECT ?x ?y WHERE { ?y a :Person . ?x :knows ?y }", None),
     ("tenant_reverse_const", TENANTS, "SELECT ?x WHERE { :y a :Person . ?x :knows :y }", None),
     (
@@ -677,7 +899,7 @@ _CASES: list[tuple[str, Store, str, str | None]] = [
         "tenant_cross_edge_reverse",
         TENANTS_CROSS_EDGE,
         "SELECT ?x ?y WHERE { ?y a :Person . ?x :knows ?y }",
-        "#113",
+        None,  # #113, fixed with #118
     ),
     (
         "tenant_cross_edge_class_walk",
@@ -703,6 +925,54 @@ _CASES: list[tuple[str, Store, str, str | None]] = [
         "SELECT ?x WHERE { :y a :Person . ?x :knows :y . ?x a :Person }",
         None,
     ),
+    ("symmetric_self_loop_from", SYMMETRIC_SELF_LOOP, "SELECT ?f WHERE { :a :knows ?f }", None),
+    ("symmetric_self_loop_to", SYMMETRIC_SELF_LOOP, "SELECT ?f WHERE { ?f :knows :a }", None),
+    ("symmetric_self_loop_both", SYMMETRIC_SELF_LOOP, "SELECT ?x ?y WHERE { ?x :knows ?y }", None),
+    (
+        "symmetric_self_loop_count",
+        SYMMETRIC_SELF_LOOP,
+        "SELECT ?x (COUNT(?y) AS ?n) WHERE { ?x a :Person . ?x :knows ?y } GROUP BY ?x",
+        None,
+    ),
+    (
+        "symmetric_self_loop_path",
+        SYMMETRIC_SELF_LOOP,
+        "SELECT ?f WHERE { :b :knows/:knows ?f }",
+        None,
+    ),
+    # Tenant scoping of walked documents (issue #118); every one leaked T2.
+    *[
+        (f"tenant_{name}", TENANT_WALKS, query, None)
+        for name, query in [
+            ("forward_vertex", "SELECT ?b ?n WHERE { ?a a :Person . ?a :knows ?b . ?b :name ?n }"),
+            ("forward_vertex_only", "SELECT ?a ?b WHERE { ?a a :Person . ?a :knows ?b }"),
+            ("reverse_untyped", "SELECT ?x WHERE { ?y a :Person . ?x :knows ?y }"),
+            ("reverse_constant", "SELECT ?x WHERE { ?x :knows :c }"),
+            ("supertype", "SELECT ?m WHERE { ?m a :Message }"),
+            ("reverse_domain_union", "SELECT ?m WHERE { ?p a :Person . ?m :hasCreator ?p }"),
+            ("reified_exit", "SELECT ?f ?p WHERE { ?f a :Forum . ?f :hasMember ?k . ?k :hasPerson ?p }"),
+            ("reified_exit_untyped", "SELECT ?f ?k WHERE { ?f :hasMember ?k . ?k :hasPerson ?p }"),
+            (
+                "reified_backwards",
+                "SELECT ?f ?k WHERE { ?p a :Person . ?f :hasMember ?k . ?k :hasPerson ?p }",
+            ),
+            (
+                "reified_backwards_values",
+                "SELECT ?f ?k WHERE { VALUES ?p { :a :b } ?f :hasMember ?k . ?k :hasPerson ?p }",
+            ),
+            ("relationship_node_alone", "SELECT ?d WHERE { VALUES ?k { :hm1 :hm2 } ?k :joinDate ?d }"),
+            (
+                "optional_walk",
+                "SELECT ?a ?n WHERE { ?a a :Person . OPTIONAL { ?a :knows ?b . ?b :name ?n } }",
+            ),
+            (
+                "union_arm_walk",
+                "SELECT ?a ?x WHERE { ?a a :Person . { ?a :knows ?x } UNION { ?x :knows ?a } }",
+            ),
+            ("path", "SELECT ?x WHERE { :a :knows+ ?x }"),
+            ("typed_path", "SELECT ?x WHERE { ?a a :Person . ?a :knows+ ?x }"),
+        ]
+    ],
     ("w3c_symmetric_reverse", W3C_SYMMETRIC, "SELECT ?x ?y WHERE { ?y a :Person . ?x :knows ?y }", None),
     (
         "graph_var_type",
@@ -720,8 +990,15 @@ _CASES: list[tuple[str, Store, str, str | None]] = [
 
 
 #: Cases the AQL interpreter cannot run (a ``UNION`` inside an OPTIONAL
-#: sub-query); ``tests/integration/test_multi_document_iri_live.py`` runs them.
-_LIVE_ONLY = {"ng_strict_optional", "ng_strict_optional_class_walk", "graph_outside_optional"}
+#: sub-query, a sub-SELECT, ``DOCUMENT()``); ``tests/integration/test_multi_document_iri_live.py``
+#: runs them.
+_LIVE_ONLY = {
+    "ng_strict_optional",
+    "ng_strict_optional_class_walk",
+    "graph_outside_optional",
+    "repeated_range_subselect_object",
+    "tenant_relationship_node_alone",
+}
 
 
 def case_params(*, interpreter: bool = False) -> list[Any]:

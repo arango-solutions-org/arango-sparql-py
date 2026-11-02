@@ -561,7 +561,11 @@ collection its `_id` names; and `isIRI()` is false for an `_id` identity.
 **Subjects without a type pattern.** SPARQL over a property graph rarely names
 every subject's class (LDBC writes `?m :hasCreator ?p`), so the predicate
 routes the subject (`translate/visitor.py`):
-- an `owl:SymmetricProperty` traverses `ANY`;
+- an `owl:SymmetricProperty` reads each edge touching the vertex once, by
+  one edge-index lookup on `_from` or `_to`
+  (`AqlQueryBuilder.for_traversal`, direction `ANY`). ArangoDB's `ANY`
+  traversal reached a self-loop once per direction, so `:a :knows :a` came
+  back twice (#121);
 - a subject nothing has bound, with a known object, is reached by walking the
   edge `INBOUND` from that object, keeping only vertices in the subject's
   domain collections (`_keep_subject_collections`). An object known only as
@@ -597,6 +601,11 @@ routes the subject (`translate/visitor.py`):
   carrying its own label test and, for a constant subject, its own indexed
   `_uri` match (`_open_class_union`, LDBC plan decision D9). A `UNION`
   supertype in the domain stands for its members.
+  A repeated `rdfs:domain` or `rdfs:range` (one triple per class, as
+  arango-query-core's `mapping_to_turtle` and the schema analyzer's
+  `owl_export` write for a shared property) means any of the classes, like
+  an `owl:unionOf`: routing, lookups and walks read all of them
+  (`SchemaResolver.class_list`, issue #122).
 
 The union refuses, with `E_SPARQL_UNSUPPORTED`, classes that disagree on
 tenant scoping (one tenant filter cannot serve them) and sharded classes.
@@ -1126,6 +1135,29 @@ FOR doc1 IN @@coll_Person
   "tenant_id": "<resolved from X-Tenant-Id>"
 }
 ```
+
+**Documents a walk reaches are scoped too** (issue #118). An edge's far
+vertex, the source of a backward walk, a document read from the default
+collection (a subject no class places, DESCRIBE), and the endpoints of a
+relationship node read on its own (D8, `DOCUMENT(k._from)` /
+`DOCUMENT(k._to)`) are not opened by their class, so no class applies its
+filter there. Each such document gets one test per tenant field, keyed by
+the collection in its `_id` (and, in a shared collection, its label: the
+labels scoped in that collection, looked up with `TRANSLATE(coll,
+@labels_by_collection, [])`, so a non-tenant class reusing a label value in
+another collection is not held to the tenant): a document of a
+tenant-scoped class must carry the tenant, any other passes —
+`FILTER (FIRST(SPLIT(NOT_NULL(v._id, @e), @s)) IN @tenant_colls ? v.tenant
+== @tenant_id : true)`. (A per-class `(!in_class || tenant)` AND over the
+hops of a `:p+` path made ArangoDB's planner run out of memory.) Without a
+tenant context, documents of tenant-scoped classes are not visible to a
+walk (`? false : true`), as opening such a class is refused. Classes under
+several tenant roots (`phys:tenantEntity`) cannot be scoped by one tenant,
+so a walk is refused in such a mapping. A mapping with no tenant-scoped
+class emits nothing. The triples table of an RPT class has no tenant
+column, so any read of a table a tenant-scoped RPT class uses is refused,
+whichever class it reads through: a type pattern, an untyped subject
+routed to a pure triple store, the cross-subject OPTIONAL.
 
 **Cross-tenant joins are forbidden.** When two BGP triples touch two
 entities that have different `tenantEntity` values, the translator
@@ -2839,6 +2871,29 @@ per row in `tests/security/`):
     styles in one query. The cross-check proves every model emits
     identical bindings for identical facts — the storage shape is
     invisible to the result.
+- **Where pyoxigraph has no answer, the spec's value is written out.**
+  `date ± duration` (XPath `op:add-yearMonthDuration-to-date` and its
+  family) is lowered by `translate/date_arithmetic.py`, not by ArangoDB's
+  `DATE_ADD`, which answers in UTC with `.000`, overflows a month end
+  (`2020-01-31` + `P1M` → `2020-03-02`) and drops the input's zone (#123).
+  The shift runs on the input's local clock (months first, the day clamped
+  to the new month's length, then the day-time part in milliseconds) and
+  is written back in the input's form: a date stays a date (`2020-02-29`),
+  the zone is kept (`2020-01-02T09:30:00+02:00`), and the seconds are
+  canonical. A comparison with a shifted date compares instants
+  (`DATE_TIMESTAMP`, read only after a shape test, so a non-date is null
+  without a warning), never strings; so do ORDER BY and MIN / MAX of one,
+  or of a variable BIND bound to one. A literal of another type (a plain
+  string, a number) is never a shifted date's equal: `!=` holds, every
+  other operator is an error. A day the month does not have, or a result
+  outside ArangoDB's years 0–9999, is unbound; `24:00:00` is the next day.
+  Fractions finer than a millisecond are truncated (ArangoDB's resolution). pyoxigraph (0.5.9) returns nothing
+  for a year-month duration added to a date or dateTime, so
+  `tests/integration/test_date_arithmetic_live.py` checks those against
+  XPath's values; the day-time cases are checked against pyoxigraph. Known limit: a comparison with no shifted side
+  (`?t < "…"^^xsd:dateTime`) still compares the stored lexical forms, which
+  is right only when they share one form (LDBC's do; #131), and keeps the
+  comparison indexable.
 
 ### 13.3 Schema-detection corpus
 
