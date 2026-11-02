@@ -352,6 +352,7 @@ def _spawn_child(visitor: AlgebraVisitor) -> AlgebraVisitor:
     # An outer variable an arm re-projects keeps "can be unbound" (#59).
     cv.state.maybe_unbound = set(visitor.state.maybe_unbound)
     cv.state.graph_scope = list(visitor.state.graph_scope)
+    cv.state.outer_subject_homes = dict(visitor.state.outer_subject_homes)
     cv.state.var_to_rpt_class = dict(visitor.state.var_to_rpt_class)
     # An outer PG/LPG document stays a document in the arm: AQL subqueries
     # see outer FOR variables, so a triple from an outer-bound subject

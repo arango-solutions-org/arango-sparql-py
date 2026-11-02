@@ -86,6 +86,15 @@ class _BindingState:
     to a physical document)."""
 
     doc_to_collection: dict[str, str] = field(default_factory=dict)
+    doc_to_class: dict[str, ResolvedClass] = field(default_factory=dict)
+    """AQL alias → the class whose collection it was opened as, when one was
+    given (:meth:`AlgebraVisitor._open_collection`)."""
+    outer_subject_homes: dict[str, tuple[str, ResolvedClass | None]] = field(default_factory=dict)
+    """Inside a GRAPH: a subject (variable name or IRI) bound to a document
+    outside it → that document's collection and class. A subject with no
+    domain to route it is re-read there, on its IRI, under the scope's filter
+    (:meth:`AlgebraVisitor._ensure_subject_alias`), rather than in the
+    default collection, which may not hold it."""
     relationship_nodes: dict[str, set[str]] = field(default_factory=dict)
     """SPARQL variable → the reified relationships whose entry predicate bound
     it to an edge (plan D8). Carried out of UNION arms, so a node known
@@ -1464,6 +1473,13 @@ class AlgebraVisitor:
         # on its IRI under this scope's filter; UNION arms, OPTIONAL bodies and
         # probes spawned inside copy what is visible.
         outer_docs, outer_consts = self.state.var_to_doc_alias, self.state.const_subject_alias
+        outer_homes = self.state.outer_subject_homes
+        homes = dict(outer_homes)
+        for key, alias in [*outer_docs.items(), *outer_consts.items()]:
+            collection = self.state.doc_to_collection.get(alias)
+            if collection is not None:  # a union row has no one collection
+                homes[key] = (collection, self.state.doc_to_class.get(alias))
+        self.state.outer_subject_homes = homes
         self.state.var_to_doc_alias, self.state.const_subject_alias = {}, {}
         try:
             self.visit(node.p)
@@ -1473,6 +1489,7 @@ class AlgebraVisitor:
             # try/except higher up the call chain.
             self.state.graph_scope.pop()
             self.state.var_to_doc_alias, self.state.const_subject_alias = outer_docs, outer_consts
+            self.state.outer_subject_homes = outer_homes
 
     # ------------------------------------------------------------------
     # ToMultiSet — SPARQL sub-SELECT and VALUES. Delegated to
@@ -1965,6 +1982,8 @@ class AlgebraVisitor:
         else:
             self.builder.for_(alias, collection)
         self.state.doc_to_collection[alias] = collection
+        if resolved is not None:
+            self.state.doc_to_class[alias] = resolved
         # Named-graph scoping: when a SPARQL GRAPH wrapper is active
         # (visit_Graph pushed onto state.graph_scope), every FOR
         # opened inside it gets a filter on the document's graph
@@ -3063,6 +3082,9 @@ class AlgebraVisitor:
             routed = self._route_by_domain(subject, prop) if prop is not None else None
             if routed is not None:
                 return routed
+            home = self._reopen_at_home(subject)
+            if home is not None:
+                return home
             if self.resolver.strict_subject_resolution:
                 raise SchemaResolutionError(
                     f"cannot route subject variable {str(subject)!r} to a "
@@ -3084,6 +3106,9 @@ class AlgebraVisitor:
             routed = self._route_by_domain(subject, prop) if prop is not None else None
             if routed is not None:
                 return routed
+            home = self._reopen_at_home(subject)
+            if home is not None:
+                return home
             if self.resolver.strict_subject_resolution:
                 raise SchemaResolutionError(
                     f"cannot route subject IRI {str(subject)!r} to a collection: "
@@ -3097,6 +3122,31 @@ class AlgebraVisitor:
             self.builder.filter_raw(subject_matches(alias, bind))
             return alias
         raise UnsupportedSparqlError(f"subject term type {type(subject).__name__!r} is not supported")
+
+    def _reopen_at_home(self, subject: Variable | URIRef) -> str | None:
+        """Inside a GRAPH, re-read a subject bound outside it in the collection
+        its outer document is in, on its IRI, under the scope's filter; or
+        ``None`` when it was not bound outside (review R128-1).
+
+        The outer document itself is hidden in the scope (#119: it is the
+        copy in another graph). With no domain to route by, the default
+        collection was read instead, which need not hold the subject: ERR 1203
+        when it does not exist, ``[]`` when it does, a refusal under strict
+        subject resolution. 0.6.0 answered from the outer copy.
+        """
+        home = self.state.outer_subject_homes.get(str(subject))
+        if home is None:
+            return None
+        collection, resolved = home
+        alias = self._open_collection(collection, resolved=resolved)
+        if resolved is not None:
+            self._enforce_tenant_scope(alias, resolved)
+        if isinstance(subject, Variable):
+            self._bind_subject(subject, alias)
+        else:
+            self.builder.filter_raw(subject_matches(alias, self.builder.bind(str(subject), hint="uri")))
+            self.state.const_subject_alias[str(subject)] = alias
+        return alias
 
     def _bind_subject(self, subject: Any, alias: str) -> None:
         """Record that *alias*'s document represents the SPARQL *subject*.

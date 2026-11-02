@@ -246,6 +246,25 @@ GRAPH_SCOPES_NO_DOMAIN = Store(
     resolver_kwargs=_STRICT,
 )
 
+#: A subject whose only document is in ``:g``, read through the union
+#: default graph, then inside ``GRAPH :g`` by a property with no domain
+#: (review R128-1): it is re-read in its own collection, not the (empty)
+#: default one.
+GRAPH_ONLY_NO_DOMAIN = Store(
+    ontology=PREFIXES
+    + """
+:Person a owl:Class ; phys:collectionName "Person" .
+:name a owl:DatatypeProperty .
+""",
+    docs={
+        "Person": [{"_id": "Person/s", "_uri": EX + "s", "_graph": EX + "g", "name": "S"}],
+        "Document": [],
+    },
+    data=':s a :Person .\n:g { :s :name "S" . }',
+    trig=True,
+    resolver_kwargs={"default_collection": "Document"},
+)
+
 #: The same IRI in two tenants; the oracle holds tenant t1's facts. ``knows``
 #: declares no domain, so nothing else keeps the walk inside the tenant.
 TENANTS = Store(
@@ -520,6 +539,18 @@ _CASES: list[tuple[str, Store, str, str | None]] = [
         "graph_inside_typed",
         GRAPH_OUTSIDE,
         "SELECT ?m WHERE { GRAPH :g { ?p a :Person . ?m a :Post . ?m :hasCreator ?p } }",
+        None,
+    ),
+    (
+        "scope_graph_only_no_domain_var",
+        GRAPH_ONLY_NO_DOMAIN,
+        "SELECT ?n WHERE { ?s a :Person . GRAPH :g { ?s :name ?n } }",
+        None,
+    ),
+    (
+        "scope_graph_only_no_domain_const",
+        GRAPH_ONLY_NO_DOMAIN,
+        "SELECT ?n WHERE { :s a :Person . GRAPH :g { :s :name ?n } }",
         None,
     ),
     *[
