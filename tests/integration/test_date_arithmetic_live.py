@@ -195,8 +195,9 @@ def test_a_shifted_date_matches_oxigraph_in_any_form(mixed_db: Any, mixed_store:
     ("body", "expected"),
     [
         # XPath clamps a month end (op:add-yearMonthDuration-to-date); ArangoDB's
-        # DATE_ADD overflows (``2020-03-02``). pyoxigraph answers no
-        # date + duration at all, so the values are XPath's, written out.
+        # DATE_ADD overflows (``2020-03-02``). pyoxigraph (0.5.9) returns
+        # nothing for a year-month duration, so the values are XPath's,
+        # written out (the day-time row agrees with pyoxigraph).
         ('?d + "P1M"^^xsd:yearMonthDuration', {"e1": "2020-02-29", "e2": "2020-04-01", "e3": "2020-01-31"}),
         ('?d - "P1Y1M"^^xsd:yearMonthDuration', {"e1": "2018-12-31", "e2": "2019-02-01", "e3": "2018-11-30"}),
         ('?d + "P1D"^^xsd:dayTimeDuration', {"e1": "2020-02-01", "e2": "2020-03-02", "e3": "2020-01-01"}),

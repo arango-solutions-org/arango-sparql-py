@@ -2849,10 +2849,10 @@ per row in `tests/security/`):
   is written back in the input's form: a date stays a date (`2020-02-29`),
   the zone is kept (`2020-01-02T09:30:00+02:00`), and the seconds are
   canonical. A comparison with a shifted date compares instants
-  (`DATE_TIMESTAMP`), never strings. pyoxigraph answers no
-  `xsd:date + duration`, so `tests/integration/test_date_arithmetic_live.py`
-  checks those against XPath's values; the dateTime cases are checked
-  against pyoxigraph. Known limit: a comparison with no shifted side
+  (`DATE_TIMESTAMP`), never strings. pyoxigraph (0.5.9) returns nothing
+  for a year-month duration added to a date or dateTime, so
+  `tests/integration/test_date_arithmetic_live.py` checks those against
+  XPath's values; the day-time cases are checked against pyoxigraph. Known limit: a comparison with no shifted side
   (`?t < "…"^^xsd:dateTime`) still compares the stored lexical forms, which
   is right only when they share one form (LDBC's do; #131), and keeps the
   comparison indexable.
