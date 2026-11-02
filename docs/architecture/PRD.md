@@ -1127,6 +1127,20 @@ FOR doc1 IN @@coll_Person
 }
 ```
 
+**Documents a walk reaches are scoped too** (issue #118). An edge's far
+vertex, the source of a backward walk, and the endpoints of a relationship
+node read on its own (D8, `DOCUMENT(k._from)` / `DOCUMENT(k._to)`) are not
+opened by their class, so no class applies its filter there. Each such
+document is tested against **every** tenant-scoped class of the mapping:
+a document of that class (its collection, and its label in a shared one)
+must carry the tenant, and a document of any other class passes —
+`FILTER (!(IS_SAME_COLLECTION(@c, v)) || v.tenant == @tenant_id)`. A walk
+that can reach a tenant-scoped class without a tenant context is refused
+(`CrossTenantJoinError`), as opening the class is; a mapping with no
+tenant-scoped class emits nothing. The triples table of an RPT class has
+no tenant column, so any read of it under a tenant-scoped RPT class is
+refused, including an untyped subject routed to a pure triple store.
+
 **Cross-tenant joins are forbidden.** When two BGP triples touch two
 entities that have different `tenantEntity` values, the translator
 raises `E_TRANSLATE_CROSS_TENANT_JOIN` (HTTP 422) rather than emit a

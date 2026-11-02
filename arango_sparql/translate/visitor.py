@@ -49,7 +49,7 @@ from .optional_subquery import emit_optional_subquery
 from .optional_subquery import needs_subquery as needs_optional_subquery
 from .paths import emit_path_triple
 from .predicates import LoopEmitter, LoopPlan, PredicateCall, extract_predicate_calls, resolve_call
-from .resolver import ResolvedClass, ResolvedProperty, SchemaResolver
+from .resolver import TRIPLE_STORE_IRI, ResolvedClass, ResolvedProperty, SchemaResolver
 from .subselect import emit_to_multiset
 from .union_paths import emit_union
 from .variable_predicates import emit_variable_predicate_triple
@@ -931,6 +931,7 @@ class AlgebraVisitor:
             if prop.mapping_style == "GENERIC_WITH_TYPE" and prop.type_field and prop.type_value:
                 bind = child.bind(prop.type_value, hint=prop.type_field)
                 child.filter_eq(attribute_ref(e_alias, prop.type_field), bind)
+            self._guard_tenants(v_alias, child)
             fields.append((var, subject_ref(v_alias)))
         for var, source_expr in attr_bindings:
             if self.resolver.fan_out_list_values:
@@ -1943,6 +1944,27 @@ class AlgebraVisitor:
         cannot, by definition, belong to a customer-declared shard
         family, so plain FOR is the only correct emission there.
         """
+        if resolved is not None and resolved.style == "RPT" and resolved.tenant_field is not None:
+            # RPT rows live in a denormalised triples table whose
+            # columns are fixed (subject_uri / predicate / object_uri
+            # / object_value); a per-document ``tenant_field`` would
+            # not exist as a column. Refuse rather than silently
+            # skip — a misconfigured tenant-scoped RPT class would
+            # otherwise leak rows across tenants. Every read of the
+            # table comes here: a type pattern, and a subject routed to
+            # the table without one (a pure triple store, issue #118).
+            what = (
+                "the triple store's classes declare"
+                if resolved.iri == TRIPLE_STORE_IRI
+                else f"RPT-style class {resolved.iri!r} declares"
+            )
+            raise CrossTenantJoinError(
+                f"{what} "
+                f"phys:tenantField {resolved.tenant_field!r} but RPT "
+                f"triples rows have fixed columns and no tenant "
+                f"discriminator; tenant scoping for RPT is not "
+                f"supported in v1.0 (PRD §6.5.1)"
+            )
         alias = self.builder.fresh_alias()
         if resolved is not None and resolved.shard_family is not None:
             # Sharded class: fan out over every member of the family.
@@ -2046,6 +2068,60 @@ class AlgebraVisitor:
             # this alias's graph_field and the existing expression.
             self.builder.filter_raw(f"{lhs} == {existing}")
 
+    def _guard_tenants(self, doc: str, builder: AqlQueryBuilder | None = None) -> None:
+        """FILTER *doc* by :meth:`_tenant_test`, when the mapping scopes tenants."""
+        test = self._tenant_test(doc, builder)
+        if test is not None:
+            (builder or self.builder).filter_raw(test)
+
+    def _tenant_test(self, doc: str, builder: AqlQueryBuilder | None = None) -> str | None:
+        """Hold a document a walk reached to the tenant (issue #118).
+
+        *doc* is an AQL document expression: an edge's far vertex, the source
+        of a backward walk, or the endpoint of a relationship node read on
+        its own (``DOCUMENT(k._from)``). No class opened it, so no class
+        applied its tenant FILTER. For every tenant-scoped class of the
+        mapping (:meth:`SchemaResolver.tenant_scoped_classes`), a document of
+        that class (its collection, and its label in a shared one) must
+        carry the tenant; a document of any other class passes. Without a
+        tenant context the walk is refused, as opening such a class is.
+        """
+        classes = self.resolver.tenant_scoped_classes()
+        if not classes:
+            return None
+        if self.tenant_id is None:
+            raise CrossTenantJoinError(
+                f"the mapping scopes classes to tenants ({', '.join(c.iri for c in classes)}) and a walk "
+                f"can reach their documents, but no tenant context was supplied to the translator "
+                f"(missing X-Tenant-Id header or ARANGO_SPARQL_DEFAULT_TENANT env)"
+            )
+        target = builder or self.builder
+        if self.state.tenant_bind_placeholder is None:
+            self.state.tenant_bind_placeholder = self.builder.bind(self.tenant_id, hint="tenant")
+        terms = []
+        for cls in classes:
+            assert cls.tenant_field is not None  # tenant_scoped_classes guarantees it
+            member = " || ".join(
+                f"IS_SAME_COLLECTION({target.bind(name, hint='coll')}, {doc})"
+                for name in (cls.shard_family or (cls.collection,))
+            )
+            label = self._class_tests(target, doc, [cls], f"the tenant test of {cls.iri!r}")
+            if label:
+                member = f"({member}) && {label[0]}"
+            terms.append(
+                f"(!({member}) || {attribute_ref(doc, cls.tenant_field)} == {self.state.tenant_bind_placeholder})"
+            )
+        return terms[0] if len(terms) == 1 else "(" + " && ".join(terms) + ")"
+
+    def _guard_relationship_endpoints(self, alias: str, classes: list[ResolvedClass]) -> None:
+        """A relationship node (D8) read on its own is an edge document:
+        both its endpoints are held to the tenant (issue #118). In a union
+        with vertex classes, a row with no ``_from`` is not an edge."""
+        if not any(c.style == "EDGE" for c in classes) or not self.resolver.tenant_scoped_classes():
+            return
+        tests = [self._tenant_test(f"DOCUMENT({alias}.{end})") for end in ("_from", "_to")]
+        self.builder.filter_raw(f"({alias}._from == null || ({' && '.join(t for t in tests if t)}))")
+
     def _enforce_tenant_scope(
         self, alias: str, resolved: ResolvedClass, builder: AqlQueryBuilder | None = None
     ) -> None:
@@ -2120,20 +2196,6 @@ class AlgebraVisitor:
         loop's first branch.
         """
         triples_alias = self._open_collection(resolved.collection, resolved=resolved)
-        if resolved.tenant_field is not None:
-            # RPT rows live in a denormalised triples table whose
-            # columns are fixed (subject_uri / predicate / object_uri
-            # / object_value); a per-document ``tenant_field`` would
-            # not exist as a column. Refuse rather than silently
-            # skip — a misconfigured tenant-scoped RPT class would
-            # otherwise leak rows across tenants.
-            raise CrossTenantJoinError(
-                f"RPT-style class {resolved.iri!r} declares "
-                f"phys:tenantField {resolved.tenant_field!r} but RPT "
-                f"triples rows have fixed columns and no tenant "
-                f"discriminator; tenant scoping for RPT is not "
-                f"supported in v1.0 (PRD §6.5.1)"
-            )
         rdf_type_bind = self.builder.bind(str(RDF.type), hint="rdftype")
         class_bind = self.builder.bind(str(class_iri), hint="cls")
         self.builder.filter_eq(attribute_ref(triples_alias, resolved.predicate_column), rdf_type_bind)
@@ -2377,6 +2439,7 @@ class AlgebraVisitor:
             )
             self._filter_edge_type(prop, e_alias)
             self._keep_subject_collections(v_alias, prop)
+            self._guard_tenants(v_alias)
             self.state.doc_to_collection[v_alias] = prop.edge_collection
             self._bind_subject(subject, v_alias)
             return
@@ -2392,6 +2455,7 @@ class AlgebraVisitor:
             direction="ANY" if prop.symmetric else "OUTBOUND",
         )
         self._filter_edge_type(prop, e_alias)
+        self._guard_tenants(v_alias)
         # ``v_alias`` is the traversal vertex and is what binds to the SPARQL
         # object (a reified relationship binds the edge instead:
         # :meth:`_emit_reified_entry`).
@@ -2429,6 +2493,7 @@ class AlgebraVisitor:
             direction="ANY" if prop.symmetric else "OUTBOUND",
         )
         self._filter_edge_type(prop, e_alias)
+        self._guard_tenants(v_alias)
         self.state.reified_edges[e_alias] = (prop.iri, v_alias)
         if isinstance(obj, Variable):
             self.state.relationship_nodes.setdefault(str(obj), set()).add(prop.iri)
@@ -2502,6 +2567,7 @@ class AlgebraVisitor:
             direction="ANY" if relationship.symmetric else "INBOUND",
         )
         self._filter_edge_type(relationship, e_alias)
+        self._guard_tenants(src_alias)
         self.state.reified_edges[e_alias] = (relationship.iri, target)
         self.state.reified_sources[e_alias] = src_alias
         self.state.relationship_nodes.setdefault(str(node), set()).add(relationship.iri)
@@ -2888,6 +2954,7 @@ class AlgebraVisitor:
         for test in self._class_tests(self.builder, alias, classes, what):
             self.builder.filter_raw(test)
         self._enforce_tenant_scope(alias, anchor)
+        self._guard_relationship_endpoints(alias, classes)
         self._bind_opened_subject(subject, alias, matched=False)
         return alias
 
@@ -3010,6 +3077,7 @@ class AlgebraVisitor:
         self.builder.for_union(alias, arm_aqls, scans_documents=True)
         self._apply_graph_scope(alias)
         self._enforce_tenant_scope(alias, classes[0])
+        self._guard_relationship_endpoints(alias, classes)
         self._bind_opened_subject(subject, alias, matched=match_in_arms)
         return alias
 

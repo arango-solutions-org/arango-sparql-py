@@ -308,6 +308,75 @@ TENANTS_CROSS_EDGE = Store(
     tenant_id="t1",
 )
 
+#: Every class tenant-scoped (issue #118): documents of tenants T1 and T2,
+#: edges between them, and a reified relationship (D8). The oracle holds what
+#: tenant T1 may see: its own documents and the edges between them.
+_TENANT_ONTOLOGY = (
+    PREFIXES
+    + """
+:Person a owl:Class ; phys:collectionName "Person" ; phys:tenantField "tenant" .
+:Forum a owl:Class ; phys:collectionName "Forum" ; phys:tenantField "tenant" .
+:Post a owl:Class ; phys:collectionName "Post" ; phys:tenantField "tenant" .
+:Comment a owl:Class ; phys:collectionName "Comment" ; phys:tenantField "tenant" .
+:Message a owl:Class ; phys:mappingStyle "UNION" .
+:Post rdfs:subClassOf :Message . :Comment rdfs:subClassOf :Message .
+:name a owl:DatatypeProperty ; rdfs:domain :Person .
+:knows a owl:ObjectProperty ; phys:edgeCollectionName "knows" ; rdfs:domain :Person ; rdfs:range :Person .
+:hasCreator a owl:ObjectProperty ; phys:edgeCollectionName "hasCreator" ;
+    rdfs:domain [ a owl:Class ; owl:unionOf ( :Post :Comment ) ] ; rdfs:range :Person .
+:hasMember a owl:ObjectProperty ; phys:edgeCollectionName "hasMember" ; phys:reifiedEdge "true" ; rdfs:domain :Forum .
+:hasPerson a owl:ObjectProperty ; phys:edgeTargetOf :hasMember ; rdfs:range :Person .
+:joinDate a owl:DatatypeProperty ; rdfs:domain :hasMember .
+"""
+)
+TENANT_WALKS = Store(
+    ontology=_TENANT_ONTOLOGY,
+    docs={
+        "Person": [
+            {"_id": "Person/a", "_uri": EX + "a", "name": "A", "tenant": "T1"},
+            {"_id": "Person/b", "_uri": EX + "b", "name": "B", "tenant": "T2"},
+            {"_id": "Person/c", "_uri": EX + "c", "name": "C", "tenant": "T1"},
+        ],
+        "Forum": [
+            {"_id": "Forum/f1", "_uri": EX + "f1", "tenant": "T1"},
+            {"_id": "Forum/f2", "_uri": EX + "f2", "tenant": "T2"},
+        ],
+        "Post": [
+            {"_id": "Post/m1", "_uri": EX + "m1", "tenant": "T1"},
+            {"_id": "Post/m2", "_uri": EX + "m2", "tenant": "T2"},
+        ],
+        "Comment": [{"_id": "Comment/k1", "_uri": EX + "k1", "tenant": "T2"}],
+        "knows": [
+            {"_id": "knows/1", "_from": "Person/a", "_to": "Person/b"},
+            {"_id": "knows/2", "_from": "Person/b", "_to": "Person/c"},
+        ],
+        "hasCreator": [
+            {"_id": "hasCreator/1", "_from": "Post/m1", "_to": "Person/a"},
+            {"_id": "hasCreator/2", "_from": "Post/m2", "_to": "Person/a"},
+            {"_id": "hasCreator/3", "_from": "Comment/k1", "_to": "Person/a"},
+        ],
+        "hasMember": [
+            {
+                "_id": "hasMember/1",
+                "_uri": EX + "hm1",
+                "_from": "Forum/f1",
+                "_to": "Person/b",
+                "joinDate": "2020",
+            },
+            {
+                "_id": "hasMember/2",
+                "_uri": EX + "hm2",
+                "_from": "Forum/f2",
+                "_to": "Person/a",
+                "joinDate": "2021",
+            },
+        ],
+    },
+    data=':a a :Person ; :name "A" . :c a :Person ; :name "C" . :f1 a :Forum . '
+    ":m1 a :Post, :Message ; :hasCreator :a .",
+    tenant_id="T1",
+)
+
 #: LPG: one collection, classes as labels. ``:c`` is a Person and an Employee.
 LPG_LABELS = Store(
     ontology=PREFIXES
@@ -536,7 +605,7 @@ _CASES: list[tuple[str, Store, str, str | None]] = [
         "tenant_cross_edge_reverse",
         TENANTS_CROSS_EDGE,
         "SELECT ?x ?y WHERE { ?y a :Person . ?x :knows ?y }",
-        "#113",
+        None,  # #113, fixed with #118
     ),
     (
         "tenant_cross_edge_class_walk",
@@ -562,6 +631,39 @@ _CASES: list[tuple[str, Store, str, str | None]] = [
         "SELECT ?x WHERE { :y a :Person . ?x :knows :y . ?x a :Person }",
         None,
     ),
+    # Tenant scoping of walked documents (issue #118); every one leaked T2.
+    *[
+        (f"tenant_{name}", TENANT_WALKS, query, None)
+        for name, query in [
+            ("forward_vertex", "SELECT ?b ?n WHERE { ?a a :Person . ?a :knows ?b . ?b :name ?n }"),
+            ("forward_vertex_only", "SELECT ?a ?b WHERE { ?a a :Person . ?a :knows ?b }"),
+            ("reverse_untyped", "SELECT ?x WHERE { ?y a :Person . ?x :knows ?y }"),
+            ("reverse_constant", "SELECT ?x WHERE { ?x :knows :c }"),
+            ("supertype", "SELECT ?m WHERE { ?m a :Message }"),
+            ("reverse_domain_union", "SELECT ?m WHERE { ?p a :Person . ?m :hasCreator ?p }"),
+            ("reified_exit", "SELECT ?f ?p WHERE { ?f a :Forum . ?f :hasMember ?k . ?k :hasPerson ?p }"),
+            ("reified_exit_untyped", "SELECT ?f ?k WHERE { ?f :hasMember ?k . ?k :hasPerson ?p }"),
+            (
+                "reified_backwards",
+                "SELECT ?f ?k WHERE { ?p a :Person . ?f :hasMember ?k . ?k :hasPerson ?p }",
+            ),
+            (
+                "reified_backwards_values",
+                "SELECT ?f ?k WHERE { VALUES ?p { :a :b } ?f :hasMember ?k . ?k :hasPerson ?p }",
+            ),
+            ("relationship_node_alone", "SELECT ?d WHERE { VALUES ?k { :hm1 :hm2 } ?k :joinDate ?d }"),
+            (
+                "optional_walk",
+                "SELECT ?a ?n WHERE { ?a a :Person . OPTIONAL { ?a :knows ?b . ?b :name ?n } }",
+            ),
+            (
+                "union_arm_walk",
+                "SELECT ?a ?x WHERE { ?a a :Person . { ?a :knows ?x } UNION { ?x :knows ?a } }",
+            ),
+            ("path", "SELECT ?x WHERE { :a :knows+ ?x }"),
+            ("typed_path", "SELECT ?x WHERE { ?a a :Person . ?a :knows+ ?x }"),
+        ]
+    ],
     ("w3c_symmetric_reverse", W3C_SYMMETRIC, "SELECT ?x ?y WHERE { ?y a :Person . ?x :knows ?y }", None),
     (
         "graph_var_type",
@@ -579,8 +681,13 @@ _CASES: list[tuple[str, Store, str, str | None]] = [
 
 
 #: Cases the AQL interpreter cannot run (a ``UNION`` inside an OPTIONAL
-#: sub-query); ``tests/integration/test_multi_document_iri_live.py`` runs them.
-_LIVE_ONLY = {"ng_strict_optional", "ng_strict_optional_class_walk", "graph_outside_optional"}
+#: sub-query, ``DOCUMENT()``); ``tests/integration/test_multi_document_iri_live.py`` runs them.
+_LIVE_ONLY = {
+    "ng_strict_optional",
+    "ng_strict_optional_class_walk",
+    "graph_outside_optional",
+    "tenant_relationship_node_alone",
+}
 
 
 def case_params(*, interpreter: bool = False) -> list[Any]:
