@@ -248,6 +248,33 @@ REPEATED_RANGE_DOMAIN = Store(
     resolver_kwargs={"default_collection": "Person"},
 )
 
+#: The repeated range in named graphs: an object found by a lookup across
+#: the range's collections binds an unbound ``GRAPH ?g`` (it raised
+#: AqlEmitError: "?g was never bound").
+REPEATED_RANGE_GRAPHS = Store(
+    ontology=REPEATED_RANGE_DOMAIN.ontology,
+    docs={
+        "Person": [
+            {"_id": "Person/a", "_uri": EX + "a", "_graph": EX + "g"},
+            {"_id": "Person/b", "_uri": EX + "b", "_graph": EX + "g"},
+            {"_id": "Person/c", "_uri": EX + "c", "_graph": EX + "h"},
+        ],
+        "Post": [{"_id": "Post/m1", "_uri": EX + "m1", "_graph": EX + "g"}],
+        "Comment": [
+            {"_id": "Comment/k1", "_uri": EX + "k1", "_graph": EX + "g"},
+            {"_id": "Comment/k1h", "_uri": EX + "k1", "_graph": EX + "h"},
+        ],
+        "likes": [
+            {"_id": "likes/1", "_from": "Person/a", "_to": "Post/m1", "_graph": EX + "g"},
+            {"_id": "likes/2", "_from": "Person/b", "_to": "Comment/k1", "_graph": EX + "g"},
+            {"_id": "likes/3", "_from": "Person/c", "_to": "Comment/k1h", "_graph": EX + "h"},
+        ],
+    },
+    data=":g { :a a :Person ; :likes :m1 . :b a :Person ; :likes :k1 . :m1 a :Post . :k1 a :Comment . }\n"
+    ":h { :c a :Person ; :likes :k1 . :k1 a :Comment . }",
+    trig=True,
+)
+
 #: The same IRI in two tenants; the oracle holds tenant t1's facts. ``knows``
 #: declares no domain, so nothing else keeps the walk inside the tenant.
 TENANTS = Store(
@@ -522,6 +549,24 @@ _CASES: list[tuple[str, Store, str, str | None]] = [
         "graph_inside_typed",
         GRAPH_OUTSIDE,
         "SELECT ?m WHERE { GRAPH :g { ?p a :Person . ?m a :Post . ?m :hasCreator ?p } }",
+        None,
+    ),
+    (
+        "repeated_range_graph_variable",
+        REPEATED_RANGE_GRAPHS,
+        "SELECT ?g ?p WHERE { GRAPH ?g { ?p :likes :k1 } }",
+        None,
+    ),
+    (
+        "repeated_range_graph_variable_values",
+        REPEATED_RANGE_GRAPHS,
+        "SELECT ?g ?p ?m WHERE { VALUES ?m { :m1 :k1 } GRAPH ?g { ?p :likes ?m } }",
+        None,
+    ),
+    (
+        "repeated_range_graph_constant",
+        REPEATED_RANGE_GRAPHS,
+        "SELECT ?p WHERE { GRAPH :h { ?p :likes :k1 } }",
         None,
     ),
     *[

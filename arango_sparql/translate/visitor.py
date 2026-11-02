@@ -2622,9 +2622,6 @@ class AlgebraVisitor:
                 child.for_(inner, collection)
                 for test in self._class_tests(child, inner, classes, "the rdfs:range"):
                     child.filter_raw(test)
-                scope = self._graph_scope_test(inner)
-                if scope is not None:
-                    child.filter_raw(scope)
                 for tenant in {(c.tenant_field, c.tenant_entity): c for c in classes}.values():
                     self._enforce_tenant_scope(inner, tenant, builder=child)
                 child.filter_raw(match(inner))
@@ -2632,6 +2629,11 @@ class AlgebraVisitor:
                 arms.append(self.builder.absorb_child(child))
             alias = self.builder.fresh_alias()
             self.builder.for_union(alias, arms, scans_documents=True)
+            # The named-graph scope applies to the union row, as one
+            # collection's scan applies it (:meth:`_open_collection`): an
+            # unbound ``GRAPH ?g`` is bound here. A per-arm test could only
+            # filter, and left ``?g`` unbound (AqlEmitError).
+            self._apply_graph_scope(alias)
         if value is not None:
             # The variable keeps its value expression; its document is this.
             self.state.var_to_doc_alias[str(obj)] = alias
