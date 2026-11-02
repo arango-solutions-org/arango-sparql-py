@@ -113,6 +113,9 @@ def emit_rpt_cross_subject_optional(visitor: AlgebraVisitor, triple: tuple[Any, 
     # path opens ``doc<N>`` too), so EXPLAIN output and the cross-
     # validation interpreter both read it uniformly.
     triples_alias = child.fresh_alias(prefix="doc")
+    # A tenant-scoped class on this table makes any read of it unscopable
+    # (RPT rows have no tenant column; #118), as ``_open_collection`` refuses.
+    visitor._refuse_tenant_scoped_triples(rpt_class.collection)
     child.for_(triples_alias, rpt_class.collection)
     # Join the OPTIONAL subject to the outer-bound value. The outer
     # alias referenced by ``subject_value_expr`` is in lexical scope
