@@ -103,10 +103,34 @@ def test_in_a_shared_collection_only_the_tenant_scoped_label_is_tested() -> None
     # A Place in ``nodes`` carries no tenant; only a Person document must.
     aql = _aql(_LPG, "SELECT ?b WHERE { ?a a :Person . ?a :knows ?b }")
     guard = _GUARD.format(v="v2", e=3, s=4, c=5)
+    collection = "FIRST(SPLIT(NOT_NULL(v2._id, @_p3_empty), @_p4_slash))"
     assert (
-        f"FILTER ({guard} && LENGTH(INTERSECTION(TO_ARRAY(v2.labels), @_p6_tenant_labels)) > 0"
-        " ? v2.org == @_p2_tenant : true)\n"
+        f"FILTER ({guard} && LENGTH(INTERSECTION(TO_ARRAY(v2.labels), TRANSLATE({collection}, "
+        "@_p6_tenant_labels, @_p7_none))) > 0 ? v2.org == @_p2_tenant : true)\n"
     ) in aql
+
+
+def test_a_label_is_tenant_scoped_only_in_the_collection_that_declares_it() -> None:
+    # Review P6: a non-tenant ``:Contact`` labelled "Person" in ``Things``
+    # was held to the tenant because ``:Person`` (in ``Nodes``) is scoped.
+    ttl = (
+        _PREFIXES
+        + """
+:Person a owl:Class ; phys:collectionName "Nodes" ; phys:typeField "label" ; phys:typeValue "Person" ;
+    phys:tenantField "tenant" .
+:Device a owl:Class ; phys:collectionName "Things" ; phys:typeField "label" ; phys:typeValue "Device" ;
+    phys:tenantField "tenant" .
+:Contact a owl:Class ; phys:collectionName "Things" ; phys:typeField "label" ; phys:typeValue "Person" .
+:owns a owl:ObjectProperty ; phys:edgeCollectionName "owns" .
+"""
+    )
+    result = translate(
+        "PREFIX : <http://ex.org/>\nSELECT ?t WHERE { ?p a :Person . ?p :owns ?t }",
+        resolver=SchemaResolver.from_turtle(ttl),
+        tenant_id="t1",
+    )
+    (labels,) = [v for k, v in result.bind_vars.items() if k.endswith("_tenant_labels")]
+    assert labels == {"Nodes": ["Person"], "Things": ["Device"]}
 
 
 def test_a_default_collection_read_is_held_to_the_tenant() -> None:

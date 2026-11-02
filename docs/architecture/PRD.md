@@ -1133,8 +1133,11 @@ collection (a subject no class places, DESCRIBE), and the endpoints of a
 relationship node read on its own (D8, `DOCUMENT(k._from)` /
 `DOCUMENT(k._to)`) are not opened by their class, so no class applies its
 filter there. Each such document gets one test per tenant field, keyed by
-the collection in its `_id` (and its label in a shared collection): a
-document of a tenant-scoped class must carry the tenant, any other passes —
+the collection in its `_id` (and, in a shared collection, its label: the
+labels scoped in that collection, looked up with `TRANSLATE(coll,
+@labels_by_collection, [])`, so a non-tenant class reusing a label value in
+another collection is not held to the tenant): a document of a
+tenant-scoped class must carry the tenant, any other passes —
 `FILTER (FIRST(SPLIT(NOT_NULL(v._id, @e), @s)) IN @tenant_colls ? v.tenant
 == @tenant_id : true)`. (A per-class `(!in_class || tenant)` AND over the
 hops of a `:p+` path made ArangoDB's planner run out of memory.) Without a

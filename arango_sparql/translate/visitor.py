@@ -2115,25 +2115,36 @@ class AlgebraVisitor:
             )
         if self.tenant_id is not None and self.state.tenant_bind_placeholder is None:
             self.state.tenant_bind_placeholder = self.builder.bind(self.tenant_id, hint="tenant")
-        groups: dict[tuple[str, str | None], tuple[set[str], set[str]]] = {}
+        # Per (tenant field, label field): the collections whose every
+        # document is scoped, and per shared collection the scoped labels. A
+        # label is scoped only in the collection that declares it: a
+        # non-tenant class may reuse it elsewhere (review P6).
+        groups: dict[tuple[str, str | None], dict[str, set[str]]] = {}
         for cls in classes:
             assert cls.tenant_field is not None  # tenant_scoped_classes guarantees it
             label_field = cls.type_field if cls.type_field and cls.type_value else None
-            collections, labels = groups.setdefault((cls.tenant_field, label_field), (set(), set()))
-            collections.update(cls.shard_family or (cls.collection,))
-            if label_field and cls.type_value:
-                labels.add(cls.type_value)
+            by_collection = groups.setdefault((cls.tenant_field, label_field), {})
+            for name in cls.shard_family or (cls.collection,):
+                labels = by_collection.setdefault(name, set())
+                if label_field and cls.type_value:
+                    labels.add(cls.type_value)
         # Null-safe and warning-free for a missing document (a dangling edge
         # end): PARSE_IDENTIFIER(null) and INTERSECTION(null, …) warn.
         empty, slash = self._guard_bind("", "empty"), self._guard_bind("/", "slash")
         collection = f"FIRST(SPLIT(NOT_NULL({doc}._id, {empty}), {slash}))"
         terms = []
-        for (tenant_field, label_field), (collections, labels) in sorted(groups.items(), key=repr):
-            condition = f"{collection} IN {self._guard_bind(sorted(collections), 'tenant_colls')}"
+        for (tenant_field, label_field), by_collection in sorted(groups.items(), key=repr):
+            condition = f"{collection} IN {self._guard_bind(sorted(by_collection), 'tenant_colls')}"
             if label_field:
+                # The collection's own scoped labels, looked up in one bound
+                # object: one term per group, however many collections.
+                labels_by_collection = {
+                    name: sorted(labels) for name, labels in sorted(by_collection.items())
+                }
                 condition += (
-                    f" && LENGTH(INTERSECTION(TO_ARRAY({attribute_ref(doc, label_field)}), "
-                    f"{self._guard_bind(sorted(labels), 'tenant_labels')})) > 0"
+                    f" && LENGTH(INTERSECTION(TO_ARRAY({attribute_ref(doc, label_field)}), TRANSLATE("
+                    f"{collection}, {self._guard_bind(labels_by_collection, 'tenant_labels')}, "
+                    f"{self._guard_bind([], 'none')}))) > 0"
                 )
             check = (
                 f"{attribute_ref(doc, tenant_field)} == {self.state.tenant_bind_placeholder}"

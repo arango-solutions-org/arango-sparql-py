@@ -377,6 +377,36 @@ TENANT_WALKS = Store(
     tenant_id="T1",
 )
 
+#: A label reused across collections (review P6): ``:Person`` is
+#: tenant-scoped in ``Nodes``, while ``:Contact`` in ``Things`` carries the
+#: same label value and no tenant. ``Things/d2`` is another tenant's device.
+TENANT_SHARED_LABEL = Store(
+    ontology=PREFIXES
+    + """
+:Person a owl:Class ; phys:collectionName "Nodes" ; phys:typeField "label" ; phys:typeValue "Person" ;
+    phys:tenantField "tenant" .
+:Device a owl:Class ; phys:collectionName "Things" ; phys:typeField "label" ; phys:typeValue "Device" ;
+    phys:tenantField "tenant" .
+:Contact a owl:Class ; phys:collectionName "Things" ; phys:typeField "label" ; phys:typeValue "Person" .
+:owns a owl:ObjectProperty ; phys:edgeCollectionName "owns" .
+""",
+    docs={
+        "Nodes": [{"_id": "Nodes/a", "_uri": EX + "a", "label": "Person", "tenant": "T1"}],
+        "Things": [
+            {"_id": "Things/c1", "_uri": EX + "c1", "label": "Person"},
+            {"_id": "Things/d1", "_uri": EX + "d1", "label": "Device", "tenant": "T1"},
+            {"_id": "Things/d2", "_uri": EX + "d2", "label": "Device", "tenant": "T2"},
+        ],
+        "owns": [
+            {"_id": "owns/1", "_from": "Nodes/a", "_to": "Things/c1"},
+            {"_id": "owns/2", "_from": "Nodes/a", "_to": "Things/d1"},
+            {"_id": "owns/3", "_from": "Nodes/a", "_to": "Things/d2"},
+        ],
+    },
+    data=":a a :Person ; :owns :c1, :d1 . :c1 a :Contact . :d1 a :Device .",
+    tenant_id="T1",
+)
+
 #: LPG: one collection, classes as labels. ``:c`` is a Person and an Employee.
 LPG_LABELS = Store(
     ontology=PREFIXES
@@ -405,6 +435,12 @@ LPG_LABELS = Store(
 
 _CASES: list[tuple[str, Store, str, str | None]] = [
     # (id, store, query, issue it is wrong under on main — or None)
+    (
+        "tenant_label_in_another_collection",
+        TENANT_SHARED_LABEL,
+        "SELECT ?t WHERE { ?p a :Person . ?p :owns ?t }",
+        None,
+    ),
     ("pg_two_types", PG_TWO_CLASSES, "SELECT ?s WHERE { ?s a :Person . ?s a :Employee }", None),
     ("pg_edge_then_type", PG_TWO_CLASSES, "SELECT ?s WHERE { :a :knows ?s . ?s a :Employee }", None),
     (
