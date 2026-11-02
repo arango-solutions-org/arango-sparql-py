@@ -274,6 +274,53 @@ cases:
         - n: null
           s: "http://ex.org/bob"
 
+  - name: values_undef_joins_any_value
+    # A trailing VALUES with UNDEF cells, joined against variables the
+    # pattern binds. UNDEF is unbound, and an unbound variable is
+    # compatible with any value (SPARQL §18.3), so each join FILTER
+    # lets a null cell through. W3C ``bindings/values4``, ``values5``,
+    # ``values8``.
+    sparql: |
+      PREFIX : <http://ex.org/>
+      SELECT ?s ?n WHERE {
+        ?s :name ?n .
+      } VALUES (?s ?n) { (:alice UNDEF) (UNDEF "Bob") }
+    expected_aql: |-
+      FOR doc1 IN @@c1_Document
+      FILTER HAS(doc1, "name")
+      FOR row2 IN @_p1_values
+      FILTER (row2.n == null || row2.n == doc1.name)
+      FILTER (row2.s == null || row2.s == NOT_NULL(doc1._uri, doc1._id))
+      RETURN { s: NOT_NULL(doc1._uri, doc1._id), n: doc1.name }
+    expected_bind_vars:
+      "@c1_Document": "Document"
+      "_p1_values":
+        - n: null
+          s: "http://ex.org/alice"
+        - n: "Bob"
+          s: null
+
+  - name: values_binds_a_failed_optional
+    # VALUES joined against a variable an OPTIONAL may leave unbound.
+    # Where the OPTIONAL did not match, the VALUES row binds ``?f``;
+    # where it did, the two must agree. W3C ``bindings/values7``.
+    sparql: |
+      PREFIX : <http://ex.org/>
+      SELECT ?s ?f WHERE {
+        ?s :name ?n .
+        OPTIONAL { ?s :friend ?f }
+      } VALUES ?f { :bob }
+    expected_aql: |-
+      FOR doc1 IN @@c1_Document
+      FILTER HAS(doc1, "name")
+      FOR row2 IN @_p1_values
+      FILTER (doc1.friend == null || row2.f == doc1.friend)
+      RETURN { s: NOT_NULL(doc1._uri, doc1._id), f: NOT_NULL(doc1.friend, row2.f) }
+    expected_bind_vars:
+      "@c1_Document": "Document"
+      "_p1_values":
+        - f: "http://ex.org/bob"
+
   - name: values_standalone_integers
     # Integer literals (``VALUES ?x { 1 2 3 }``) round-trip as
     # ``int`` (via ``Literal.toPython()`` ⇒ Python's ``int``,

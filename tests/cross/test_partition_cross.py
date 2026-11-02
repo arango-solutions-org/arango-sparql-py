@@ -102,6 +102,22 @@ def test_seeded_partition_matches_oxigraph(store: Any, resolver: SchemaResolver)
     ]
 
 
+def test_a_seed_row_with_undef_matches_any_value(store: Any, resolver: SchemaResolver) -> None:
+    # A seed row an engine builds from an earlier leg that left one of its
+    # columns unbound: the ``None`` cell travels as UNDEF, and an unbound
+    # variable joins with any value (SPARQL §18.3).
+    partition = "PREFIX : <http://ex.org/> SELECT ?p ?dept WHERE { ?p a :Person ; :dept ?dept }"
+    seeds = [
+        {"p": {"type": "uri", "value": "http://ex.org/alice"}, "dept": None},
+        {"p": None, "dept": {"type": "literal", "value": "ops"}},
+    ]
+    result = translate_partition(partition, resolver=resolver, canonical_keys=["p"], seed_bindings=seeds)
+    actual = run_aql_subset(result.aql, result.bind_vars, ARANGO_DOCS)
+    expected = [normalize_oxi_row(row) for row in oxi_bindings(store, result.provenance.query_text)]
+    assert_bindings_equal(actual, expected)
+    assert sorted(row["p"] for row in actual) == ["http://ex.org/alice", "http://ex.org/carol"]
+
+
 def test_two_leg_federation_equals_whole_query(store: Any, resolver: SchemaResolver) -> None:
     # Leg 1 — "which people are in eng?" — returns canonical keys.
     leg1 = translate_partition(

@@ -162,11 +162,13 @@ def _emit_subselect(
     row_alias = visitor.builder.fresh_alias(prefix="row")
     visitor.builder.for_subquery(row_alias, inner_aql)
 
-    _bind_outer_scope(visitor, row_alias, [str(v) for v in inner_pv])
     # A column the sub-select can leave unbound (an OPTIONAL inside it, or a
     # MIN / MAX / SUM … that can be unbound) stays so outside (#59).
-    visitor.state.maybe_unbound.update(
-        str(v) for v in inner_pv if str(v) in child_visitor.state.maybe_unbound
+    _bind_outer_scope(
+        visitor,
+        row_alias,
+        [str(v) for v in inner_pv],
+        unbound={str(v) for v in inner_pv if str(v) in child_visitor.state.maybe_unbound},
     )
 
 
@@ -244,10 +246,12 @@ def _emit_values(visitor: AlgebraVisitor, values_node: Any) -> None:
     row_alias = visitor.builder.fresh_alias(prefix="row")
     visitor.builder.for_values(row_alias, values_bind)
 
-    _bind_outer_scope(visitor, row_alias, var_names)
     # A variable with UNDEF in some row is unbound in that solution.
-    visitor.state.maybe_unbound.update(
-        name for name in var_names if any(row[name] is None for row in rows_python)
+    _bind_outer_scope(
+        visitor,
+        row_alias,
+        var_names,
+        unbound={name for name in var_names if any(row[name] is None for row in rows_python)},
     )
 
 
@@ -255,6 +259,8 @@ def _bind_outer_scope(
     visitor: AlgebraVisitor,
     row_alias: str,
     var_names: list[str],
+    *,
+    unbound: set[str],
 ) -> None:
     """Bind ``<row>.<var>`` into the outer ``var_to_expr`` for each var.
 
@@ -265,12 +271,33 @@ def _bind_outer_scope(
     share this helper because sub-SELECT and VALUES need the same
     behaviour: both contribute a binding-set the outer query joins
     against.
+
+    ``unbound`` names the row's variables that can be unbound in some
+    row (a VALUES ``UNDEF``, a sub-select column that can be unbound).
+    Solutions are compatible when a shared variable is unbound on
+    either side (SPARQL §18.3), so a side that can be unbound is
+    tested for null before the equality, and the variable then takes
+    whichever side is bound: W3C ``bindings/values4``, ``values5``,
+    ``values7`` and ``values8``.
     """
     for var_name in var_names:
         new_expr = attribute_ref(row_alias, var_name)
         existing = visitor.state.var_to_expr.get(var_name)
         if existing is None:
             visitor.state.var_to_expr[var_name] = new_expr
+            if var_name in unbound:
+                visitor.state.maybe_unbound.add(var_name)
             continue
-        if existing != new_expr:
-            visitor.builder.filter_raw(f"{new_expr} == {existing}")
+        if existing == new_expr:
+            continue
+        existing_open = var_name in visitor.state.maybe_unbound
+        new_open = var_name in unbound
+        tests = [f"{existing} == null"] if existing_open else []
+        if new_open:
+            tests.append(f"{new_expr} == null")
+        tests.append(f"{new_expr} == {existing}")
+        visitor.builder.filter_raw(tests[0] if len(tests) == 1 else "(" + " || ".join(tests) + ")")
+        if existing_open:
+            visitor.state.var_to_expr[var_name] = f"NOT_NULL({existing}, {new_expr})"
+            if not new_open:
+                visitor.state.maybe_unbound.discard(var_name)
