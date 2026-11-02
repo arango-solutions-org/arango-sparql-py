@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
@@ -44,6 +45,7 @@ from rdflib.collection import Collection
 from ..errors import SchemaResolutionError
 from .builder import parse_flag
 from .mapping import MappingError, property_field_path
+from .predicates import PredicateHandler
 
 if TYPE_CHECKING:
     from .mapping import MappingBundle
@@ -282,6 +284,11 @@ class SchemaResolver:
     """Maximum repetitions when lowering ``:p+`` / ``:p*`` / ``:p?``; see
     :mod:`arango_sparql.translate.paths`."""
 
+    predicates: Mapping[str, PredicateHandler] = field(default_factory=dict)
+    """Caller-registered predicates (magic properties), by IRI: the seam in
+    :mod:`arango_sparql.translate.predicates`. An IRI not registered here is
+    an ordinary predicate."""
+
     fan_out_list_values: bool = False
     """Treat a list-valued document attribute as MULTIPLE triples
     (one per element), per RDF semantics for multi-valued predicates.
@@ -423,6 +430,7 @@ class SchemaResolver:
         default_graph_includes_named: bool = True,
         permissive_class_resolution: bool = False,
         fan_out_list_values: bool = False,
+        predicates: Mapping[str, PredicateHandler] | None = None,
     ) -> SchemaResolver:
         """Convenience constructor — parse *ttl* into a fresh ``rdflib.Graph``.
 
@@ -444,6 +452,7 @@ class SchemaResolver:
             default_graph_includes_named=default_graph_includes_named,
             permissive_class_resolution=permissive_class_resolution,
             fan_out_list_values=fan_out_list_values,
+            predicates=dict(predicates or {}),
         )
 
     @classmethod
@@ -453,6 +462,7 @@ class SchemaResolver:
         *,
         default_collection: str = "Document",
         permissive_class_resolution: bool = False,
+        predicates: Mapping[str, PredicateHandler] | None = None,
     ) -> SchemaResolver:
         """Build a resolver from a :class:`~arango_sparql.translate.mapping.MappingBundle`.
 
@@ -490,6 +500,7 @@ class SchemaResolver:
                 default_collection=default_collection,
                 shard_families=shard_families,
                 permissive_class_resolution=permissive_class_resolution,
+                predicates=dict(predicates or {}),
             )
         graph = _synthesize_graph_from_bundle(bundle)
         return cls(
@@ -497,6 +508,7 @@ class SchemaResolver:
             default_collection=default_collection,
             shard_families=shard_families,
             permissive_class_resolution=permissive_class_resolution,
+            predicates=dict(predicates or {}),
         )
 
     # ------------------------------------------------------------------

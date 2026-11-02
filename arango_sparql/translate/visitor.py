@@ -48,6 +48,7 @@ from .optional_crosssubject import (
 from .optional_subquery import emit_optional_subquery
 from .optional_subquery import needs_subquery as needs_optional_subquery
 from .paths import emit_path_triple
+from .predicates import LoopEmitter, LoopPlan, PredicateCall, extract_predicate_calls, resolve_call
 from .resolver import ResolvedClass, ResolvedProperty, SchemaResolver
 from .subselect import emit_to_multiset
 from .union_paths import emit_union
@@ -130,6 +131,9 @@ class _BindingState:
     Without the cache each FOR would mint its own bind, multiplying
     the bind-vars dict and obscuring the AQL."""
 
+    pending_calls: dict[str, PredicateCall] = field(default_factory=dict)
+    """Registered-predicate calls in the current BGP, by entity variable,
+    waiting for the entity's type pattern to open the loop they shape."""
     maybe_unbound: set[str] = field(default_factory=set)
     """SPARQL variables that can be unbound in a solution: bound by an
     OPTIONAL, a UNION arm that not every arm binds, a VALUES ``UNDEF``, a
@@ -1476,6 +1480,33 @@ class AlgebraVisitor:
     # ------------------------------------------------------------------
     def visit_BGP(self, node: Any) -> Any:
         triples = list(getattr(node, "triples", []) or [])
+        # A registered predicate, list cells included, is taken out before
+        # blank nodes become variables; its entity's type pattern then opens
+        # the loop the handler shapes (:mod:`.predicates`).
+        calls: list[PredicateCall] = []
+        if self.resolver.predicates:
+            triples, calls = extract_predicate_calls(triples, self.resolver.predicates)
+        for call in calls:
+            name = str(call.entity)
+            if name in self.state.var_to_expr or name in self.state.pending_calls:
+                raise call.refuse(
+                    f"?{name} must be opened by a type pattern in this group, not bound before it, "
+                    "and take one registered predicate"
+                )
+            self.state.pending_calls[name] = call
+        try:
+            self._emit_bgp(triples, first={str(c.entity) for c in calls})
+            for call in calls:
+                if str(call.entity) in self.state.pending_calls:
+                    raise call.refuse(
+                        f"needs ?{call.entity}'s class in the same group: add `?{call.entity} a <Class>` "
+                        "for a class stored in its own collection (not inside OPTIONAL, EXISTS or MINUS)"
+                    )
+        finally:
+            for call in calls:
+                self.state.pending_calls.pop(str(call.entity), None)
+
+    def _emit_bgp(self, triples: list[Any], *, first: frozenset[str] | set[str] = frozenset()) -> None:
 
         # SPARQL §17.4.1.10 / §18.5: a blank node in a query
         # pattern is an *existential variable scoped to the BGP*.
@@ -1557,8 +1588,18 @@ class AlgebraVisitor:
                 types.setdefault(str(t[0]), []).append(t)
         absorbed: list[tuple[Any, Any, Any]] = []
         try:
+            # A registered predicate's entity opens first: its loop may carry
+            # a SORT / LIMIT that must count the entity's own matches. Its
+            # type patterns are emitted before the rest, so the entity is
+            # bound by then and no walk into its class takes them.
+            leading = _order_bgp(
+                [t for t in triples if t[1] == RDF.type and str(t[0]) in first], bound, set(entries), exits
+            )
+            for triple in leading:
+                self._emit_triple(triple)
+            bound |= {str(term) for t in leading for term in t if isinstance(term, Variable)}
             for triple in _iter_bgp_order(
-                triples,
+                [t for t in triples if t not in leading],
                 bound,
                 set(entries),
                 exits,
@@ -1683,7 +1724,11 @@ class AlgebraVisitor:
                     )
                 self._open_classes(s, members, f"supertype {str(o)!r}")
                 return
-            alias = self._open_collection(resolved.collection, resolved=resolved)
+            call = self.state.pending_calls.pop(str(s), None) if isinstance(s, Variable) else None
+            if call is not None:
+                alias, plan = self._open_predicate_loop(call, resolved)
+            else:
+                alias, plan = self._open_collection(resolved.collection, resolved=resolved), None
             if resolved.type_field and resolved.type_value:
                 # Hybrid (multi-class) collection: the mapper emits a
                 # discriminator field; gate the FOR with it so we don't
@@ -1709,6 +1754,8 @@ class AlgebraVisitor:
                     self.state.const_subject_alias[str(s)] = alias
                 return
             self._bind_subject(s, alias)
+            if plan is not None:
+                self._finish_predicate_loop(plan)
             return
 
         # Case 2 — predicate is a fixed IRI (the common ``?s :name ?n`` shape).
@@ -1817,6 +1864,55 @@ class AlgebraVisitor:
     # ------------------------------------------------------------------
     # Internal: alias / FOR-clause management
     # ------------------------------------------------------------------
+    def _open_predicate_loop(self, call: PredicateCall, resolved: ResolvedClass) -> tuple[str, LoopPlan]:
+        """Open the entity's loop as a registered predicate's handler plans it
+        (:mod:`.predicates`); the plan's SORT / LIMIT and bindings follow in
+        :meth:`_finish_predicate_loop`, once the class's own tests are in."""
+        if resolved.shard_family is not None:
+            raise call.refuse(f"{resolved.iri} is sharded across collections; a predicate loop reads one")
+        handler = self.resolver.predicates[call.predicate]
+        prop = None
+        if call.arguments and isinstance(call.arguments[0], URIRef):
+            candidate = self.resolver.resolve_property(call.arguments[0])
+            if not candidate.is_object_property:
+                prop = candidate
+        resolved_call = resolve_call(call, resolved, prop)
+        had_loop = self.builder.has_for_clause()
+        alias = self.builder.fresh_alias()
+        plan = handler(resolved_call, LoopEmitter(self.builder, alias))
+        if (plan.sort is not None or plan.limit is not None) and had_loop:
+            raise call.refuse(
+                "a SORT or LIMIT must apply to the query's first loop; "
+                "here another pattern opens a loop before it"
+            )
+        unknown = sorted(set(plan.bindings) - {str(v) for v in call.subjects[1:]})
+        if unknown:
+            raise call.refuse(f"the handler bound variables not in its subject list: {unknown}")
+        self.builder.for_source(alias, plan.source, search=plan.search, options=plan.options)
+        if self.builder.collection_bound_to(plan.source) != resolved.collection:
+            # Another source (a view can link several collections): only the
+            # class's own documents are its members, whatever the handler
+            # restricts. Before the plan's SORT / LIMIT, so they count the
+            # class's matches. Left out on the collection itself, where it
+            # would only stand between a vector index and its SORT.
+            coll = self.builder.bind(resolved.collection, hint="coll")
+            self.builder.filter_raw(f"IS_SAME_COLLECTION({coll}, {alias})")
+        self.state.doc_to_collection[alias] = resolved.collection
+        self._apply_graph_scope(alias)
+        return alias, plan
+
+    def _finish_predicate_loop(self, plan: LoopPlan) -> None:
+        if plan.sort is not None:
+            self.builder.sort_here(plan.sort, descending=plan.descending)
+        if plan.limit is not None:
+            self.builder.limit_here(plan.limit)
+        for name, expression in plan.bindings.items():
+            if name in self.state.var_to_expr:
+                raise UnsupportedSparqlError(
+                    f"?{name}, bound by a registered predicate, is already bound", code="E_PREDICATE"
+                )
+            self.state.var_to_expr[name] = expression
+
     def _open_collection(
         self,
         collection: str,
