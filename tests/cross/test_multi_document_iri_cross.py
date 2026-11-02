@@ -210,6 +210,42 @@ GRAPH_OUTSIDE_STRICT = Store(
     resolver_kwargs={"default_graph_includes_named": False},
 )
 
+#: One IRI as a document per graph, read inside and outside ``GRAPH :g``
+#: (#119): a document read on one side of the boundary is not reused on the
+#: other. Strict default graph; with and without domains on the properties.
+_SCOPE_ONTOLOGY = (
+    PREFIXES
+    + """
+:Person a owl:Class ; phys:collectionName "Person" .
+:name a owl:DatatypeProperty ; rdfs:domain :Person .
+:age a owl:DatatypeProperty ; rdfs:domain :Person .
+:knows a owl:ObjectProperty ; phys:edgeCollectionName "knows" ; rdfs:domain :Person ; rdfs:range :Person .
+"""
+)
+_SCOPE_DOCS = {
+    "Person": [
+        {"_id": "Person/s0", "_uri": EX + "s", "name": "S-default"},
+        {"_id": "Person/sg", "_uri": EX + "s", "_graph": EX + "g", "name": "S-g", "age": 5},
+        {"_id": "Person/t0", "_uri": EX + "t", "name": "T"},
+    ],
+    "knows": [{"_id": "knows/1", "_from": "Person/s0", "_to": "Person/t0"}],
+}
+_SCOPE_DATA = (
+    ':s a :Person ; :name "S-default" ; :knows :t . :t a :Person ; :name "T" .\n'
+    ':g { :s a :Person ; :name "S-g" ; :age 5 . }'
+)
+_STRICT = {"default_graph_includes_named": False, "default_collection": "Person"}
+GRAPH_SCOPES = Store(_SCOPE_ONTOLOGY, _SCOPE_DOCS, _SCOPE_DATA, trig=True, resolver_kwargs=_STRICT)
+GRAPH_SCOPES_NO_DOMAIN = Store(
+    _SCOPE_ONTOLOGY.replace(" ; rdfs:domain :Person .\n:age", " .\n:age").replace(
+        ":age a owl:DatatypeProperty ; rdfs:domain :Person .", ":age a owl:DatatypeProperty ."
+    ),
+    _SCOPE_DOCS,
+    _SCOPE_DATA,
+    trig=True,
+    resolver_kwargs=_STRICT,
+)
+
 #: The same IRI in two tenants; the oracle holds tenant t1's facts. ``knows``
 #: declares no domain, so nothing else keeps the walk inside the tenant.
 TENANTS = Store(
@@ -486,6 +522,26 @@ _CASES: list[tuple[str, Store, str, str | None]] = [
         "SELECT ?m WHERE { GRAPH :g { ?p a :Person . ?m a :Post . ?m :hasCreator ?p } }",
         None,
     ),
+    *[
+        (f"scope_{name}{suffix}", store, query, None)
+        for suffix, store in (("", GRAPH_SCOPES), ("_no_domain", GRAPH_SCOPES_NO_DOMAIN))
+        for name, query in [
+            ("const_in_then_out", "SELECT ?n WHERE { GRAPH :g { :s a :Person } :s :name ?n }"),
+            ("const_out_then_in", "SELECT ?n WHERE { :s a :Person . GRAPH :g { :s :name ?n } }"),
+            ("const_both", "SELECT ?n ?m WHERE { :s :name ?n . GRAPH :g { :s :name ?m } }"),
+            ("const_both_reversed", "SELECT ?n ?m WHERE { GRAPH :g { :s :name ?m } :s :name ?n }"),
+            ("var_outer_then_in", "SELECT ?x WHERE { ?s :knows ?t . GRAPH :g { ?s :name ?x } }"),
+            (
+                "union_arms_in_graph",
+                "SELECT ?x WHERE { ?s :knows ?t . GRAPH :g { { ?s :name ?x } UNION { ?s :age ?x } } }",
+            ),
+            (
+                "typed_union_arms_in_graph",
+                "SELECT ?x WHERE { ?s a :Person . ?s :knows ?t . GRAPH :g { { ?s :name ?x } UNION { ?s :age ?x } } }",
+            ),
+            ("optional_graph", "SELECT ?s ?x WHERE { ?s :knows ?t . OPTIONAL { GRAPH :g { ?s :name ?x } } }"),
+        ]
+    ],
     ("tenant_reverse", TENANTS, "SELECT ?x ?y WHERE { ?y a :Person . ?x :knows ?y }", None),
     ("tenant_reverse_const", TENANTS, "SELECT ?x WHERE { :y a :Person . ?x :knows :y }", None),
     (

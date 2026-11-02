@@ -1456,6 +1456,15 @@ class AlgebraVisitor:
                 f"{type(term).__name__}; check the SPARQL grammar"
             )
         self.state.graph_scope.append(term)
+        # A document read outside this scope is not reused inside it, nor one
+        # read inside it outside (#119). One IRI is a document per graph
+        # (ADR-0001): ``:s :name ?n . GRAPH :g { :s :name ?m }`` read ``?m``
+        # from the default graph's copy, and a UNION arm under the GRAPH read
+        # the outer copy. Hidden here, a subject keeps its value and is joined
+        # on its IRI under this scope's filter; UNION arms, OPTIONAL bodies and
+        # probes spawned inside copy what is visible.
+        outer_docs, outer_consts = self.state.var_to_doc_alias, self.state.const_subject_alias
+        self.state.var_to_doc_alias, self.state.const_subject_alias = {}, {}
         try:
             self.visit(node.p)
         finally:
@@ -1463,6 +1472,7 @@ class AlgebraVisitor:
             # doesn't leave the scope stack corrupted for any
             # try/except higher up the call chain.
             self.state.graph_scope.pop()
+            self.state.var_to_doc_alias, self.state.const_subject_alias = outer_docs, outer_consts
 
     # ------------------------------------------------------------------
     # ToMultiSet — SPARQL sub-SELECT and VALUES. Delegated to
