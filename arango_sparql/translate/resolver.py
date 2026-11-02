@@ -385,6 +385,8 @@ class SchemaResolver:
     _triple_store_class: ResolvedClass | None = field(default=None)
     """Cached result of :meth:`triple_store_class`."""
     _triple_store_checked: bool = field(default=False)
+    _tenant_scoped_classes: tuple[ResolvedClass, ...] | None = field(default=None)
+    """Cached result of :meth:`tenant_scoped_classes`."""
     _nested_properties: tuple[str, ...] | None = field(default=None)
     """Lazily-built IRIs of datatype properties stored in a nested object."""
     _shard_family_by_collection: dict[str, tuple[str, ...]] = field(default_factory=dict)
@@ -962,6 +964,52 @@ class SchemaResolver:
             return None
         self._triple_store_class = replace(resolved[0], iri=TRIPLE_STORE_IRI)
         return self._triple_store_class
+
+    def tenant_scoped_classes(self, *, rpt: bool = False) -> tuple[ResolvedClass, ...]:
+        """The classes that declare ``phys:tenantField``: stored as documents,
+        or with *rpt* the triples-table (RPT) ones.
+
+        A document a walk reaches (an edge's far vertex, the source of a
+        backward walk) is not opened by its class, so nothing applied that
+        class's tenant FILTER; the visitor tests it against every document
+        class here (issue #118), and refuses reading a triples table that an
+        RPT class here uses. A class that does not resolve still counts, from
+        its ``phys:collectionName``, so its documents are not left unguarded.
+        Resolving the classes reports no advisory and caches nothing, so a
+        class the query names later still gets its own.
+        """
+        if self._tenant_scoped_classes is None:
+            found: list[ResolvedClass] = []
+            warnings, warned, cache = list(self.warnings), set(self._warned_keys), dict(self._class_cache)
+            try:
+                for cls in sorted(self.ontology.subjects(RDF.type, OWL.Class), key=str):
+                    if not isinstance(cls, URIRef):
+                        continue
+                    tenant_field = self._physical_string(cls, "tenantField")
+                    if tenant_field is None:
+                        continue
+                    try:
+                        resolved = self.resolve_class(cls)
+                    except SchemaResolutionError:
+                        collection = self._physical_string(cls, "collectionName")
+                        if not collection:
+                            continue
+                        resolved = ResolvedClass(
+                            iri=str(cls),
+                            collection=collection,
+                            tenant_field=tenant_field,
+                            tenant_entity=self._physical_string(cls, "tenantEntity"),
+                        )
+                    if resolved.tenant_field and resolved.style != "UNION" and resolved.collection:
+                        found.append(resolved)
+            finally:
+                self.warnings[:] = warnings
+                self._warned_keys.clear()
+                self._warned_keys.update(warned)
+                self._class_cache.clear()
+                self._class_cache.update(cache)
+            self._tenant_scoped_classes = tuple(found)
+        return tuple(c for c in self._tenant_scoped_classes if (c.style == "RPT") == rpt)
 
     def edge_properties(self) -> tuple[ResolvedProperty, ...]:
         """Return edge-backed object properties in deterministic IRI order.

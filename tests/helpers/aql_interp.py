@@ -294,6 +294,16 @@ _AQL_BUILTINS: dict[str, Any] = {
     # folding the expression into a constant. A VALUES semi-join keeps its
     # ``IN`` list a variable that way (``LET values3 = NOOPT(@_p1_values)``).
     "NOOPT": lambda v: v,
+    # ``TRANSLATE(value, lookup, default)``: *lookup*'s entry for *value*,
+    # else *default*. The tenant test reads a collection's scoped labels so.
+    "TRANSLATE": lambda value, lookup, default=None: (
+        lookup.get(value, default) if isinstance(lookup, dict) and isinstance(value, str) else default
+    ),
+    # The tenant test of a walked document (issue #118).
+    "FIRST": lambda v: v[0] if isinstance(v, list) and v else None,
+    "SPLIT": lambda v, sep: None if v is None else str(v).split(sep),
+    "TO_ARRAY": lambda v: [] if v is None else (v if isinstance(v, list) else [v]),
+    "INTERSECTION": lambda a, b: [x for x in (a or []) if x in (b or [])],
     "LOWER": lambda v: None if v is None else str(v).lower(),
     "UPPER": lambda v: None if v is None else str(v).upper(),
     "LENGTH": lambda v: None if v is None else len(v),
