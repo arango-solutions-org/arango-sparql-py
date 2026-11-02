@@ -10,6 +10,8 @@ the collections for a PG one: plan decision D9).
 
 from __future__ import annotations
 
+import re
+
 from arango_sparql.api import translate
 from arango_sparql.translate.resolver import SchemaResolver
 from tests.cross.test_routing_cross import LPG_ONTOLOGY, PG_ONTOLOGY
@@ -140,3 +142,74 @@ def test_a_value_bound_object_is_looked_up_and_walked_inbound() -> None:
         "FILTER (IS_SAME_COLLECTION(@_p2_coll, v3) || IS_SAME_COLLECTION(@_p3_coll, v3))\n"
         "RETURN { m: NOT_NULL(v3._uri, v3._id) }"
     )
+
+
+def test_a_reverse_walk_from_a_bound_document_starts_from_every_copy_in_the_range() -> None:
+    # One IRI can be several documents (#105): the edge may point at a copy
+    # other than the bound one, so its copies in the range are walked too.
+    assert _aql(PG_ONTOLOGY, "SELECT ?m WHERE { ?p a :Person . ?m :hasCreator ?p }") == (
+        "FOR doc1 IN @@c1_Person\n"
+        "FOR doc4 IN UNION(\n"
+        "(\n"
+        "  FOR doc2 IN [doc1]\n"
+        "  FILTER !(IS_SAME_COLLECTION(@_p1_coll, doc2))\n"
+        "  RETURN doc2\n"
+        "),\n"
+        "(\n"
+        "  FOR doc3 IN @@c2_Person\n"
+        "  FILTER (NOT_NULL(doc1._uri, doc1._id) != null && (doc3._uri == NOT_NULL(doc1._uri, doc1._id) "
+        "|| (doc3._uri == null && doc3._id == NOT_NULL(doc1._uri, doc1._id))))\n"
+        "  RETURN doc3\n"
+        ")\n"
+        ")\n"
+        "FOR v5, e6 IN INBOUND doc4 @@c3_has_creator\n"
+        "FILTER (IS_SAME_COLLECTION(@_p2_coll, v5) || IS_SAME_COLLECTION(@_p3_coll, v5))\n"
+        "RETURN { m: NOT_NULL(v5._uri, v5._id) }"
+    )
+
+
+_NO_RANGE = """
+@prefix : <http://ex.org/> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix phys: <https://arango.solutions/phys#> .
+:Person a owl:Class ; phys:collectionName "Person" .
+:Agent a owl:Class ; phys:collectionName "Agent" .
+:knows a owl:ObjectProperty ; phys:edgeCollectionName "knows" .
+"""
+
+
+def test_without_a_range_the_walk_starts_from_the_bound_document_alone() -> None:
+    # Looking for copies in every mapped collection would read collections
+    # the database may not have (ERR 1203; the /sparql route's default
+    # ``Document`` among them), so an edge into another copy is a known
+    # limit there (#105).
+    aql = _aql(_NO_RANGE, "SELECT ?x WHERE { ?y a :Person . ?x :knows ?y }")
+    assert "UNION" not in aql
+    assert "FOR v2, e3 IN INBOUND doc1 @@c2_knows\n" in aql
+
+
+_SCOPED = """
+@prefix : <http://ex.org/> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix phys: <https://arango.solutions/phys#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+:Person a owl:Class ; phys:collectionName "Person" ; phys:tenantField "org" ; phys:tenantEntity "Org" .
+:knows a owl:ObjectProperty ; phys:edgeCollectionName "knows" ; rdfs:range :Person .
+"""
+
+
+def test_each_copy_is_read_as_its_class_in_the_active_graph() -> None:
+    # A copy is read as a document of the range class would be: its tenant
+    # FILTER, and the active GRAPH scope (the scope's graph, not the bound
+    # document's: an object bound outside the scope has its copy inside it).
+    # Unscoped, the walk returned other tenants' and other graphs' edges.
+    resolver = SchemaResolver.from_turtle(_SCOPED)
+    result = translate(
+        "PREFIX : <http://ex.org/>\nSELECT ?x WHERE { GRAPH :g { ?y a :Person . ?x :knows ?y } }",
+        resolver=resolver,
+        tenant_id="t1",
+    )
+    arm = result.aql.split("FOR doc3 IN @@c2_Person\n", 1)[1].split("RETURN doc3", 1)[0]
+    graph = re.search(r"FILTER doc3\._graph == @(\w+)\n", arm)
+    assert graph is not None and result.bind_vars[graph.group(1)] == "http://ex.org/g"
+    assert "FILTER doc3.org == @" in arm

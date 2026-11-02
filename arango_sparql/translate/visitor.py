@@ -1849,6 +1849,22 @@ class AlgebraVisitor:
         self._apply_graph_scope(alias)
         return alias
 
+    def _graph_scope_test(self, alias: str) -> str | None:
+        """The FILTER the active named-graph scope puts on *alias*, without
+        binding anything; ``None`` when there is none to apply.
+
+        As :meth:`_apply_graph_scope`, except that a GRAPH variable not bound
+        yet is left free (whatever document binds it applies the scope).
+        """
+        lhs = attribute_ref(alias, self.resolver.graph_field)
+        if not self.state.graph_scope:
+            return None if self.resolver.default_graph_includes_named else f"{lhs} == null"
+        graph_term = self.state.graph_scope[-1]
+        if isinstance(graph_term, URIRef):
+            return f"{lhs} == {self.builder.bind(str(graph_term), hint='graph')}"
+        existing = self.state.var_to_expr.get(str(graph_term))
+        return None if existing is None else f"{lhs} == {existing}"
+
     def _apply_graph_scope(self, alias: str) -> None:
         """Attach the active named-graph scope to a freshly-opened FOR.
 
@@ -1913,7 +1929,9 @@ class AlgebraVisitor:
             # this alias's graph_field and the existing expression.
             self.builder.filter_raw(f"{lhs} == {existing}")
 
-    def _enforce_tenant_scope(self, alias: str, resolved: ResolvedClass) -> None:
+    def _enforce_tenant_scope(
+        self, alias: str, resolved: ResolvedClass, builder: AqlQueryBuilder | None = None
+    ) -> None:
         """Emit the per-entity tenant FILTER for an opened FOR alias.
 
         PRD §6.5.1: every read of a tenant-scoped entity gets a
@@ -1957,7 +1975,7 @@ class AlgebraVisitor:
             )
         if self.state.tenant_bind_placeholder is None:
             self.state.tenant_bind_placeholder = self.builder.bind(self.tenant_id, hint="tenant")
-        self.builder.filter_eq(
+        (builder or self.builder).filter_eq(
             attribute_ref(alias, resolved.tenant_field),
             self.state.tenant_bind_placeholder,
         )
@@ -2441,20 +2459,22 @@ class AlgebraVisitor:
         scanned every message). ``None`` when the object cannot be found
         that way. The range is trusted as where the object is stored, as
         :meth:`_route_by_domain` trusts the domain: an object stored outside
-        it is not found (PRD §6.1).
+        it is not found (PRD §6.1). An object already bound to a document
+        is walked from every document carrying its IRI
+        (:meth:`_every_copy`).
         """
         if isinstance(obj, Variable):
             name = str(obj)
             alias = self.state.var_to_doc_alias.get(name)
             if alias is not None:
-                return alias
+                return self._every_copy(alias, range_iri)
             value = self.state.var_to_expr.get(name)
             if value is None:
                 return None
         elif isinstance(obj, URIRef):
             known = self.state.const_subject_alias.get(str(obj))
             if known is not None:
-                return known
+                return self._every_copy(known, range_iri)
             value = None
         else:
             return None
@@ -2487,6 +2507,81 @@ class AlgebraVisitor:
         self.builder.filter_raw(subject_matches(alias, uri_bind))
         self.state.const_subject_alias[str(obj)] = alias
         return alias
+
+    def _every_copy(self, alias: str, range_iri: str | None) -> str:
+        """The documents carrying the IRI of the document at *alias* that an
+        edge can point at, as one alias to walk backwards from (issue #105).
+
+        One IRI can be several documents (an entity of two classes, one
+        document per named graph), and an edge points at one of them, not
+        necessarily the one bound: walking back from that one alone missed
+        the others' edges, where the forward plan, which joins on the IRI,
+        finds them. The copies are looked up by an indexed ``_uri`` match in
+        the collections of the property's declared ``rdfs:range`` (trusted
+        as where the object is stored, PRD §6.1), each read as a document of
+        that class would be: its tenant FILTER, and the active named-graph
+        scope (:meth:`_graph_scope_test`) — the scope's graph, not the bound
+        document's: an object bound outside ``GRAPH :g`` is walked inside it
+        from its copy in ``:g``. The bound
+        document is kept too when it is in none of those collections, so an
+        edge into it is never lost; the arms are disjoint, so each document
+        is walked once (a plain ``UNION``: ``UNION_DISTINCT`` compares whole
+        documents, LDBC IC8 PG ran 0.06 s → 0.18 s with it).
+
+        With no declared range (the W3C loader's layout, for one) the walk
+        starts from the bound document alone, as before: looking in every
+        mapped collection would read collections the database may not have
+        (ERR 1203, the ``Document`` default of the ``/sparql`` route among
+        them), so an edge into another copy there is a known limit (#105).
+        """
+        by_collection = self._range_classes(range_iri)
+        if not by_collection:
+            return alias
+        in_scope = self._graph_scope_test
+        arms = []
+        bound = self.builder.create_child()
+        inner = bound.fresh_alias()
+        bound.for_inline(inner, f"[{alias}]")
+        elsewhere = " || ".join(
+            f"IS_SAME_COLLECTION({bound.bind(c, hint='coll')}, {inner})" for c in by_collection
+        )
+        bound.filter_raw(f"!({elsewhere})")
+        bound.return_scalar(inner)
+        arms.append(self.builder.absorb_child(bound))
+        for collection, classes in by_collection.items():
+            child = self.builder.create_child()
+            inner = child.fresh_alias()
+            child.for_(inner, collection)
+            child.filter_raw(subject_matches_value(inner, subject_ref(alias)))
+            scope = in_scope(inner)
+            if scope is not None:
+                child.filter_raw(scope)
+            for tenant in {(c.tenant_field, c.tenant_entity): c for c in classes}.values():
+                self._enforce_tenant_scope(inner, tenant, builder=child)
+            child.return_scalar(inner)
+            arms.append(self.builder.absorb_child(child))
+        copies = self.builder.fresh_alias()
+        self.builder.for_union(copies, arms, scans_documents=True)
+        return copies
+
+    def _range_classes(self, range_iri: str | None) -> dict[str, list[ResolvedClass]]:
+        """The document classes of a declared ``rdfs:range`` (a supertype's
+        members), by the collection each is stored in (a sharded class in
+        each member of its family); empty when there is no range or it is
+        not stored as documents (RPT)."""
+        if range_iri is None:
+            return {}
+        try:
+            classes = self._concrete_classes((range_iri,))
+        except SchemaResolutionError:
+            return {}
+        if not classes or any(c.style == "RPT" for c in classes):
+            return {}
+        out: dict[str, list[ResolvedClass]] = {}
+        for c in classes:
+            for name in c.shard_family or (c.collection,):
+                out.setdefault(name, []).append(c)
+        return dict(sorted(out.items()))
 
     def _concrete_classes(self, class_iris: tuple[str, ...] | list[str]) -> list[ResolvedClass]:
         """Resolve *class_iris*, without duplicates: a ``UNION`` supertype
