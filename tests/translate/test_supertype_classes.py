@@ -122,7 +122,8 @@ def test_a_supertype_without_members_is_a_mapping_error() -> None:
 
 def test_a_supertype_type_pattern_reads_every_member_collection() -> None:
     # Before: FOR doc1 IN @@c1_Message, a collection that does not exist.
-    assert _aql(UNION_TTL, "SELECT ?m WHERE { ?m a :Message }") == (
+    aql = _aql(UNION_TTL, "SELECT ?m WHERE { ?m a :Message }")
+    assert aql.startswith(
         "FOR doc3 IN UNION(\n"
         "(\n"
         "  FOR doc1 IN @@c1_Comment\n"
@@ -133,8 +134,9 @@ def test_a_supertype_type_pattern_reads_every_member_collection() -> None:
         "  RETURN doc2\n"
         ")\n"
         ")\n"
-        "RETURN { m: NOT_NULL(doc3._uri, doc3._id) }"
     )
+    # An IRI in both members is one Message: the Post copy is dropped (#124).
+    assert "FILTER repeated5 == 0\nRETURN { m: NOT_NULL(doc3._uri, doc3._id) }" in aql
 
 
 def test_a_constant_subject_of_a_supertype_is_looked_up_in_each_member() -> None:
@@ -248,3 +250,21 @@ def test_supertype_members_agree_with_arango_query_core() -> None:
         "Node",
         True,
     )
+
+
+def test_a_described_subject_keeps_every_copy() -> None:
+    # DESCRIBE reads every attribute of every copy (review of #146, #124).
+    assert "repeated" not in _aql(UNION_TTL, "DESCRIBE ?m WHERE { ?m a :Message }")
+
+
+def test_only_an_iri_is_probed_for_another_copy() -> None:
+    # An ``_id`` names one collection's document, so a row without ``_uri``
+    # repeats nothing; the guard keeps it from probing (a full scan per row
+    # on such data, review of #146). The guard is a ternary around the
+    # subquery, not a FILTER inside it, so such a row starts no subquery.
+    aql = _aql(UNION_TTL, "SELECT ?m WHERE { ?m a :Message }")
+    assert (
+        "doc3)) && doc3._uri != null) ? LENGTH((\n  FOR doc4 IN @@c3_Comment\n  FILTER doc4._uri == doc3._uri\n"
+        in aql
+    )
+    assert ")) : 0\nFILTER repeated5 == 0\n" in aql

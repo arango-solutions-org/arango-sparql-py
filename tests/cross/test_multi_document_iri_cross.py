@@ -48,6 +48,9 @@ class Store:
     resolver_kwargs: dict[str, Any] = field(default_factory=dict)
     strict: bool = False  # strict_subject_resolution, as the service's mapping sets it
     tenant_id: str | None = None
+    # The oracle reads the default graph as the union of every graph (the
+    # lax default graph); otherwise as the default graph only.
+    union_default_graph: bool = False
 
 
 PG_TWO_CLASSES = Store(
@@ -485,6 +488,60 @@ UNDECLARED_MIXED_DOMAIN = Store(
     data=":a a :Person ; :age 3 . :o a :Org ; :age 9 . :z :age 1 .",
 )
 
+#: A PG entity in two member collections of a supertype / union domain
+#: (#124): ``:s`` holds the same name in both, ``:d`` a different one in each,
+#: ``:m`` a name in Person only. One IRI is one subject: ``:s`` comes back
+#: once, ``:d`` once per name.
+UNION_COPIES = Store(
+    ontology=PREFIXES
+    + """
+:Person a owl:Class ; phys:collectionName "Person" ; rdfs:subClassOf :Agent .
+:Org a owl:Class ; phys:collectionName "Org" ; rdfs:subClassOf :Agent .
+:Agent a owl:Class ; phys:mappingStyle "UNION" .
+:Employee a owl:Class ; phys:collectionName "Employee" .
+:name a owl:DatatypeProperty ; rdfs:domain [ owl:unionOf ( :Person :Org ) ] .
+:age a owl:DatatypeProperty ; rdfs:domain :Agent .
+:salary a owl:DatatypeProperty ; rdfs:domain [ owl:unionOf ( :Org :Employee ) ] .
+:knows a owl:ObjectProperty ; phys:edgeCollectionName "knows" ; rdfs:domain :Person .
+""",
+    docs={
+        "Person": [
+            {"_id": "Person/s", "_uri": EX + "s", "name": "S", "age": 3},
+            {"_id": "Person/d", "_uri": EX + "d", "name": "D1"},
+            {"_id": "Person/m", "_uri": EX + "m", "name": "M"},
+            {"_id": "Person/g", "_uri": EX + "g1", "_graph": EX + "g", "name": "G"},
+            {"_id": "Person/x", "_uri": EX + "x", "name": "X"},
+        ],
+        "Org": [
+            {"_id": "Org/s", "_uri": EX + "s", "name": "S", "age": 3},
+            {"_id": "Org/d", "_uri": EX + "d", "name": "D2"},
+            {"_id": "Org/m", "_uri": EX + "m"},
+            {"_id": "Org/g", "_uri": EX + "g1", "_graph": EX + "g", "name": "G"},
+        ],
+        "Employee": [{"_id": "Employee/s", "_uri": EX + "s", "salary": 10}],
+        "knows": [{"_id": "knows/1", "_from": "Person/x", "_to": "Person/s"}],
+    },
+    data=':s a :Person, :Org, :Agent, :Employee ; :name "S" ; :age 3 ; :salary 10 . '
+    ':d a :Person, :Org, :Agent ; :name "D1", "D2" . :m a :Person, :Org, :Agent ; :name "M" . '
+    ':x a :Person, :Agent ; :name "X" ; :knows :s .\n:g { :g1 a :Person, :Org, :Agent ; :name "G" . }',
+    trig=True,
+    resolver_kwargs={"default_graph_includes_named": False},
+)
+
+#: Copies of ``:s`` in two named graphs, read through the lax default graph
+#: (the union of every graph): two quads, so ``:s`` comes back once per
+#: graph, as pyoxigraph and main read it (review of #146).
+UNION_GRAPH_COPIES = Store(
+    ontology=UNION_COPIES.ontology,
+    docs={
+        "Person": [{"_id": "Person/s", "_uri": EX + "s", "_graph": EX + "g2", "name": "S"}],
+        "Org": [{"_id": "Org/s", "_uri": EX + "s", "_graph": EX + "g1", "name": "S"}],
+    },
+    data=':g1 { :s a :Org, :Agent ; :name "S" . }\n:g2 { :s a :Person, :Agent ; :name "S" . }',
+    trig=True,
+    union_default_graph=True,
+)
+
 #: A symmetric property with a self-loop: ``:a :knows :a`` is one triple,
 #: however many ends the edge has (#121). The oracle holds the closure.
 SYMMETRIC_SELF_LOOP = Store(
@@ -687,6 +744,33 @@ LPG_LABELS = Store(
 
 _CASES: list[tuple[str, Store, str, str | None]] = [
     # (id, store, query, issue it is wrong under on main — or None)
+    *[
+        (f"union_copies_{name}", UNION_COPIES, query, None)
+        for name, query in [
+            ("untyped_attribute", "SELECT ?s ?n WHERE { ?s :name ?n }"),
+            ("constant_attribute", "SELECT ?n WHERE { :s :name ?n }"),
+            ("count", "SELECT (COUNT(*) AS ?c) WHERE { ?s :name ?n }"),
+            ("supertype", "SELECT ?s WHERE { ?s a :Agent }"),
+            ("supertype_attribute", "SELECT ?s ?n WHERE { ?s a :Agent ; :name ?n }"),
+            ("two_attributes", "SELECT ?s ?n ?a WHERE { ?s :name ?n ; :age ?a }"),
+            ("graph", "SELECT ?s ?n WHERE { GRAPH :g { ?s :name ?n } }"),
+            # Review of #146: only the Person copy has the edge, so both
+            # copies stay; so do the copies of an attribute read from another
+            # copy (#141).
+            ("incoming_edge", "SELECT ?x ?s WHERE { ?s a :Agent . ?x :knows ?s }"),
+            ("incoming_path", "SELECT ?x ?s WHERE { ?s a :Agent . ?x :knows+ ?s }"),
+            ("inverse_path", "SELECT ?s ?x WHERE { ?s a :Agent . ?s ^:knows ?x }"),
+            ("attribute_from_another_copy", "SELECT ?s ?y WHERE { ?s a :Agent ; :salary ?y }"),
+        ]
+    ],
+    *[
+        (f"union_graph_copies_{name}", UNION_GRAPH_COPIES, query, None)
+        for name, query in [
+            ("untyped_attribute", "SELECT ?s ?n WHERE { ?s :name ?n }"),
+            ("supertype", "SELECT ?s WHERE { ?s a :Agent }"),
+            ("one_graph", "SELECT ?s WHERE { GRAPH :g1 { ?s :name ?n } }"),
+        ]
+    ],
     *[
         (f"optional_scope_{name}", OPTIONAL_SCOPE, query, None)
         for name, query in [
@@ -1241,7 +1325,10 @@ def oracle_rows(store: Store, query: str) -> list[dict[str, Any]]:
     oracle.load(
         (PREFIXES + store.data).encode(), format=oxi.RdfFormat.TRIG if store.trig else oxi.RdfFormat.TURTLE
     )
-    return [normalize_oxi_row(r) for r in oxi_bindings(oracle, "PREFIX : <http://ex.org/>\n" + query)]
+    rows = oxi_bindings(
+        oracle, "PREFIX : <http://ex.org/>\n" + query, union_default_graph=store.union_default_graph
+    )
+    return [normalize_oxi_row(r) for r in rows]
 
 
 @pytest.mark.parametrize("store, query", case_params(interpreter=True))

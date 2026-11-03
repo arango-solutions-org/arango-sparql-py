@@ -617,7 +617,28 @@ routes the subject (`translate/visitor.py`):
   every one of them with `FOR … IN UNION((FOR … RETURN …), …)`, each arm
   carrying its own label test and, for a constant subject, its own indexed
   `_uri` match (`_open_class_union`, LDBC plan decision D9). A `UNION`
-  supertype in the domain stands for its members.
+  supertype in the domain stands for its members. One IRI stored in two
+  members (a PG entity of two classes) is one subject: once the BGP's
+  triples have filtered the rows, a row is dropped when an earlier member
+  (in name order) holds a copy with the same `_uri`, in the same graph (a
+  copy in another named graph is another quad) and tenant, and the same
+  value or absence for every attribute the query reads on the subject
+  (`_drop_repeated_copies`, #124). Every copy is kept when the query reaches
+  the subject by an edge or a path (as subject or object), uses a variable
+  predicate on it, reads one of its attributes from another copy
+  (`_attribute_source`), describes it, or binds `GRAPH ?g` per copy, and in
+  a child scope (a UNION arm, a sub-select, an OPTIONAL or EXISTS body). A
+  row with no `_uri` (an `_id` identity names one collection's document) is
+  never probed: the row's collection and `_uri` guard the probe in a
+  ternary, and ArangoDB starts no subquery in the branch it does not take.
+  The probe is an indexed `_uri` lookup: a member collection
+  whose documents carry `_uri` needs a persistent index on it, as the copy
+  and constant-subject lookups above already do; without one each union
+  row scans the earlier member. Even with the index, a union read with
+  nothing else to narrow it pays a check per later-member row (2 × 100k:
+  0.16 s against 0.03 s without the check; 0.09 s on `_id`-only data,
+  where the guard alone runs). Known limit: an OPTIONAL attribute held by
+  only one copy still yields a row per copy.
   A repeated `rdfs:domain` or `rdfs:range` (one triple per class, as
   arango-query-core's `mapping_to_turtle` and the schema analyzer's
   `owl_export` write for a shared property) means any of the classes, like

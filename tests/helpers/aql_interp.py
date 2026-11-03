@@ -52,9 +52,12 @@ _RETURN_SCALAR_RE = re.compile(r"RETURN\s+(?!DISTINCT\b)([^{].*?)\s*$")
 # a bare ``))`` closes it, and the lines between are a self-contained
 # (but outer-correlated) FOR/FILTER/LIMIT/RETURN-scalar query. The
 # interpreter executes that inner query against the current outer row's
-# environment and binds ``<alias>`` to the resulting row count.
-_LEN_SUBQUERY_START_RE = re.compile(r"LET\s+(\w+)\s*=\s*LENGTH\(\(\s*$")
-_SUBQUERY_END_RE = re.compile(r"^\)\)\s*$")
+# environment and binds ``<alias>`` to the resulting row count. A guarded
+# probe (#124's repeated-copy check) is ``LET <alias> = (<guard>) ?
+# LENGTH((`` … ``)) : 0``: the guard runs as the inner query's first FILTER,
+# which counts the same 0 when it fails.
+_LEN_SUBQUERY_START_RE = re.compile(r"LET\s+(\w+)\s*=\s*(?:\((.*)\)\s*\?\s*)?LENGTH\(\(\s*$")
+_SUBQUERY_END_RE = re.compile(r"^\)\)(?:\s*:\s*0)?\s*$")
 # Row-returning correlated subquery the cross-subject OPTIONAL emitter
 # (ADR-0002 Problem 1, Option A) binds to a LET: ``LET <alias> = (``
 # opens the block, a bare ``)`` closes it, and the inner lines are a
@@ -854,6 +857,8 @@ def run_aql_subset(
             if i >= len(lines):  # pragma: no cover - malformed AQL
                 raise AssertionError("unterminated LENGTH(( subquery in AQL")
             i += 1  # skip the closing ``))``
+            if guard := m.group(2):
+                inner.insert(1, f"FILTER {guard}")
             sub_step: tuple[str, Any, Any] = ("SUBQUERY_LEN", alias, "\n".join(inner))
             (post_collect_steps if seen_collect else pre_collect_plan).append(sub_step)
             continue
