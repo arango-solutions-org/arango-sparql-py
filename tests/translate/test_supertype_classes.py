@@ -122,7 +122,8 @@ def test_a_supertype_without_members_is_a_mapping_error() -> None:
 
 def test_a_supertype_type_pattern_reads_every_member_collection() -> None:
     # Before: FOR doc1 IN @@c1_Message, a collection that does not exist.
-    assert _aql(UNION_TTL, "SELECT ?m WHERE { ?m a :Message }") == (
+    aql = _aql(UNION_TTL, "SELECT ?m WHERE { ?m a :Message }")
+    assert aql.startswith(
         "FOR doc3 IN UNION(\n"
         "(\n"
         "  FOR doc1 IN @@c1_Comment\n"
@@ -133,8 +134,9 @@ def test_a_supertype_type_pattern_reads_every_member_collection() -> None:
         "  RETURN doc2\n"
         ")\n"
         ")\n"
-        "RETURN { m: NOT_NULL(doc3._uri, doc3._id) }"
     )
+    # An IRI in both members is one Message: the Post copy is dropped (#124).
+    assert "FILTER repeated5 == 0\nRETURN { m: NOT_NULL(doc3._uri, doc3._id) }" in aql
 
 
 def test_a_constant_subject_of_a_supertype_is_looked_up_in_each_member() -> None:

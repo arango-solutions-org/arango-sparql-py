@@ -617,7 +617,17 @@ routes the subject (`translate/visitor.py`):
   every one of them with `FOR … IN UNION((FOR … RETURN …), …)`, each arm
   carrying its own label test and, for a constant subject, its own indexed
   `_uri` match (`_open_class_union`, LDBC plan decision D9). A `UNION`
-  supertype in the domain stands for its members.
+  supertype in the domain stands for its members. One IRI stored in two
+  members (a PG entity of two classes) is one subject: once the BGP's
+  triples have filtered the rows, a row is dropped when an earlier member
+  (in name order) holds a copy with the same IRI, in the same graph scope
+  and tenant, and the same value or absence for every attribute the query
+  reads on the subject (`_drop_repeated_copies`, #124). When the query
+  walks an edge, uses a variable predicate or a path on the subject, or
+  binds `GRAPH ?g` per copy, every copy is kept (their edges and graphs
+  differ); so is every copy read in a child scope (a UNION arm, a
+  sub-select, an OPTIONAL or EXISTS body). Known limit: an OPTIONAL
+  attribute held by only one copy still yields a row per copy.
   A repeated `rdfs:domain` or `rdfs:range` (one triple per class, as
   arango-query-core's `mapping_to_turtle` and the schema analyzer's
   `owl_export` write for a shared property) means any of the classes, like

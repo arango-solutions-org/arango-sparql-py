@@ -18,7 +18,7 @@ from typing import Any
 from .translate.builder import AqlQueryBuilder
 from .translate.parser import parse_sparql
 from .translate.resolver import SchemaResolver
-from .translate.visitor import AlgebraVisitor
+from .translate.visitor import AlgebraVisitor, collect_query_triples
 
 __all__ = [
     "TranslateResult",
@@ -100,6 +100,7 @@ def translate(
         describe_resources=parsed.describe_resources,
         base_iri=parsed.base_iri,
         tenant_id=tenant_id,
+        query_triples=collect_query_triples(parsed.algebra),
     )
     visitor.visit(parsed.algebra)
     aql, bind_vars = builder.finalize()

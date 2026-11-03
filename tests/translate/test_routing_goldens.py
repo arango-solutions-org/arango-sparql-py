@@ -88,7 +88,8 @@ def test_a_pg_union_domain_reads_each_collection() -> None:
 def test_a_constant_subject_in_a_pg_union_domain_is_looked_up_in_each_collection() -> None:
     # The indexed _uri match sits inside each arm, so each collection's index
     # serves it, instead of filtering the union of two full scans.
-    assert _aql(PG_ONTOLOGY, "SELECT ?c WHERE { :comm1 :content ?c }") == (
+    aql = _aql(PG_ONTOLOGY, "SELECT ?c WHERE { :comm1 :content ?c }")
+    assert aql.startswith(
         "FOR doc3 IN UNION(\n"
         "(\n"
         "  FOR doc1 IN @@c1_Comment\n"
@@ -102,21 +103,23 @@ def test_a_constant_subject_in_a_pg_union_domain_is_looked_up_in_each_collection
         ")\n"
         ")\n"
         'FILTER HAS(doc3, "content")\n'
-        "RETURN { c: doc3.content }"
     )
+    # A Post copy repeating a Comment copy's content is dropped (#124).
+    assert "FILTER repeated5 == 0\nRETURN { c: doc3.content }" in aql
 
 
 def test_a_pg_union_row_counts_as_a_scanned_document() -> None:
     # Every union row is a whole document, never null, so COUNT(?m) counts
     # rows (issue #46) as it would for a single-collection scan.
     aql = _aql(PG_ONTOLOGY, "SELECT (COUNT(?m) AS ?n) WHERE { ?m :content ?c }")
-    assert aql.endswith("COLLECT WITH COUNT INTO agg4\nRETURN { n: agg4 }")
+    assert re.search(r"COLLECT WITH COUNT INTO (agg\d+)\nRETURN \{ n: \1 \}$", aql)
 
 
 def test_a_value_bound_subject_in_a_pg_union_is_matched_inside_each_arm() -> None:
     # AQL materialises each UNION arm, so a match after the union would copy
     # every Post and Comment first (LDBC IS2 hit the memory cap that way).
-    assert _aql(PG_ONTOLOGY, "SELECT ?m ?c WHERE { VALUES ?m { :post2 :comm1 } ?m :content ?c }") == (
+    aql = _aql(PG_ONTOLOGY, "SELECT ?m ?c WHERE { VALUES ?m { :post2 :comm1 } ?m :content ?c }")
+    assert aql.startswith(
         "FOR row1 IN @_p1_values\n"
         "FOR doc4 IN UNION(\n"
         "(\n"
@@ -131,8 +134,8 @@ def test_a_value_bound_subject_in_a_pg_union_is_matched_inside_each_arm() -> Non
         ")\n"
         ")\n"
         'FILTER HAS(doc4, "content")\n'
-        "RETURN { m: row1.m, c: doc4.content }"
     )
+    assert aql.endswith("RETURN { m: row1.m, c: doc4.content }")
 
 
 def test_a_value_bound_object_is_looked_up_and_walked_inbound() -> None:

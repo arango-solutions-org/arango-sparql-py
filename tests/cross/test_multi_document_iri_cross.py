@@ -485,6 +485,39 @@ UNDECLARED_MIXED_DOMAIN = Store(
     data=":a a :Person ; :age 3 . :o a :Org ; :age 9 . :z :age 1 .",
 )
 
+#: A PG entity in two member collections of a supertype / union domain
+#: (#124): ``:s`` holds the same name in both, ``:d`` a different one in each,
+#: ``:m`` a name in Person only. One IRI is one subject: ``:s`` comes back
+#: once, ``:d`` once per name.
+UNION_COPIES = Store(
+    ontology=PREFIXES
+    + """
+:Person a owl:Class ; phys:collectionName "Person" ; rdfs:subClassOf :Agent .
+:Org a owl:Class ; phys:collectionName "Org" ; rdfs:subClassOf :Agent .
+:Agent a owl:Class ; phys:mappingStyle "UNION" .
+:name a owl:DatatypeProperty ; rdfs:domain [ owl:unionOf ( :Person :Org ) ] .
+:age a owl:DatatypeProperty ; rdfs:domain :Agent .
+""",
+    docs={
+        "Person": [
+            {"_id": "Person/s", "_uri": EX + "s", "name": "S", "age": 3},
+            {"_id": "Person/d", "_uri": EX + "d", "name": "D1"},
+            {"_id": "Person/m", "_uri": EX + "m", "name": "M"},
+            {"_id": "Person/g", "_uri": EX + "g1", "_graph": EX + "g", "name": "G"},
+        ],
+        "Org": [
+            {"_id": "Org/s", "_uri": EX + "s", "name": "S", "age": 3},
+            {"_id": "Org/d", "_uri": EX + "d", "name": "D2"},
+            {"_id": "Org/m", "_uri": EX + "m"},
+            {"_id": "Org/g", "_uri": EX + "g1", "_graph": EX + "g", "name": "G"},
+        ],
+    },
+    data=':s a :Person, :Org, :Agent ; :name "S" ; :age 3 . :d a :Person, :Org, :Agent ; :name "D1", "D2" . '
+    ':m a :Person, :Org, :Agent ; :name "M" .\n:g { :g1 a :Person, :Org, :Agent ; :name "G" . }',
+    trig=True,
+    resolver_kwargs={"default_graph_includes_named": False},
+)
+
 #: A symmetric property with a self-loop: ``:a :knows :a`` is one triple,
 #: however many ends the edge has (#121). The oracle holds the closure.
 SYMMETRIC_SELF_LOOP = Store(
@@ -687,6 +720,18 @@ LPG_LABELS = Store(
 
 _CASES: list[tuple[str, Store, str, str | None]] = [
     # (id, store, query, issue it is wrong under on main — or None)
+    *[
+        (f"union_copies_{name}", UNION_COPIES, query, None)
+        for name, query in [
+            ("untyped_attribute", "SELECT ?s ?n WHERE { ?s :name ?n }"),
+            ("constant_attribute", "SELECT ?n WHERE { :s :name ?n }"),
+            ("count", "SELECT (COUNT(*) AS ?c) WHERE { ?s :name ?n }"),
+            ("supertype", "SELECT ?s WHERE { ?s a :Agent }"),
+            ("supertype_attribute", "SELECT ?s ?n WHERE { ?s a :Agent ; :name ?n }"),
+            ("two_attributes", "SELECT ?s ?n ?a WHERE { ?s :name ?n ; :age ?a }"),
+            ("graph", "SELECT ?s ?n WHERE { GRAPH :g { ?s :name ?n } }"),
+        ]
+    ],
     *[
         (f"optional_scope_{name}", OPTIONAL_SCOPE, query, None)
         for name, query in [

@@ -113,6 +113,12 @@ class _BindingState:
     exit's object → alias of the edge's source vertex, which the entry
     triple then binds its subject to (plan D8)."""
     bgp_entries: dict[str, set[str]] = field(default_factory=dict)
+    pending_copy_checks: list[tuple[str, dict[str, list[ResolvedClass]], list[tuple[str, ...]], str]] = field(
+        default_factory=list
+    )
+    """Union rows of a class's member collections opened in the BGP being
+    emitted, to drop repeated copies of once its triples are emitted
+    (:meth:`AlgebraVisitor._drop_repeated_copies`, #124)."""
     """In the BGP being emitted: relationship node variable → the reified
     entry predicates whose object it is. Lets an exit with a known object
     walk the right relationship backwards before its entry is emitted."""
@@ -297,6 +303,12 @@ class AlgebraVisitor:
     an aggregate result is out of scope after a COLLECT, same as it
     would be if the user projected it themselves."""
 
+    query_triples: list[tuple[Any, Any, Any]] | None = None
+    """Every triple pattern of the whole query (:func:`_collect_bgp_triples`),
+    set by the top-level :func:`arango_sparql.api.translate`: what a union of
+    a class's member collections compares a subject's copies on
+    (:meth:`_copy_comparison_fields`, #124). ``None`` in a child visitor,
+    which then keeps every copy."""
     state: _BindingState = field(default_factory=_BindingState)
 
     # ------------------------------------------------------------------
@@ -1689,6 +1701,7 @@ class AlgebraVisitor:
                 entries.setdefault(str(o), set()).add(str(p))
         exits = {str(p) for _s, p, _o in triples if isinstance(p, URIRef) and self.resolver.is_edge_exit(p)}
         outer_entries, self.state.bgp_entries = self.state.bgp_entries, entries
+        outer_checks, self.state.pending_copy_checks = self.state.pending_copy_checks, []
         # A subject's type patterns, for a walk into its class (rank 2).
         types: dict[str, list[tuple[Any, Any, Any]]] = {}
         for t in triples:
@@ -1722,8 +1735,10 @@ class AlgebraVisitor:
                     absorbed.append(type_triple)
                     continue
                 self._emit_triple(triple)
+            self._drop_repeated_copies()
         finally:
             self.state.bgp_entries = outer_entries
+            self.state.pending_copy_checks = outer_checks
 
     # ------------------------------------------------------------------
     # Internal: property-path intermediate-variable minting
@@ -3392,11 +3407,96 @@ class AlgebraVisitor:
         alias = self.builder.fresh_alias()
         self.builder.for_union(alias, arm_aqls, scans_documents=True)
         self.state.doc_collections[alias] = frozenset(by_collection)
+        compare = self._copy_comparison_fields(subject)
+        if compare is not None:
+            # Checked once the BGP's triples have filtered the rows
+            # (:meth:`_drop_repeated_copies`): probing every document of
+            # every member first cost LDBC IS4 0.1 s -> 3.5 s.
+            self.state.pending_copy_checks.append((alias, by_collection, compare, what))
         self._apply_graph_scope(alias)
         self._enforce_tenant_scope(alias, classes[0])
         self._guard_relationship_endpoints(alias, classes)
         self._bind_opened_subject(subject, alias, matched=match_in_arms)
         return alias
+
+    def _copy_comparison_fields(self, subject: Any) -> list[tuple[str, ...]] | None:
+        """The attribute paths that tell two copies of *subject* apart in this
+        BGP, when a union of its class's collections can drop a repeated one
+        (#124); ``None`` when it cannot.
+
+        One IRI stored in two member collections (a PG entity of two classes)
+        is one subject: the union returned it once per document, so a BGP
+        reading only its type and attributes gave a solution twice when both
+        copies hold the same values. A later copy is dropped when an earlier
+        one holds the same value (or the same absence) for every attribute
+        the query reads on the subject anywhere (an OPTIONAL reads the kept
+        copy too). Edges, variable predicates and paths depend on which copy
+        is walked from, and an unbound ``GRAPH ?g`` binds per copy, so then
+        nothing is dropped (each copy stays, as before).
+        """
+        if self.query_triples is None:
+            return None
+        graph = self.state.graph_scope[-1] if self.state.graph_scope else None
+        if isinstance(graph, Variable) and str(graph) not in self.state.var_to_expr:
+            return None
+        fields: list[tuple[str, ...]] = []
+        for s, p, _o in self.query_triples:
+            if s != subject:
+                continue
+            if not isinstance(p, URIRef):
+                return None
+            if p == RDF.type:
+                continue
+            prop = self.resolver.resolve_property(p)
+            if prop.is_object_property or prop.edge_target_of or prop.edge_collection:
+                return None
+            if prop.field_path not in fields:
+                fields.append(prop.field_path)
+        return fields
+
+    def _drop_repeated_copies(self) -> None:
+        """Drop a union row that repeats an earlier member's copy (#124).
+
+        For a row of member collection *k* (in name order), each earlier
+        member *j* is probed for a document with the same IRI, of its
+        classes in the active graph scope and tenant (so the copy kept is
+        one the union keeps), with the same value or the same absence for
+        every compared attribute. Emitted once the BGP's triples have
+        filtered the rows; the test of the row's collection does not depend
+        on the probe's loop, so ArangoDB hoists it, and a row no probe
+        concerns costs no lookup.
+        """
+        checks, self.state.pending_copy_checks = self.state.pending_copy_checks, []
+        for alias, by_collection, fields, what in checks:
+            order = sorted(by_collection)
+            for j, earlier in enumerate(order[:-1]):
+                probe = self.builder.create_child()
+                other = probe.fresh_alias()
+                probe.for_(other, earlier)
+                later = " || ".join(
+                    f"IS_SAME_COLLECTION({probe.bind(c, hint='coll')}, {alias})" for c in order[j + 1 :]
+                )
+                probe.filter_raw(f"({later})")
+                probe.filter_raw(subject_matches_value(other, subject_ref(alias)))
+                for test in self._class_tests(probe, other, by_collection[earlier], what):
+                    probe.filter_raw(test)
+                scope = self._graph_scope_test(other)
+                if scope is not None:
+                    probe.filter_raw(scope)
+                for tenant in {(c.tenant_field, c.tenant_entity): c for c in by_collection[earlier]}.values():
+                    self._enforce_tenant_scope(other, tenant, builder=probe)
+                for path in fields:
+                    probe.filter_raw(
+                        f"{probe.attribute_exists(other, path)} == {probe.attribute_exists(alias, path)}"
+                        f" && {attribute_path_ref(other, path)} == {attribute_path_ref(alias, path)}"
+                    )
+                probe.limit(1)
+                probe.return_scalar("1")
+                text = self.builder.absorb_child(probe)
+                repeated = self.builder.fresh_alias(prefix="repeated")
+                indented = "\n".join("  " + line for line in text.splitlines())
+                self.builder.let(repeated, f"LENGTH((\n{indented}\n))")
+                self.builder.filter_raw(f"{repeated} == 0")
 
     def _ensure_subject_alias(self, subject: Any, prop: Any | None = None) -> str:
         """Return the AQL alias whose document is *subject*, opening a
@@ -3992,6 +4092,12 @@ def _is_empty_bgp(node: Any) -> bool:
     no other FOR has been emitted yet).
     """
     return getattr(node, "name", None) == "BGP" and not getattr(node, "triples", None)
+
+
+def collect_query_triples(node: Any) -> list[tuple[Any, Any, Any]]:
+    """Every triple pattern under *node* (BGPs of every group, OPTIONAL,
+    UNION, GRAPH, sub-selects): :attr:`AlgebraVisitor.query_triples`."""
+    return _collect_bgp_triples(node)
 
 
 def _collect_bgp_triples(node: Any) -> list[tuple[Any, Any, Any]]:
