@@ -1341,8 +1341,10 @@ class AlgebraVisitor:
         }
         state.var_to_doc_alias = {}
         state.const_subject_alias = {}
-        state.var_to_rpt_class = {}
-        state.const_subject_rpt_class = {}
+        # A GROUP BY key keeps its value, the subject's IRI, and with it the
+        # triples table an RPT subject is read from (``DESCRIBE ?s … GROUP BY
+        # ?s``); a constant's table does not depend on the scope.
+        state.var_to_rpt_class = {k: v for k, v in state.var_to_rpt_class.items() if k in state.var_to_expr}
         state.relationship_nodes = {}
         state.reified_edges = {}
         state.maybe_unbound &= set(state.var_to_expr)

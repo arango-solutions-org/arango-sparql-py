@@ -155,3 +155,18 @@ def test_a_values_block_after_grouping_joins_the_groups(db: Any, oxi_store: Any,
     expected = _oxigraph(oxi_store, body)
     assert expected, "the case must have a non-empty answer to prove anything"
     assert _multiset(_arango(db, body)) == _multiset(expected)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        'SELECT ?t (SUM(?m) AS ?s) WHERE { ?f a :Forum ; :title ?t ; :members ?m } GROUP BY ?t VALUES ?t { "Pop" }',
+        "SELECT ?t (SUM(?m) AS ?s) WHERE { ?f a :Forum ; :title ?t ; :members ?m } GROUP BY ?t "
+        'VALUES (?t ?f) { ("Pop" UNDEF) }',
+    ],
+)
+def test_a_values_block_matching_no_group_returns_no_row(db: Any, oxi_store: Any, body: str) -> None:
+    # The grouped empty-input fallback (W3C agg-empty-group) is for no input
+    # rows; groups that a trailing VALUES rejects leave no solution, as HAVING.
+    assert _oxigraph(oxi_store, body) == []
+    assert _arango(db, body) == []

@@ -189,3 +189,19 @@ def test_a_values_block_after_grouping_reads_nothing_out_of_scope() -> None:
     after_collect = result.aql.split("COLLECT", 1)[1]
     assert "doc1" not in after_collect
     assert "FOR row" in after_collect
+
+
+def test_a_group_by_key_keeps_its_rpt_triples_table() -> None:
+    """Review of #116: clearing the scope after the COLLECT dropped the key's
+    RPT class, so ``DESCRIBE ?s … GROUP BY ?s`` on a triple store raised."""
+    ttl = """
+    @prefix : <http://ex.org/> .
+    @prefix owl: <http://www.w3.org/2002/07/owl#> .
+    @prefix phys: <https://arango.solutions/phys#> .
+    :Person a owl:Class ; phys:mappingStyle "RPT" ; phys:triplesCollection "facts" .
+    """
+    result = translate(
+        "PREFIX : <http://ex.org/>\nDESCRIBE ?s WHERE { ?s a :Person ; :knows ?y } GROUP BY ?s",
+        resolver=SchemaResolver.from_turtle(ttl),
+    )
+    assert "facts" in json.dumps(result.bind_vars)
