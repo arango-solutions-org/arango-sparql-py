@@ -40,6 +40,7 @@ from .builder import (
     type_predicate,
 )
 from .date_arithmetic import compare_instants, date_shift, instant, is_date_shift, is_duration_literal
+from .expression_errors import certainly_error, unbound_variables
 from .filter_builtins import translate_builtin, translate_function
 from .minus_exists import emit_minus
 from .optional_crosssubject import (
@@ -151,6 +152,14 @@ class _BindingState:
     """SPARQL variables bound to ``date ± duration`` (a BIND of one): their
     lexical form keeps the input's zone, so they compare, sort and aggregate
     by instant (:mod:`date_arithmetic`, #123)."""
+    hidden_outer: dict[str, str] = field(default_factory=dict)
+    """In an OPTIONAL body: the outer variables it does not bind, taken out
+    of its scope (#125) → their expressions. An EXISTS probe inside the body
+    still reads them, as pyoxigraph and rdflib evaluate it."""
+    substituted: set[str] = field(default_factory=set)
+    """In an EXISTS probe: the variables the outer row substitutes into the
+    pattern (SPARQL 1.1 §18.6, ``substitute``) — constants there, which an
+    OPTIONAL body inside the probe does not hide."""
     maybe_unbound: set[str] = field(default_factory=set)
     """SPARQL variables that can be unbound in a solution: bound by an
     OPTIONAL, a UNION arm that not every arm binds, a VALUES ``UNDEF``, a
@@ -3505,6 +3514,13 @@ class AlgebraVisitor:
         ``translateFilterExpression`` / ``translateFilterTerm`` /
         ``translateFilterFunction`` switch.
         """
+        in_scope = self.state.var_to_expr.__contains__
+        if not isinstance(expr, Variable) and certainly_error(expr, in_scope):
+            # Needs the value of a variable nothing binds: an error in every
+            # solution, which ``null`` stands for as a whole (#125).
+            for unbound in unbound_variables(expr, in_scope):
+                self._warn_unbound_variable(unbound)
+            return "null"
         # ----- Leaf terms -------------------------------------------------
         if isinstance(expr, Variable):
             mapped = self.state.var_to_expr.get(str(expr))
@@ -3523,13 +3539,13 @@ class AlgebraVisitor:
                 #     propagate the error so the enclosing assignment
                 #     leaves its target unbound.
                 #
-                # AQL's ``null`` follows the same error-propagation
-                # semantics by construction: ``null == X`` → ``null``,
-                # ``null + 1`` → ``null``, ``NOT_NULL(null, x)`` → ``x``,
-                # and ``FILTER null`` excludes the row. So emitting the
-                # literal ``null`` here gives every spec-correct
-                # downstream behaviour for free — no per-operator
-                # special-case code is needed.
+                # AQL's ``null`` does NOT propagate as SPARQL's error does
+                # (``null != X`` is true, ``null + 1`` is 1, ``CONCAT(null,
+                # "x")`` is ``"x"``), so an expression that needs this
+                # variable's value is emitted as ``null`` as a whole before
+                # it gets here (:mod:`expression_errors`, #125). What
+                # reaches this point is read by an error-tolerant operator:
+                # ``NOT_NULL(null, x)`` → ``x``, ``BOUND``, ``FILTER null``.
                 #
                 # A SPARQL typo (``?nove`` vs ``?nova``) presents
                 # identically to a deliberate use of an OPTIONAL-bound
@@ -3540,18 +3556,7 @@ class AlgebraVisitor:
                 # The translation itself does NOT raise — that would
                 # block W3C-conformant queries like
                 # ``NOT_NULL(?z, -3)`` from translating.
-                self.builder.warn(
-                    code="W_UNBOUND_VARIABLE_IN_EXPR",
-                    message=(
-                        f"variable ?{expr} is referenced in an expression "
-                        f"but never bound by the surrounding pattern; per "
-                        f"SPARQL §17.2.1 this evaluates to an 'error' value "
-                        f"(emitted as AQL ``null``, which the surrounding "
-                        f"FILTER / BIND / COALESCE / arithmetic handles "
-                        f"per its own null-propagation rules)"
-                    ),
-                    variable=str(expr),
-                )
+                self._warn_unbound_variable(str(expr))
                 return "null"
             return mapped
         if isinstance(expr, URIRef):
@@ -3564,16 +3569,20 @@ class AlgebraVisitor:
             raise UnsupportedSparqlError(f"FILTER expression has no .name attribute: {type(expr).__name__}")
 
         # ----- Boolean composition ---------------------------------------
-        if name == "ConditionalAndExpression":
-            parts = [self._translate_expr(expr.expr)]
-            for other in expr.other:
-                parts.append(self._translate_expr(other))
-            return "(" + " && ".join(parts) + ")"
-        if name == "ConditionalOrExpression":
-            parts = [self._translate_expr(expr.expr)]
-            for other in expr.other:
-                parts.append(self._translate_expr(other))
-            return "(" + " || ".join(parts) + ")"
+        if name in ("ConditionalAndExpression", "ConditionalOrExpression"):
+            is_and = name == "ConditionalAndExpression"
+            operands = [expr.expr, *expr.other]
+            # An operand that is certainly an error (it needs an unbound
+            # variable's value) decides nothing by itself: ``error && X`` is
+            # false when X is, else an error; ``error || X`` is true when X
+            # is, else an error (SPARQL 1.1 §17.2). Its AQL ``null`` would
+            # make ``null && false`` null (review of #140).
+            errors = [o for o in operands if certainly_error(o, in_scope)]
+            parts = [self._translate_expr(o) for o in operands if not any(o is e for e in errors)]
+            joined = "(" + (" && " if is_and else " || ").join(parts) + ")"
+            if not errors:
+                return joined
+            return f"({joined} ? null : false)" if is_and else f"({joined} ? true : null)"
 
         # ----- Unary -----------------------------------------------------
         if name == "UnaryNot":
@@ -3690,6 +3699,21 @@ class AlgebraVisitor:
                 f"? ({left_alias} {op} {right_alias}) : null)[0]"
             )
         return result
+
+    def _warn_unbound_variable(self, name: str) -> None:
+        """``W_UNBOUND_VARIABLE_IN_EXPR``: *name* is read but never bound."""
+        self.builder.warn(
+            code="W_UNBOUND_VARIABLE_IN_EXPR",
+            message=(
+                f"variable ?{name} is referenced in an expression "
+                f"but never bound by the surrounding pattern; per "
+                f"SPARQL §17.2.1 this evaluates to an 'error' value "
+                f"(emitted as AQL ``null``, which the surrounding "
+                f"FILTER / BIND / COALESCE / arithmetic handles "
+                f"per its own null-propagation rules)"
+            ),
+            variable=name,
+        )
 
     def _is_date_valued(self, node: Any) -> bool:
         """Whether *node* is ``date ± duration``, or a variable bound to one."""

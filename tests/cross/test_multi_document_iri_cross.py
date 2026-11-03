@@ -409,6 +409,27 @@ NO_DEFAULT_COLLECTION = Store(
     data=":y a :Person . :a a :Person . :a :knows :y .",
 )
 
+#: An OPTIONAL body shares with the outer pattern only the variables it binds
+#: (#125): a BIND, a nested group's FILTER or a sub-select in it must not read
+#: ``?n``, which only the outer pattern binds. Its top-level FILTER is the
+#: left join's condition and does.
+OPTIONAL_SCOPE = Store(
+    ontology=PREFIXES
+    + """
+:Person a owl:Class ; phys:collectionName "Person" .
+:name a owl:DatatypeProperty ; rdfs:domain :Person .
+:age a owl:DatatypeProperty ; rdfs:domain :Person .
+:nick a owl:DatatypeProperty ; rdfs:domain :Person .
+""",
+    docs={
+        "Person": [
+            {"_id": "Person/a", "_uri": EX + "a", "name": "A", "age": 3, "nick": "A"},
+            {"_id": "Person/b", "_uri": EX + "b", "name": "B", "age": 4, "nick": "X"},
+        ],
+    },
+    data=':a a :Person ; :name "A" ; :age 3 ; :nick "A" . :b a :Person ; :name "B" ; :age 4 ; :nick "X" .',
+)
+
 #: A domain or range naming an undeclared class (#126): arango-query-core
 #: writes ``rdfs:domain :Any`` for a relationship with no ``fromEntity``. It
 #: routes nothing; the subject falls back to the default collection, as in
@@ -652,6 +673,70 @@ LPG_LABELS = Store(
 
 _CASES: list[tuple[str, Store, str, str | None]] = [
     # (id, store, query, issue it is wrong under on main — or None)
+    *[
+        (f"optional_scope_{name}", OPTIONAL_SCOPE, query, None)
+        for name, query in [
+            (
+                "bind_outer",
+                'SELECT ?p ?a ?v WHERE { ?p :name ?n OPTIONAL { ?p :age ?a BIND(CONCAT(?n, "!") AS ?v) } }',
+            ),
+            (
+                "nested_filter_outer",
+                'SELECT ?p ?a WHERE { ?p :name ?n OPTIONAL { ?p :age ?a { FILTER(?n = "A") } } }',
+            ),
+            (
+                "subselect_outer",
+                "SELECT ?p ?k WHERE { ?p :name ?n OPTIONAL { SELECT ?p ?k WHERE { ?p :nick ?k FILTER(?k != ?n) } } }",
+            ),
+            # Must hold: the left join's own condition, and a shared variable.
+            (
+                "top_filter_outer",
+                'SELECT ?p ?a WHERE { ?p :name ?n OPTIONAL { ?p :age ?a FILTER(?n = "A") } }',
+            ),
+            (
+                "top_filter_mixed",
+                'SELECT ?p ?a WHERE { ?p :name ?n OPTIONAL { ?p :age ?a FILTER(?a > 2 && ?n = "B") } }',
+            ),
+            ("bind_shared", "SELECT ?p ?v WHERE { ?p :name ?n OPTIONAL { ?p :age ?a BIND(?a + 1 AS ?v) } }"),
+            (
+                "bind_shared_subject",
+                "SELECT ?p ?v WHERE { ?p :name ?n OPTIONAL { ?p :age ?a BIND(STR(?p) AS ?v) } }",
+            ),
+            (
+                "shared_object",
+                "SELECT ?p ?q WHERE { ?p :nick ?n OPTIONAL { ?q :name ?n } }",
+            ),
+            # Review of #140: a VALUES column is bound by the body (rdflib's
+            # ``_vars`` leaves it out); an EXISTS sees the outer row, in and
+            # around an OPTIONAL body (substitution, §18.6).
+            (
+                "values_in_body",
+                'SELECT ?p ?a WHERE { ?p :name ?n OPTIONAL { VALUES ?n { "A" } ?p :age ?a } }',
+            ),
+            (
+                "values_object_in_body",
+                "SELECT ?p ?k WHERE { ?p :age ?a0 OPTIONAL { VALUES ?a0 { 3 } ?p :nick ?k } }",
+            ),
+            (
+                "optional_in_exists",
+                "SELECT ?p WHERE { ?p :name ?n FILTER EXISTS { ?p :age ?a OPTIONAL { ?p :nick ?k } } }",
+            ),
+            (
+                "optional_in_exists_bind",
+                "SELECT ?p WHERE { ?p :name ?n FILTER EXISTS "
+                "{ ?p :age ?a OPTIONAL { ?p :nick ?k BIND(?n AS ?z) } FILTER(BOUND(?z)) } }",
+            ),
+            (
+                "exists_in_body",
+                "SELECT ?p ?a WHERE { ?p :name ?n OPTIONAL { { ?p :age ?a FILTER EXISTS { ?q :nick ?n } } } }",
+            ),
+            (
+                "and_error_false",
+                'SELECT ?p WHERE { ?p :name ?n OPTIONAL { ?p :age ?a BIND((?n = "B" && ?a > 3) AS ?f) } '
+                "FILTER(?f = false) }",
+            ),
+        ]
+    ],
     ("undeclared_mixed_untyped", UNDECLARED_MIXED_DOMAIN, "SELECT ?s ?g WHERE { ?s :age ?g }", None),
     ("undeclared_mixed_constant", UNDECLARED_MIXED_DOMAIN, "SELECT ?g WHERE { :o :age ?g }", None),
     ("undeclared_mixed_default", UNDECLARED_MIXED_DOMAIN, "SELECT ?g WHERE { :z :age ?g }", None),
@@ -1073,6 +1158,10 @@ _LIVE_ONLY = {
     "graph_outside_optional",
     "repeated_range_subselect_object",
     "tenant_relationship_node_alone",
+    "optional_scope_bind_outer",
+    "optional_scope_subselect_outer",
+    "optional_scope_optional_in_exists_bind",
+    "optional_scope_and_error_false",
     "symmetric_variable_predicate",
 }
 

@@ -147,11 +147,11 @@ cases:
   # SPARQL §17.2.1: a variable referenced in a FILTER expression but
   # never bound by the surrounding pattern evaluates to an "error"
   # value, which causes the FILTER to fail and the row to be
-  # excluded (§18.5). AQL's null follows the same propagation:
-  # ``null == X`` evaluates to ``null``, and ``FILTER null`` excludes
-  # the row. So emitting the literal ``null`` for the unbound
-  # variable lookup gives the spec-correct row-exclusion semantics
-  # for free — no special-case visitor code per surrounding operator.
+  # excluded (§18.5). AQL's null does not propagate so (``null == X``
+  # is a boolean, ``null != X`` true), so an expression that needs an
+  # unbound variable's value is emitted as ``null`` as a whole
+  # (``expression_errors.certainly_error``, #125), and ``FILTER null``
+  # excludes the row. The literal is then never bound.
   #
   # A ``W_UNBOUND_VARIABLE_IN_EXPR`` warning is also emitted on the
   # builder so a SPARQL typo (``?nove`` vs ``?nova``) doesn't go
@@ -167,11 +167,10 @@ cases:
     expected_aql: |-
       FOR doc1 IN @@c1_Person
       FILTER HAS(doc1, "name")
-      FILTER (null == @_p1)
+      FILTER null
       RETURN { s: NOT_NULL(doc1._uri, doc1._id) }
     expected_bind_vars:
       "@c1_Person": "Person"
-      "_p1": 3
 
   - name: starts_with
     sparql: |
