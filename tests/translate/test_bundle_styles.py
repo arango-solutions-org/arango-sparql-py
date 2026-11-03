@@ -87,3 +87,63 @@ def test_a_bundle_without_owl_reads_the_style_as_its_owl_mapping_does(cls: str, 
     from_bundle = _rows(SchemaResolver.from_mapping_bundle(bundle), cls)
     assert from_bundle == expected
     assert from_bundle == _rows(SchemaResolver.from_turtle(_OWL), cls)
+
+
+def test_a_bundle_reads_endpoints_and_properties_from_its_conceptual_schema() -> None:
+    """arango-query-core puts a relationship's ``fromEntity`` / ``toEntity``
+    and an entity's properties in the conceptual schema; the physical block
+    has neither (review of #138). Without them the subject was read from the
+    default collection, and the answer was empty."""
+    bundle = MappingBundle(
+        conceptual_schema={
+            "entities": [
+                {"name": "Person", "properties": [{"name": "firstName", "type": "string"}]},
+                {"name": "Post", "properties": [{"name": "content", "type": "string"}]},
+            ],
+            "relationships": [{"type": "hasCreator", "fromEntity": "Post", "toEntity": "Person"}],
+        },
+        physical_mapping={
+            "entities": {
+                "Person": {"style": "COLLECTION", "collectionName": "Person"},
+                "Post": {"style": "COLLECTION", "collectionName": "Post"},
+            },
+            "relationships": {
+                "hasCreator": {"style": "DEDICATED_COLLECTION", "edgeCollectionName": "hasCreator"}
+            },
+        },
+        source=MappingSource(kind="manual"),
+    )
+    docs = {
+        "Person": [{"_id": "Person/p1", "_uri": "http://ex.org/p1"}],
+        "Post": [{"_id": "Post/m1", "_uri": "http://ex.org/m1", "content": "x"}],
+        "hasCreator": [{"_id": "hasCreator/1", "_from": "Post/m1", "_to": "Person/p1"}],
+        "Document": [],
+    }
+    resolver = SchemaResolver.from_mapping_bundle(bundle)
+    for query, expected in [
+        (
+            f"SELECT ?m ?p WHERE {{ ?m <{_C}hasCreator> ?p }}",
+            [{"m": "http://ex.org/m1", "p": "http://ex.org/p1"}],
+        ),
+        (f"SELECT ?m ?c WHERE {{ ?m <{_C}content> ?c }}", [{"m": "http://ex.org/m1", "c": "x"}]),
+    ]:
+        result = translate(query, resolver=resolver)
+        assert run_aql_subset(result.aql, result.bind_vars, docs) == expected
+
+
+def test_an_undeclared_class_in_a_domain_or_range_is_reported() -> None:
+    ttl = """
+    @prefix : <http://ex.org/> .
+    @prefix owl: <http://www.w3.org/2002/07/owl#> .
+    @prefix phys: <https://arango.solutions/phys#> .
+    @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+    :Person a owl:Class ; phys:collectionName "Person" .
+    :knows a owl:ObjectProperty ; phys:edgeCollectionName "knows" ; rdfs:domain :Person, :Any ; rdfs:range :Ghost .
+    """
+    result = translate(
+        "PREFIX : <http://ex.org/>\nSELECT ?x WHERE { ?x :knows :b }",
+        resolver=SchemaResolver.from_turtle(ttl),
+    )
+    codes = {(w.get("code"), w.get("iri")) for w in result.schema_warnings}
+    assert ("W_SCHEMA_UNDECLARED_DOMAIN_CLASS", "http://ex.org/Any") in codes
+    assert ("W_SCHEMA_UNDECLARED_RANGE_CLASS", "http://ex.org/Ghost") in codes
