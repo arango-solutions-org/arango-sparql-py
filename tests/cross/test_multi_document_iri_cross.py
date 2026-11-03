@@ -644,7 +644,30 @@ _CASES: list[tuple[str, Store, str, str | None]] = [
         "SELECT ?x ?s WHERE { ?s a :Employee . ?x :knows ?s . ?x a :Person }",
         None,
     ),
-    ("pg_attr_then_type", PG_TWO_CLASSES, "SELECT ?s WHERE { ?s :name ?n . ?s a :Employee }", "#105"),
+    ("pg_attr_then_type", PG_TWO_CLASSES, "SELECT ?s WHERE { ?s :name ?n . ?s a :Employee }", None),
+    # #120: the edge binds ?s to its Person copy; :salary is on the Employee
+    # copy (its domain), and is read there.
+    (
+        "pg_edge_then_attr",
+        PG_TWO_CLASSES,
+        "SELECT ?s ?y WHERE { :a :knows ?s . ?s a :Employee ; :salary ?y }",
+        None,
+    ),
+    ("pg_edge_attr_untyped", PG_TWO_CLASSES, "SELECT ?s ?y WHERE { :a :knows ?s . ?s :salary ?y }", None),
+    (
+        "pg_values_edge_attr",
+        PG_TWO_CLASSES,
+        "SELECT ?s ?y WHERE { VALUES ?x { :a } ?x :knows ?s . ?s a :Employee ; :salary ?y }",
+        None,
+    ),
+    (
+        "pg_subselect_edge_attr",
+        PG_TWO_CLASSES,
+        'SELECT ?s ?y WHERE { { SELECT ?x WHERE { ?x :name "A" } } ?x :knows ?s . ?s :salary ?y }',
+        None,
+    ),
+    ("pg_type_then_other_attr", PG_TWO_CLASSES, "SELECT ?n WHERE { ?s a :Employee ; :name ?n }", None),
+    ("pg_both_attrs", PG_TWO_CLASSES, "SELECT ?n ?y WHERE { ?s :name ?n ; :salary ?y }", None),
     ("pg_untyped_reverse", PG_TWO_CLASSES, "SELECT ?x ?s WHERE { ?s a :Employee . ?x :knows ?s }", None),
     ("w3c_const_then_type", W3C_COPIES, "SELECT ?y WHERE { :a :knows ?y . ?y a :Person }", None),
     ("w3c_var_chain", W3C_COPIES, 'SELECT ?x ?y WHERE { ?x :name "A" . ?x :knows ?y . ?y a :Person }', None),
@@ -998,6 +1021,7 @@ _LIVE_ONLY = {
     "graph_outside_optional",
     "repeated_range_subselect_object",
     "tenant_relationship_node_alone",
+    "pg_subselect_edge_attr",
 }
 
 
