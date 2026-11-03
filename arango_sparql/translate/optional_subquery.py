@@ -31,6 +31,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from rdflib import Variable
+
 from .builder import attribute_ref
 from .union_paths import _spawn_child
 
@@ -53,7 +55,8 @@ def emit_optional_subquery(visitor: AlgebraVisitor, node: Any) -> None:
     # ``OPTIONAL { ?p :age ?a BIND(CONCAT(?n, "!") AS ?v) }`` bound ``?v``).
     # The OPTIONAL's own condition (``expr``, its top-level FILTER) is the
     # left join's, evaluated on the joined row, so it sees them all.
-    hidden = _hide_unshared(child, outer - {str(v) for v in getattr(node.p2, "_vars", ())})
+    hidden = _hide_unshared(child, outer - bound_variables(node.p2) - visitor.state.substituted)
+    child.state.hidden_outer = {**visitor.state.hidden_outer, **hidden}
     child.visit(node.p2)
     expr = getattr(node, "expr", None)
     if expr is not None and getattr(expr, "name", "") != "TrueFilter":
@@ -85,6 +88,43 @@ def emit_optional_subquery(visitor: AlgebraVisitor, node: Any) -> None:
     for name in new_vars:
         visitor.state.var_to_expr[name] = attribute_ref(row_alias, name)
         visitor.state.maybe_unbound.add(name)
+
+
+def bound_variables(node: Any) -> set[str]:
+    """The variables a graph pattern binds (SPARQL 1.1 §18.2.1, in-scope).
+
+    Not rdflib's ``_vars``: it leaves out VALUES columns (the rows are dicts
+    its traversal does not walk), is unset inside EXISTS patterns, and counts
+    a variable a nested FILTER only reads (review of #140). Pattern terms,
+    BIND targets, VALUES columns, sub-select projections, a GRAPH variable and
+    a MINUS's left side bind; a FILTER or EXISTS does not.
+    """
+    if node is None:
+        return set()
+    name = getattr(node, "name", None)
+    if name == "BGP":
+        return {
+            str(t) for triple in node.triples for t in (triple[0], triple[2]) if isinstance(t, Variable)
+        } | {str(triple[1]) for triple in node.triples if isinstance(triple[1], Variable)}
+    if name == "values":
+        return {str(var) for row in node.get("res") or [] for var in row}
+    if name in ("Project", "SelectQuery"):
+        return {str(v) for v in node.get("PV") or []}
+    if name == "Extend":
+        return bound_variables(node.p) | {str(node.var)}
+    if name == "Graph":
+        term = node.term
+        return bound_variables(node.p) | ({str(term)} if isinstance(term, Variable) else set())
+    if name == "Minus":
+        return bound_variables(node.p1)
+    if name == "AggregateJoin":
+        return bound_variables(node.p) | {str(a.res) for a in node.A}
+    out: set[str] = set()
+    for key in ("p", "p1", "p2"):
+        child = node.get(key) if hasattr(node, "get") else None
+        if child is not None and hasattr(child, "name"):
+            out |= bound_variables(child)
+    return out
 
 
 def _hide_unshared(child: AlgebraVisitor, names: set[str]) -> dict[str, str]:

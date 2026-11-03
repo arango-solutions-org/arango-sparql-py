@@ -152,6 +152,14 @@ class _BindingState:
     """SPARQL variables bound to ``date ± duration`` (a BIND of one): their
     lexical form keeps the input's zone, so they compare, sort and aggregate
     by instant (:mod:`date_arithmetic`, #123)."""
+    hidden_outer: dict[str, str] = field(default_factory=dict)
+    """In an OPTIONAL body: the outer variables it does not bind, taken out
+    of its scope (#125) → their expressions. An EXISTS probe inside the body
+    still reads them, as pyoxigraph and rdflib evaluate it."""
+    substituted: set[str] = field(default_factory=set)
+    """In an EXISTS probe: the variables the outer row substitutes into the
+    pattern (SPARQL 1.1 §18.6, ``substitute``) — constants there, which an
+    OPTIONAL body inside the probe does not hide."""
     maybe_unbound: set[str] = field(default_factory=set)
     """SPARQL variables that can be unbound in a solution: bound by an
     OPTIONAL, a UNION arm that not every arm binds, a VALUES ``UNDEF``, a
@@ -3485,16 +3493,20 @@ class AlgebraVisitor:
             raise UnsupportedSparqlError(f"FILTER expression has no .name attribute: {type(expr).__name__}")
 
         # ----- Boolean composition ---------------------------------------
-        if name == "ConditionalAndExpression":
-            parts = [self._translate_expr(expr.expr)]
-            for other in expr.other:
-                parts.append(self._translate_expr(other))
-            return "(" + " && ".join(parts) + ")"
-        if name == "ConditionalOrExpression":
-            parts = [self._translate_expr(expr.expr)]
-            for other in expr.other:
-                parts.append(self._translate_expr(other))
-            return "(" + " || ".join(parts) + ")"
+        if name in ("ConditionalAndExpression", "ConditionalOrExpression"):
+            is_and = name == "ConditionalAndExpression"
+            operands = [expr.expr, *expr.other]
+            # An operand that is certainly an error (it needs an unbound
+            # variable's value) decides nothing by itself: ``error && X`` is
+            # false when X is, else an error; ``error || X`` is true when X
+            # is, else an error (SPARQL 1.1 §17.2). Its AQL ``null`` would
+            # make ``null && false`` null (review of #140).
+            errors = [o for o in operands if certainly_error(o, in_scope)]
+            parts = [self._translate_expr(o) for o in operands if not any(o is e for e in errors)]
+            joined = "(" + (" && " if is_and else " || ").join(parts) + ")"
+            if not errors:
+                return joined
+            return f"({joined} ? null : false)" if is_and else f"({joined} ? true : null)"
 
         # ----- Unary -----------------------------------------------------
         if name == "UnaryNot":

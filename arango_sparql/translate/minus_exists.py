@@ -158,7 +158,7 @@ def emit_exists_filter(
     + comparator.
     """
     inner_pattern = exists_node.graph
-    inner_aql = _translate_probe(visitor, inner_pattern)
+    inner_aql = _translate_probe(visitor, inner_pattern, substitute=True)
 
     probe_alias = visitor.builder.fresh_alias(prefix=("not_exists_probe" if negated else "exists_probe"))
     visitor.builder.let(probe_alias, f"LENGTH((\n{_indent(inner_aql)}\n))")
@@ -177,6 +177,7 @@ def _translate_probe(
     *,
     allow_optional_rebind: bool = False,
     overlap_var_names: set[str] | None = None,
+    substitute: bool = False,
 ) -> str:
     """Spawn a child visitor for *inner_pattern*, emit a row-count
     probe (``LIMIT 1`` + ``RETURN 1``), absorb its binds, and
@@ -244,6 +245,13 @@ def _translate_probe(
     # against the outer's expressions (the SPARQL compatibility
     # check, expressed in AQL).
     child_visitor.state.var_to_expr = dict(visitor.state.var_to_expr)
+    if substitute:
+        # EXISTS substitutes the outer row into its pattern (§18.6): those
+        # variables are constants throughout it, inside an OPTIONAL body too,
+        # and an EXISTS inside an OPTIONAL body still reads the outer
+        # variables the body hides (#125; pyoxigraph and rdflib agree).
+        child_visitor.state.var_to_expr = {**visitor.state.hidden_outer, **child_visitor.state.var_to_expr}
+        child_visitor.state.substituted = visitor.state.substituted | set(child_visitor.state.var_to_expr)
     # Shared, so names minted inside the probe never collide with the
     # outer scope's ``_path_<n>`` / ``_bn_…`` (see _BindingState.counters).
     child_visitor.state.counters = visitor.state.counters

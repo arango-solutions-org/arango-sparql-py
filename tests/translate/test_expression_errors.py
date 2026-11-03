@@ -78,3 +78,16 @@ def test_the_unbound_variable_is_still_reported() -> None:
     assert any(
         w.get("code") == "W_UNBOUND_VARIABLE_IN_EXPR" and w.get("variable") == "nmae" for w in result.warnings
     )
+
+
+@pytest.mark.parametrize(
+    ("expr", "shape"),
+    [
+        # error && X is false when X is false, else an error (null).
+        ('?z = 1 && ?n = "A"', "(((doc1.name == @_p1)) ? null : false)"),
+        # error || X is true when X is true, else an error.
+        ('?z = 1 || ?n = "A"', "(((doc1.name == @_p1)) ? true : null)"),
+    ],
+)
+def test_a_boolean_operand_that_is_an_error_decides_nothing(expr: str, shape: str) -> None:
+    assert _bind(expr) == shape

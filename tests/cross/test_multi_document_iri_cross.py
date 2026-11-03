@@ -665,6 +665,35 @@ _CASES: list[tuple[str, Store, str, str | None]] = [
                 "shared_object",
                 "SELECT ?p ?q WHERE { ?p :nick ?n OPTIONAL { ?q :name ?n } }",
             ),
+            # Review of #140: a VALUES column is bound by the body (rdflib's
+            # ``_vars`` leaves it out); an EXISTS sees the outer row, in and
+            # around an OPTIONAL body (substitution, §18.6).
+            (
+                "values_in_body",
+                'SELECT ?p ?a WHERE { ?p :name ?n OPTIONAL { VALUES ?n { "A" } ?p :age ?a } }',
+            ),
+            (
+                "values_object_in_body",
+                "SELECT ?p ?k WHERE { ?p :age ?a0 OPTIONAL { VALUES ?a0 { 3 } ?p :nick ?k } }",
+            ),
+            (
+                "optional_in_exists",
+                "SELECT ?p WHERE { ?p :name ?n FILTER EXISTS { ?p :age ?a OPTIONAL { ?p :nick ?k } } }",
+            ),
+            (
+                "optional_in_exists_bind",
+                "SELECT ?p WHERE { ?p :name ?n FILTER EXISTS "
+                "{ ?p :age ?a OPTIONAL { ?p :nick ?k BIND(?n AS ?z) } FILTER(BOUND(?z)) } }",
+            ),
+            (
+                "exists_in_body",
+                "SELECT ?p ?a WHERE { ?p :name ?n OPTIONAL { { ?p :age ?a FILTER EXISTS { ?q :nick ?n } } } }",
+            ),
+            (
+                "and_error_false",
+                'SELECT ?p WHERE { ?p :name ?n OPTIONAL { ?p :age ?a BIND((?n = "B" && ?a > 3) AS ?f) } '
+                "FILTER(?f = false) }",
+            ),
         ]
     ],
     (
@@ -1056,6 +1085,8 @@ _LIVE_ONLY = {
     "tenant_relationship_node_alone",
     "optional_scope_bind_outer",
     "optional_scope_subselect_outer",
+    "optional_scope_optional_in_exists_bind",
+    "optional_scope_and_error_false",
 }
 
 
