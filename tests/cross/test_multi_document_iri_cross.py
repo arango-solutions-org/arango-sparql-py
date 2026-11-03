@@ -70,6 +70,20 @@ PG_TWO_CLASSES = Store(
     data=':s a :Person, :Employee ; :name "S" ; :salary 10 . :a a :Person ; :name "A" ; :knows :s .',
 )
 
+#: As PG_TWO_CLASSES, with the attribute on both copies (a replica layout):
+#: reading the domain copy too must not repeat the value (review of #141).
+PG_TWO_CLASSES_REPLICA = Store(
+    ontology=PG_TWO_CLASSES.ontology,
+    docs={
+        **PG_TWO_CLASSES.docs,
+        "Person": [
+            {"_id": "Person/s", "_uri": EX + "s", "name": "S", "salary": 10},
+            {"_id": "Person/a", "_uri": EX + "a", "name": "A"},
+        ],
+    },
+    data=PG_TWO_CLASSES.data,
+)
+
 #: An edge into a document outside its property's declared range: a walk
 #: from that document still finds it (the range is only where copies are
 #: looked for).
@@ -785,7 +799,42 @@ _CASES: list[tuple[str, Store, str, str | None]] = [
         "SELECT ?x ?s WHERE { ?s a :Employee . ?x :knows ?s . ?x a :Person }",
         None,
     ),
-    ("pg_attr_then_type", PG_TWO_CLASSES, "SELECT ?s WHERE { ?s :name ?n . ?s a :Employee }", "#105"),
+    ("pg_attr_then_type", PG_TWO_CLASSES, "SELECT ?s WHERE { ?s :name ?n . ?s a :Employee }", None),
+    # #120: the edge binds ?s to its Person copy; :salary is on the Employee
+    # copy (its domain), and is read there.
+    (
+        "pg_edge_then_attr",
+        PG_TWO_CLASSES,
+        "SELECT ?s ?y WHERE { :a :knows ?s . ?s a :Employee ; :salary ?y }",
+        None,
+    ),
+    ("pg_edge_attr_untyped", PG_TWO_CLASSES, "SELECT ?s ?y WHERE { :a :knows ?s . ?s :salary ?y }", None),
+    (
+        "pg_values_edge_attr",
+        PG_TWO_CLASSES,
+        "SELECT ?s ?y WHERE { VALUES ?x { :a } ?x :knows ?s . ?s a :Employee ; :salary ?y }",
+        None,
+    ),
+    (
+        "pg_subselect_edge_attr",
+        PG_TWO_CLASSES,
+        'SELECT ?s ?y WHERE { { SELECT ?x WHERE { ?x :name "A" } } ?x :knows ?s . ?s :salary ?y }',
+        None,
+    ),
+    ("pg_type_then_other_attr", PG_TWO_CLASSES, "SELECT ?n WHERE { ?s a :Employee ; :name ?n }", None),
+    ("pg_both_attrs", PG_TWO_CLASSES, "SELECT ?n ?y WHERE { ?s :name ?n ; :salary ?y }", None),
+    (
+        "pg_replica_edge_attr",
+        PG_TWO_CLASSES_REPLICA,
+        "SELECT ?s ?y WHERE { :a :knows ?s . ?s :salary ?y }",
+        None,
+    ),
+    (
+        "pg_replica_edge_count",
+        PG_TWO_CLASSES_REPLICA,
+        "SELECT (COUNT(*) AS ?c) WHERE { :a :knows ?s . ?s :salary ?y }",
+        None,
+    ),
     ("pg_untyped_reverse", PG_TWO_CLASSES, "SELECT ?x ?s WHERE { ?s a :Employee . ?x :knows ?s }", None),
     ("w3c_const_then_type", W3C_COPIES, "SELECT ?y WHERE { :a :knows ?y . ?y a :Person }", None),
     ("w3c_var_chain", W3C_COPIES, 'SELECT ?x ?y WHERE { ?x :name "A" . ?x :knows ?y . ?y a :Person }', None),
@@ -1158,6 +1207,7 @@ _LIVE_ONLY = {
     "graph_outside_optional",
     "repeated_range_subselect_object",
     "tenant_relationship_node_alone",
+    "pg_subselect_edge_attr",
     "optional_scope_bind_outer",
     "optional_scope_subselect_outer",
     "optional_scope_optional_in_exists_bind",

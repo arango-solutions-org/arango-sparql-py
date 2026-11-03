@@ -89,6 +89,11 @@ class _BindingState:
 
     doc_to_collection: dict[str, str] = field(default_factory=dict)
     doc_to_class: dict[str, ResolvedClass] = field(default_factory=dict)
+    doc_collections: dict[str, frozenset[str]] = field(default_factory=dict)
+    """AQL alias of a row that is one of several collections' documents (a
+    union of a class's members, a range lookup across collections) or an
+    edge → the collections it can be in, for reads that depend on where the
+    document is (:meth:`AlgebraVisitor._attribute_source`)."""
     """AQL alias → the class whose collection it was opened as, when one was
     given (:meth:`AlgebraVisitor._open_collection`)."""
     outer_subject_homes: dict[str, tuple[str, ResolvedClass]] = field(default_factory=dict)
@@ -1880,7 +1885,7 @@ class AlgebraVisitor:
             if prop.is_object_property:
                 self._emit_edge_triple(s, prop, o, triple)
                 return
-            alias = self._ensure_subject_alias(s, prop)
+            alias = self._attribute_source(self._ensure_subject_alias(s, prop), prop)
             attr_path = attribute_path_ref(alias, prop.field_path)
             if isinstance(o, Variable):
                 # Predicate-existence filter (SPARQL 1.1 §18.5): a
@@ -2061,6 +2066,9 @@ class AlgebraVisitor:
         else:
             self.builder.for_(alias, collection)
         self.state.doc_to_collection[alias] = collection
+        self.state.doc_collections[alias] = frozenset(
+            resolved.shard_family or (collection,) if resolved is not None else (collection,)
+        )
         if resolved is not None:
             self.state.doc_to_class[alias] = resolved
         # Named-graph scoping: when a SPARQL GRAPH wrapper is active
@@ -2651,6 +2659,7 @@ class AlgebraVisitor:
         self._filter_edge_type(prop, e_alias)
         self._guard_tenants(v_alias)
         self.state.reified_edges[e_alias] = (prop.iri, v_alias)
+        self.state.doc_collections[e_alias] = frozenset({prop.edge_collection})
         if isinstance(obj, Variable):
             self.state.relationship_nodes.setdefault(str(obj), set()).add(prop.iri)
         self._bind_vertex_object(obj, e_alias, prop)
@@ -2851,6 +2860,7 @@ class AlgebraVisitor:
                 arms.append(self.builder.absorb_child(child))
             alias = self.builder.fresh_alias()
             self.builder.for_union(alias, arms, scans_documents=True)
+            self.state.doc_collections[alias] = frozenset(by_collection)
             # The named-graph scope applies to the union row, as one
             # collection's scan applies it (:meth:`_open_collection`): an
             # unbound ``GRAPH ?g`` is bound here. A per-arm test could only
@@ -2863,7 +2873,56 @@ class AlgebraVisitor:
             self.state.const_subject_alias[str(obj)] = alias
         return alias
 
-    def _every_copy(self, alias: str, range_iris: tuple[str, ...]) -> str:
+    def _attribute_source(self, alias: str, prop: ResolvedProperty) -> str:
+        """The documents to read *prop*'s attribute from, for the subject at *alias*.
+
+        One IRI can be several documents (a PG entity of two classes), and
+        an attribute is stored on the copy in its property's ``rdfs:domain``
+        (trusted as where the subjects are, as for routing). A subject bound
+        to a copy elsewhere (``:a :knows ?b . ?b a :Employee ; :salary ?s``
+        binds ``?b`` to the ``Person`` copy the edge reached) read the
+        attribute from that copy and missed it (#120, #105). When the bound
+        document is known to be outside the domain's collections, the
+        attribute is read from every copy with the subject's IRI in them
+        (:meth:`_every_copy`). Otherwise — it is in one of them, its
+        collection is not known, or no domain is declared — it is read from
+        the bound document, as before, so the usual read costs nothing more.
+        """
+        domain = self.resolver.domain_classes(prop.iri)
+        by_collection = self._range_classes(domain)
+        if not by_collection:
+            return alias
+        known = self._doc_collections(alias)
+        if not known or known <= set(by_collection):
+            # Unknown (a vertex walked over a property with no declared
+            # range): read the bound document, as for a backward walk with no
+            # range (:meth:`_every_copy`) — looking in every domain collection
+            # would cost a lookup per collection on every row (LDBC's shared
+            # ``id`` names ten), for a layout that rarely needs it.
+            return alias
+        return self._every_copy(alias, domain, only_outside=True, missing=prop.field_path)
+
+    def _doc_collections(self, alias: str) -> frozenset[str]:
+        """The collections the document at *alias* is known to be in; empty
+        when that is not known (a traversal vertex with no class home)."""
+        known = self.state.doc_collections.get(alias)
+        if known is not None:
+            return known
+        resolved = self.state.doc_to_class.get(alias)
+        if resolved is not None:
+            return frozenset(resolved.shard_family or (resolved.collection,))
+        # Not ``doc_to_collection``: a traversal vertex is recorded there
+        # under the edge collection it was reached through.
+        return frozenset()
+
+    def _every_copy(
+        self,
+        alias: str,
+        range_iris: tuple[str, ...],
+        *,
+        only_outside: bool = False,
+        missing: tuple[str, ...] | None = None,
+    ) -> str:
         """The documents carrying the IRI of the document at *alias* that an
         edge can point at, as one alias to walk backwards from (issue #105).
 
@@ -2883,6 +2942,11 @@ class AlgebraVisitor:
         is walked once (a plain ``UNION``: ``UNION_DISTINCT`` compares whole
         documents, LDBC IC8 PG ran 0.06 s → 0.18 s with it).
 
+        *only_outside* (an attribute read, :meth:`_attribute_source`): the
+        bound document always, and its copies only when it is outside the
+        collections (and, given *missing*, an attribute path, lacks that
+        attribute); a document inside them is read alone, at no lookup.
+
         With no declared range (the W3C loader's layout, for one) the walk
         starts from the bound document alone, as before: looking in every
         mapped collection would read collections the database may not have
@@ -2897,16 +2961,29 @@ class AlgebraVisitor:
         bound = self.builder.create_child()
         inner = bound.fresh_alias()
         bound.for_inline(inner, f"[{alias}]")
-        elsewhere = " || ".join(
-            f"IS_SAME_COLLECTION({bound.bind(c, hint='coll')}, {inner})" for c in by_collection
-        )
-        bound.filter_raw(f"!({elsewhere})")
+        if not only_outside:
+            elsewhere = " || ".join(
+                f"IS_SAME_COLLECTION({bound.bind(c, hint='coll')}, {inner})" for c in by_collection
+            )
+            bound.filter_raw(f"!({elsewhere})")
         bound.return_scalar(inner)
         arms.append(self.builder.absorb_child(bound))
         for collection, classes in by_collection.items():
             child = self.builder.create_child()
             inner = child.fresh_alias()
             child.for_(inner, collection)
+            if only_outside:
+                # Only for a bound document outside the collections: ArangoDB
+                # hoists this test, which does not depend on the loop, above
+                # the lookup, so a document inside them costs none (#120).
+                outside = " || ".join(
+                    f"IS_SAME_COLLECTION({child.bind(c, hint='coll')}, {alias})" for c in by_collection
+                )
+                child.filter_raw(f"!({outside})")
+                if missing is not None:
+                    # Nor for one that carries the attribute itself: reading
+                    # its copies too returned its value twice (review of #141).
+                    child.filter_raw(f"!({child.attribute_exists(alias, missing)})")
             child.filter_raw(subject_matches_value(inner, subject_ref(alias)))
             scope = in_scope(inner)
             if scope is not None:
@@ -3030,15 +3107,23 @@ class AlgebraVisitor:
         property's domain or range (*class_iris*) puts it in one collection
         under one tenant scoping, so a GRAPH scope can re-read it there
         (:meth:`_reopen_at_home`). The traversal itself reaches any
-        collection; with no such class the vertex has no known home."""
+        collection; with no such class the vertex has no known home.
+
+        The collections of those classes, however many, are recorded too: the
+        declared range (domain) is trusted as where the vertex is stored (PRD
+        §6.1), so an attribute read knows it needs no other copy
+        (:meth:`_attribute_source`)."""
         try:
             classes = self._concrete_classes(class_iris, domain_of=domain_of)
         except SchemaResolutionError:
             return
+        if not classes or any(c.style == "RPT" for c in classes):
+            return
+        self.state.doc_collections[v_alias] = frozenset(
+            name for c in classes for name in (c.shard_family or (c.collection,))
+        )
         if (
-            classes
-            and all(c.style != "RPT" for c in classes)
-            and len({c.collection for c in classes}) == 1
+            len({c.collection for c in classes}) == 1
             and len({(c.tenant_field, c.tenant_entity) for c in classes}) == 1
         ):
             self.state.doc_to_class[v_alias] = classes[0]
@@ -3306,6 +3391,7 @@ class AlgebraVisitor:
             arm_aqls.append(self.builder.absorb_child(child))
         alias = self.builder.fresh_alias()
         self.builder.for_union(alias, arm_aqls, scans_documents=True)
+        self.state.doc_collections[alias] = frozenset(by_collection)
         self._apply_graph_scope(alias)
         self._enforce_tenant_scope(alias, classes[0])
         self._guard_relationship_endpoints(alias, classes)

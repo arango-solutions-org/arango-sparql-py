@@ -602,7 +602,14 @@ routes the subject (`translate/visitor.py`):
   include ones the database may not have (ERR 1203, such as the
   `/sparql` route's default `Document`), so an edge into another copy
   there is a known limit (#105; the W3C loader's layout declares no
-  ranges);
+  ranges). An **attribute** is read likewise from the copy in its
+  property's `rdfs:domain` (`_attribute_source`, #120): when the bound
+  document is known to be outside the domain's collections (a vertex
+  walked over a property whose range is elsewhere, a union row of other
+  classes), each row reads its own document and, only when that document
+  is outside the domain, its copies there (a guarded lookup ArangoDB skips
+  otherwise). A document known to be in the domain, or of unknown
+  collection, is read alone, as before;
 - otherwise the property's `rdfs:domain` opens the subject's collection
   (`_route_by_domain`): one class opens its collection, with its label test in
   LPG; an `owl:unionOf` of LABEL classes in one collection is an any-of label
