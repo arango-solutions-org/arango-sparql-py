@@ -1321,6 +1321,32 @@ class AlgebraVisitor:
         self.builder.collect(keys=keys, aggregates=aggregates, count_into=count_into)
         if keys:
             self.builder.set_empty_result_fallback()
+        self._leave_pattern_scope(pattern_scope)
+
+    def _leave_pattern_scope(self, pattern_scope: dict[str, str]) -> None:
+        """After a COLLECT, only its keys and aggregates are in scope.
+
+        A pattern variable that is not a GROUP BY key is out of scope in
+        SPARQL after grouping (§18.2.4.1), and its AQL — a FOR alias's
+        attribute, a document — is out of scope after the COLLECT. Left in
+        ``var_to_expr``, a later join read it: a trailing ``VALUES ?s`` after
+        ``SELECT (COUNT(*) AS ?k)`` compared ``doc1`` after the COLLECT, and
+        ArangoDB refused it (ERR 1203, issue #116). Now such a VALUES binds a
+        variable the solutions do not have, a join with every row, as SPARQL
+        and pyoxigraph read it.
+        """
+        state = self.state
+        state.var_to_expr = {
+            name: expr for name, expr in state.var_to_expr.items() if pattern_scope.get(name) != expr
+        }
+        state.var_to_doc_alias = {}
+        state.const_subject_alias = {}
+        state.var_to_rpt_class = {}
+        state.const_subject_rpt_class = {}
+        state.relationship_nodes = {}
+        state.reified_edges = {}
+        state.maybe_unbound &= set(state.var_to_expr)
+        state.date_shift_vars &= set(state.var_to_expr)
 
     def _aggregate_arg_expr(self, agg: Any, scope: dict[str, str], *, unbound: str | None = None) -> str:
         """Translate the argument of a SPARQL aggregate to an AQL expression.

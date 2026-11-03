@@ -171,3 +171,21 @@ def test_a_group_by_variable_the_pattern_never_binds_is_a_null_key() -> None:
     )
     collect = next(line.strip() for line in result.aql.splitlines() if line.strip().startswith("COLLECT"))
     assert "= null" in collect and "= doc1.title" in collect
+
+
+def test_a_values_block_after_grouping_reads_nothing_out_of_scope() -> None:
+    """Issue #116: after the COLLECT only its keys and aggregates are in scope.
+
+    A trailing ``VALUES ?s`` on a variable that is no GROUP BY key binds a
+    variable the solutions lack, so it joins every solution (one per VALUES
+    row); it used to compare the pre-COLLECT ``doc1`` after the COLLECT,
+    which ArangoDB refused (ERR 1203). Checked against pyoxigraph live in
+    ``tests/integration/test_group_by_keys_live.py``.
+    """
+    result = translate(
+        "PREFIX : <http://example/>\nSELECT (COUNT(*) AS ?k) WHERE { ?s :name ?n } VALUES ?s { <http://example/a> }",
+        resolver=SchemaResolver.from_turtle(""),
+    )
+    after_collect = result.aql.split("COLLECT", 1)[1]
+    assert "doc1" not in after_collect
+    assert "FOR row" in after_collect
