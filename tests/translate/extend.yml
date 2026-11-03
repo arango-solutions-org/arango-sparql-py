@@ -156,11 +156,11 @@ cases:
 
   - name: projection_datatype_unbound_propagates_null
     # ``SELECT (DATATYPE(?m) AS ?dt)`` — ``?m`` never bound. The
-    # visitor's ``Builtin_DATATYPE`` emission is a nested ternary
-    # probing IS_BOOL / IS_NUMBER / IS_STRING on the arg. All three
-    # probes return false for ``null``, so the whole expression
-    # short-circuits to ``null`` → ``?dt`` is left unbound on every
-    # row. Mirrors the W3C ``project-expression/projexp06`` shape.
+    # expression needs an unbound variable's value, so it is an error in
+    # every row and is emitted as ``null`` as a whole
+    # (``expression_errors.certainly_error``, #125) → ``?dt`` is left
+    # unbound on every row. Mirrors the W3C ``project-expression/projexp06``
+    # shape.
     sparql: |
       PREFIX : <http://ex.org/>
       SELECT ?n (DATATYPE(?m) AS ?dt) WHERE {
@@ -169,7 +169,7 @@ cases:
     expected_aql: |-
       FOR doc1 IN @@c1_Person
       FILTER HAS(doc1, "name")
-      LET bv2 = (IS_BOOL(null) ? "http://www.w3.org/2001/XMLSchema#boolean" : (IS_NUMBER(null) ? "http://www.w3.org/2001/XMLSchema#integer" : (IS_STRING(null) ? "http://www.w3.org/2001/XMLSchema#string" : null)))
+      LET bv2 = null
       RETURN { n: doc1.name, dt: bv2 }
     expected_bind_vars:
       "@c1_Person": "Person"

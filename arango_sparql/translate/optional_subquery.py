@@ -46,9 +46,18 @@ def emit_optional_subquery(visitor: AlgebraVisitor, node: Any) -> None:
     """Emit ``LeftJoin(p1, p2, expr)`` with ``p1`` already visited."""
     outer = set(visitor.state.var_to_expr)
     child = _spawn_child(visitor)
+    # The body is evaluated on its own, then left-joined (SPARQL 1.1 §18.5):
+    # it shares with the outer pattern only the variables it binds itself.
+    # Seeded with every outer binding, a BIND, a nested group's FILTER or a
+    # sub-select in it read outer variables that are not in its scope (#125:
+    # ``OPTIONAL { ?p :age ?a BIND(CONCAT(?n, "!") AS ?v) }`` bound ``?v``).
+    # The OPTIONAL's own condition (``expr``, its top-level FILTER) is the
+    # left join's, evaluated on the joined row, so it sees them all.
+    hidden = _hide_unshared(child, outer - {str(v) for v in getattr(node.p2, "_vars", ())})
     child.visit(node.p2)
     expr = getattr(node, "expr", None)
     if expr is not None and getattr(expr, "name", "") != "TrueFilter":
+        child.state.var_to_expr.update(hidden)
         child.builder.filter_raw(child._translate_expr(expr))
     if not child.builder.has_for_clause():
         # A body that binds nothing from a collection (``OPTIONAL { BIND(…) }``):
@@ -76,6 +85,17 @@ def emit_optional_subquery(visitor: AlgebraVisitor, node: Any) -> None:
     for name in new_vars:
         visitor.state.var_to_expr[name] = attribute_ref(row_alias, name)
         visitor.state.maybe_unbound.add(name)
+
+
+def _hide_unshared(child: AlgebraVisitor, names: set[str]) -> dict[str, str]:
+    """Take *names* out of *child*'s scope; return their expressions."""
+    state = child.state
+    hidden = {name: state.var_to_expr.pop(name) for name in sorted(names) if name in state.var_to_expr}
+    for name in hidden:
+        state.var_to_doc_alias.pop(name, None)
+        state.var_to_rpt_class.pop(name, None)
+        state.maybe_unbound.discard(name)
+    return hidden
 
 
 def needs_subquery(visitor: AlgebraVisitor, p2: Any) -> bool:

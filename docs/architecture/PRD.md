@@ -1252,7 +1252,7 @@ deployments.
 | **PG `COLLECTION`** — one OWL class ↔ one ArangoDB collection; datatype properties as top-level attributes | ✅ shipped | `tests/translate/bgp_select.yml` (every case but the `hybrid_collection_emits_type_filter` row) |
 | **LPG `LABEL`** — multi-class collection with `phys:typeField`/`phys:typeValue` discriminator | ✅ shipped | `tests/translate/bgp_select.yml :: hybrid_collection_emits_type_filter` |
 | **Nested property paths** (issue #72) — `phys:attributePath` / CSI `path` reads a value inside a nested object, with an existence check on the same path; `phys:attributeName` / CSI `field` stays one literal name. Required, OPTIONAL, constant-object and join triples; `?s ?p ?o` and negated paths refuse while any property is nested (§6.2) | ✅ shipped | `tests/translate/nested_paths.yml` + `tests/translate/test_translate_nested_paths_goldens.py`; `tests/translate/test_nested_field_paths.py` (mapping validation, refusals); **binding parity** vs pyoxigraph live on ArangoDB in `tests/integration/test_nested_field_paths_live.py` (both shapes, both on one document, list / string / empty object where the object should be) |
-| **PG `DEDICATED_COLLECTION` edges** — OWL `ObjectProperty` resolves to a `phys:edgeCollectionName`; SPARQL traversal lowers to `FOR v, e IN OUTBOUND <s> @@edgeColl`, binding the target vertex's `_uri` to the SPARQL object (so a follow-up `?o a :Person` / `?o :name ?n` joins on `_uri` automatically). Implemented in `visitor.py::_emit_edge_triple` (BGP) and `visit_LeftJoin` (OPTIONAL: the block's matches are a correlated subquery the outer query iterates, padded with one `null` row, so every matching edge is its own solution — `_emit_optional_rows`; it followed the first edge only until issue #48). | ✅ shipped | `tests/translate/edge_traversal.yml` + `tests/translate/test_translate_edge_traversal_goldens.py`; **binding parity** vs pyoxigraph in `tests/cross/test_edge_traversal_cross.py` (`pg_dedicated_edge` arm; OPTIONAL over a multi-edge subject in `OPTIONAL_CASES`) and live on ArangoDB in `tests/integration/test_optional_edges_live.py` |
+| **PG `DEDICATED_COLLECTION` edges** — OWL `ObjectProperty` resolves to a `phys:edgeCollectionName`; SPARQL traversal lowers to `FOR v, e IN OUTBOUND <s> @@edgeColl`, binding the target vertex's `_uri` to the SPARQL object (so a follow-up `?o a :Person` / `?o :name ?n` joins on `_uri` automatically). Implemented in `visitor.py::_emit_edge_triple` (BGP) and `visit_LeftJoin` (OPTIONAL: the block's matches are a correlated subquery the outer query iterates, padded with one `null` row, so every matching edge is its own solution — `_emit_optional_rows`; it followed the first edge only until issue #48). An OPTIONAL body evaluated as a sub-query shares with the outer pattern only the variables it binds itself (SPARQL 1.1 §18.5): a BIND, a nested group's FILTER or a sub-select in it does not read a variable only the outer pattern binds; its top-level FILTER, the left join's condition, does (#125). | ✅ shipped | `tests/translate/edge_traversal.yml` + `tests/translate/test_translate_edge_traversal_goldens.py`; **binding parity** vs pyoxigraph in `tests/cross/test_edge_traversal_cross.py` (`pg_dedicated_edge` arm; OPTIONAL over a multi-edge subject in `OPTIONAL_CASES`) and live on ArangoDB in `tests/integration/test_optional_edges_live.py` |
 | **LPG `GENERIC_WITH_TYPE` edges** — typed-edge traversal with discriminator FILTER (`FILTER e.<typeField> == @<typeValue>`) so multiple relationship types sharing one edge collection stay separated | ✅ shipped | `tests/translate/edge_traversal.yml` (DEDICATED + GENERIC arms exercised in both BGP and OPTIONAL); **binding parity** vs pyoxigraph in `tests/cross/test_edge_traversal_cross.py` (`lpg_generic_edge` arm) |
 | **RPT (`_triples` triple-store)** — read subject/predicate/object rows, `NOT_NULL(object_uri, object_value)` for objects (object properties read the `object_uri` column in the same triples table — no separate edge traversal), `STARTS_WITH(_, "_:")` heuristic for blank nodes | ✅ shipped | `tests/translate/rpt.yml` (type patterns + datatype/object property reads); cross-model binding parity in `tests/cross/test_multimodel_cross.py` (RPT arm + cross-class joins) |
 | **Mixed-model BGP** (RPT + PG, RPT + LPG, PG + LPG, all three) | 🟡 v1.0 | Criterion §3.4; fixture corpus `tests/translate/hybrid.yml` |
@@ -3203,6 +3203,18 @@ COALESCE-defaulted reference. Fixes W3C
 ``functions/coalesce01``, and
 ``project-expression/projexp06`` uniformly with one
 change.
+
+**Correction logged here for posterity (#125):** AQL's
+``null`` does not propagate as SPARQL's error does:
+``null == X`` and ``null != X`` are booleans,
+``null + 1`` is 1, ``CONCAT(null, "x")`` is ``"x"``. An
+expression that needs the value of a variable nothing
+binds is now recognised at translation time and emitted
+as ``null`` as a whole
+(``translate/expression_errors.py``: ``BOUND``,
+``COALESCE``, ``IF``, ``EXISTS``, and ``&&`` / ``||``
+with a non-error operand are excepted); the warning is
+kept.
 
 The second bug (1 of 5, ``pp35``) was a real
 *scope-stack propagation* defect in

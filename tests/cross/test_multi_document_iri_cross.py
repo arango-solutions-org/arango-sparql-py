@@ -409,6 +409,27 @@ NO_DEFAULT_COLLECTION = Store(
     data=":y a :Person . :a a :Person . :a :knows :y .",
 )
 
+#: An OPTIONAL body shares with the outer pattern only the variables it binds
+#: (#125): a BIND, a nested group's FILTER or a sub-select in it must not read
+#: ``?n``, which only the outer pattern binds. Its top-level FILTER is the
+#: left join's condition and does.
+OPTIONAL_SCOPE = Store(
+    ontology=PREFIXES
+    + """
+:Person a owl:Class ; phys:collectionName "Person" .
+:name a owl:DatatypeProperty ; rdfs:domain :Person .
+:age a owl:DatatypeProperty ; rdfs:domain :Person .
+:nick a owl:DatatypeProperty ; rdfs:domain :Person .
+""",
+    docs={
+        "Person": [
+            {"_id": "Person/a", "_uri": EX + "a", "name": "A", "age": 3, "nick": "A"},
+            {"_id": "Person/b", "_uri": EX + "b", "name": "B", "age": 4, "nick": "X"},
+        ],
+    },
+    data=':a a :Person ; :name "A" ; :age 3 ; :nick "A" . :b a :Person ; :name "B" ; :age 4 ; :nick "X" .',
+)
+
 #: A symmetric property with a self-loop: ``:a :knows :a`` is one triple,
 #: however many ends the edge has (#121). The oracle holds the closure.
 SYMMETRIC_SELF_LOOP = Store(
@@ -611,6 +632,41 @@ LPG_LABELS = Store(
 
 _CASES: list[tuple[str, Store, str, str | None]] = [
     # (id, store, query, issue it is wrong under on main — or None)
+    *[
+        (f"optional_scope_{name}", OPTIONAL_SCOPE, query, None)
+        for name, query in [
+            (
+                "bind_outer",
+                'SELECT ?p ?a ?v WHERE { ?p :name ?n OPTIONAL { ?p :age ?a BIND(CONCAT(?n, "!") AS ?v) } }',
+            ),
+            (
+                "nested_filter_outer",
+                'SELECT ?p ?a WHERE { ?p :name ?n OPTIONAL { ?p :age ?a { FILTER(?n = "A") } } }',
+            ),
+            (
+                "subselect_outer",
+                "SELECT ?p ?k WHERE { ?p :name ?n OPTIONAL { SELECT ?p ?k WHERE { ?p :nick ?k FILTER(?k != ?n) } } }",
+            ),
+            # Must hold: the left join's own condition, and a shared variable.
+            (
+                "top_filter_outer",
+                'SELECT ?p ?a WHERE { ?p :name ?n OPTIONAL { ?p :age ?a FILTER(?n = "A") } }',
+            ),
+            (
+                "top_filter_mixed",
+                'SELECT ?p ?a WHERE { ?p :name ?n OPTIONAL { ?p :age ?a FILTER(?a > 2 && ?n = "B") } }',
+            ),
+            ("bind_shared", "SELECT ?p ?v WHERE { ?p :name ?n OPTIONAL { ?p :age ?a BIND(?a + 1 AS ?v) } }"),
+            (
+                "bind_shared_subject",
+                "SELECT ?p ?v WHERE { ?p :name ?n OPTIONAL { ?p :age ?a BIND(STR(?p) AS ?v) } }",
+            ),
+            (
+                "shared_object",
+                "SELECT ?p ?q WHERE { ?p :nick ?n OPTIONAL { ?q :name ?n } }",
+            ),
+        ]
+    ],
     (
         "tenant_label_in_another_collection",
         TENANT_SHARED_LABEL,
@@ -998,6 +1054,8 @@ _LIVE_ONLY = {
     "graph_outside_optional",
     "repeated_range_subselect_object",
     "tenant_relationship_node_alone",
+    "optional_scope_bind_outer",
+    "optional_scope_subselect_outer",
 }
 
 

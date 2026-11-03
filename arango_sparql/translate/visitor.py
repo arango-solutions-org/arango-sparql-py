@@ -40,6 +40,7 @@ from .builder import (
     type_predicate,
 )
 from .date_arithmetic import compare_instants, date_shift, instant, is_date_shift, is_duration_literal
+from .expression_errors import certainly_error, unbound_variables
 from .filter_builtins import translate_builtin, translate_function
 from .minus_exists import emit_minus
 from .optional_crosssubject import (
@@ -3429,6 +3430,13 @@ class AlgebraVisitor:
         ``translateFilterExpression`` / ``translateFilterTerm`` /
         ``translateFilterFunction`` switch.
         """
+        in_scope = self.state.var_to_expr.__contains__
+        if not isinstance(expr, Variable) and certainly_error(expr, in_scope):
+            # Needs the value of a variable nothing binds: an error in every
+            # solution, which ``null`` stands for as a whole (#125).
+            for unbound in unbound_variables(expr, in_scope):
+                self._warn_unbound_variable(unbound)
+            return "null"
         # ----- Leaf terms -------------------------------------------------
         if isinstance(expr, Variable):
             mapped = self.state.var_to_expr.get(str(expr))
@@ -3447,13 +3455,13 @@ class AlgebraVisitor:
                 #     propagate the error so the enclosing assignment
                 #     leaves its target unbound.
                 #
-                # AQL's ``null`` follows the same error-propagation
-                # semantics by construction: ``null == X`` → ``null``,
-                # ``null + 1`` → ``null``, ``NOT_NULL(null, x)`` → ``x``,
-                # and ``FILTER null`` excludes the row. So emitting the
-                # literal ``null`` here gives every spec-correct
-                # downstream behaviour for free — no per-operator
-                # special-case code is needed.
+                # AQL's ``null`` does NOT propagate as SPARQL's error does
+                # (``null != X`` is true, ``null + 1`` is 1, ``CONCAT(null,
+                # "x")`` is ``"x"``), so an expression that needs this
+                # variable's value is emitted as ``null`` as a whole before
+                # it gets here (:mod:`expression_errors`, #125). What
+                # reaches this point is read by an error-tolerant operator:
+                # ``NOT_NULL(null, x)`` → ``x``, ``BOUND``, ``FILTER null``.
                 #
                 # A SPARQL typo (``?nove`` vs ``?nova``) presents
                 # identically to a deliberate use of an OPTIONAL-bound
@@ -3464,18 +3472,7 @@ class AlgebraVisitor:
                 # The translation itself does NOT raise — that would
                 # block W3C-conformant queries like
                 # ``NOT_NULL(?z, -3)`` from translating.
-                self.builder.warn(
-                    code="W_UNBOUND_VARIABLE_IN_EXPR",
-                    message=(
-                        f"variable ?{expr} is referenced in an expression "
-                        f"but never bound by the surrounding pattern; per "
-                        f"SPARQL §17.2.1 this evaluates to an 'error' value "
-                        f"(emitted as AQL ``null``, which the surrounding "
-                        f"FILTER / BIND / COALESCE / arithmetic handles "
-                        f"per its own null-propagation rules)"
-                    ),
-                    variable=str(expr),
-                )
+                self._warn_unbound_variable(str(expr))
                 return "null"
             return mapped
         if isinstance(expr, URIRef):
@@ -3614,6 +3611,21 @@ class AlgebraVisitor:
                 f"? ({left_alias} {op} {right_alias}) : null)[0]"
             )
         return result
+
+    def _warn_unbound_variable(self, name: str) -> None:
+        """``W_UNBOUND_VARIABLE_IN_EXPR``: *name* is read but never bound."""
+        self.builder.warn(
+            code="W_UNBOUND_VARIABLE_IN_EXPR",
+            message=(
+                f"variable ?{name} is referenced in an expression "
+                f"but never bound by the surrounding pattern; per "
+                f"SPARQL §17.2.1 this evaluates to an 'error' value "
+                f"(emitted as AQL ``null``, which the surrounding "
+                f"FILTER / BIND / COALESCE / arithmetic handles "
+                f"per its own null-propagation rules)"
+            ),
+            variable=name,
+        )
 
     def _is_date_valued(self, node: Any) -> bool:
         """Whether *node* is ``date ± duration``, or a variable bound to one."""
