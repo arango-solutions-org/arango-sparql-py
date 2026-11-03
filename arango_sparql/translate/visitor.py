@@ -942,7 +942,15 @@ class AlgebraVisitor:
         for var, prop, edge_collection, subject_alias in edge_bindings:
             v_alias = child.fresh_alias(prefix="v")
             e_alias = child.fresh_alias(prefix="e")
-            child.for_traversal(v_alias, e_alias, subject_alias, edge_collection)
+            # A symmetric property is read in both directions here too (#133),
+            # as the required-side triple reads it (:meth:`_emit_edge_triple`).
+            child.for_traversal(
+                v_alias,
+                e_alias,
+                subject_alias,
+                edge_collection,
+                direction="ANY" if prop.symmetric else "OUTBOUND",
+            )
             # The same edge-type filter the required-side triple applies
             # (``_emit_edge_triple``).
             if prop.mapping_style == "GENERIC_WITH_TYPE" and prop.type_field and prop.type_value:
