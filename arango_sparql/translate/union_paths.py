@@ -352,6 +352,10 @@ def _spawn_child(visitor: AlgebraVisitor) -> AlgebraVisitor:
     # An outer variable an arm re-projects keeps "can be unbound" (#59).
     cv.state.maybe_unbound = set(visitor.state.maybe_unbound)
     cv.state.graph_scope = list(visitor.state.graph_scope)
+    # OPTIONAL-body scope (#125): what an enclosing body hid, what an
+    # enclosing EXISTS substitutes.
+    cv.state.hidden_outer = dict(visitor.state.hidden_outer)
+    cv.state.substituted = set(visitor.state.substituted)
     cv.state.outer_subject_homes = dict(visitor.state.outer_subject_homes)
     # Where the outer documents are, so a GRAPH inside the child can re-read
     # one there (``AlgebraVisitor._reopen_at_home``).

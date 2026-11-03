@@ -67,6 +67,12 @@ def emit_to_multiset(visitor: AlgebraVisitor, node: Any) -> None:
     """
     inner = node.p
     inner_name = getattr(inner, "name", None)
+    # A join after a COLLECT (a trailing VALUES, #116) can reject every
+    # group, as HAVING can: the grouped empty-input fallback would then turn
+    # "no group matches" into one spurious empty row. Disable it, as
+    # ``visit_Filter`` does for HAVING.
+    if visitor.builder._empty_result_fallback:  # noqa: SLF001 - the visitor's own builder
+        visitor.builder.clear_empty_result_fallback()
 
     if inner_name == "values":
         _emit_values(visitor, inner)

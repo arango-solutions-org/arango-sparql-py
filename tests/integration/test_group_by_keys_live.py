@@ -134,3 +134,39 @@ def test_order_by_an_unprojected_group_key_runs(db: Any, oxi_store: Any) -> None
     rows = _arango(db, body)
     assert rows == [{"t": "Rock", "s": 5}, {"t": "Jazz", "s": 4}, {"t": "Rock", "s": 3}]
     assert rows == _oxigraph(oxi_store, body)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # Issue #116: after grouping, ``?f`` is out of scope, so a trailing
+        # VALUES on it joins every solution (one per VALUES row); it used to
+        # compare the pre-COLLECT document after the COLLECT (ERR 1203).
+        "SELECT (COUNT(*) AS ?k) WHERE { ?f a :Forum ; :title ?t } VALUES ?f { UNDEF }",
+        "SELECT (COUNT(*) AS ?k) WHERE { ?f a :Forum ; :title ?t } VALUES ?f { :f1 :f2 }",
+        'SELECT (SUM(?m) AS ?s) WHERE { ?f a :Forum ; :members ?m } VALUES ?t { "Rock" }',
+        # A GROUP BY key is in scope: VALUES restricts the groups.
+        'SELECT ?t (SUM(?m) AS ?s) WHERE { ?f a :Forum ; :title ?t ; :members ?m } GROUP BY ?t VALUES ?t { "Rock" }',
+        "SELECT ?t (SUM(?m) AS ?s) WHERE { ?f a :Forum ; :title ?t ; :members ?m } GROUP BY ?t "
+        'VALUES (?t ?f) { ("Jazz" :f1) ("Rock" UNDEF) }',
+    ],
+)
+def test_a_values_block_after_grouping_joins_the_groups(db: Any, oxi_store: Any, body: str) -> None:
+    expected = _oxigraph(oxi_store, body)
+    assert expected, "the case must have a non-empty answer to prove anything"
+    assert _multiset(_arango(db, body)) == _multiset(expected)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        'SELECT ?t (SUM(?m) AS ?s) WHERE { ?f a :Forum ; :title ?t ; :members ?m } GROUP BY ?t VALUES ?t { "Pop" }',
+        "SELECT ?t (SUM(?m) AS ?s) WHERE { ?f a :Forum ; :title ?t ; :members ?m } GROUP BY ?t "
+        'VALUES (?t ?f) { ("Pop" UNDEF) }',
+    ],
+)
+def test_a_values_block_matching_no_group_returns_no_row(db: Any, oxi_store: Any, body: str) -> None:
+    # The grouped empty-input fallback (W3C agg-empty-group) is for no input
+    # rows; groups that a trailing VALUES rejects leave no solution, as HAVING.
+    assert _oxigraph(oxi_store, body) == []
+    assert _arango(db, body) == []
