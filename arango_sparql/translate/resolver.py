@@ -924,6 +924,48 @@ class SchemaResolver:
                 out.update(str(m) for m in Collection(self.ontology, members) if isinstance(m, URIRef))
         return tuple(sorted(out))
 
+    def declares_class(self, iri: str) -> bool:
+        """Whether *iri* is something a domain or range can name: an
+        ``owl:Class``, or a reified relationship (plan D8)."""
+        return (URIRef(iri), RDF.type, OWL.Class) in self.ontology or self.is_reified_entry(iri)
+
+    def undeclared_class_fallback(self, iri: str, where: str) -> ResolvedClass:
+        """The default collection, standing for a class the ontology does not
+        declare but a domain names (*where*), with a warning (#126).
+
+        arango-query-core writes ``rdfs:domain :Any`` for a relationship with
+        no ``fromEntity``. Its subjects are stored where any subject no class
+        places is, the default collection, so a domain naming it reads that
+        beside its declared classes, as 0.5.0 read it. A type pattern on the
+        class still refuses it (:meth:`resolve_class`); this is not cached.
+        """
+        self._warn_schema(
+            code="W_SCHEMA_UNDECLARED_DOMAIN_CLASS",
+            message=(
+                f"{where} names {iri!r}, which is not declared owl:Class; its subjects are "
+                f"read from the default collection {self.default_collection!r}"
+            ),
+            iri=iri,
+            fallback_collection=self.default_collection,
+        )
+        return ResolvedClass(
+            iri=iri,
+            collection=self.default_collection,
+            shard_family=self._shard_family_by_collection.get(self.default_collection),
+        )
+
+    def warn_undeclared_range(self, iri: str, where: str) -> None:
+        """Warn that a range names an undeclared class, so it is not used
+        (objects are not looked up through it; #126)."""
+        self._warn_schema(
+            code="W_SCHEMA_UNDECLARED_RANGE_CLASS",
+            message=(
+                f"{where} names {iri!r}, which is not declared owl:Class; the range is not "
+                f"used to look objects up"
+            ),
+            iri=iri,
+        )
+
     def triple_store_class(self) -> ResolvedClass | None:
         """The triples table, when the whole mapping is one triple store.
 
@@ -1135,6 +1177,9 @@ _BUNDLE_ENTITY_ANNOTATIONS: tuple[tuple[str, str], ...] = (
     ("objectValueColumn", "objectValueColumn"),
     ("tenantField", "tenantField"),
     ("tenantEntity", "tenantEntity"),
+    # ``LABELS`` / ``MULTI_LABEL``: ``labelValue IN doc[labelsField]`` (#94, #126).
+    ("labelsField", "labelsField"),
+    ("labelValue", "labelValue"),
 )
 
 _BUNDLE_RELATIONSHIP_ANNOTATIONS: tuple[tuple[str, str], ...] = (
@@ -1201,6 +1246,22 @@ def _synthesize_graph_from_bundle(bundle: MappingBundle) -> Graph:
     """
 
     g = Graph()
+    # A ``UNION`` supertype's members: the physical ``members`` list or, failing
+    # that, the conceptual entity's ``subtypes`` (arango-query-core's mapping
+    # contract). The resolver reads them as ``rdfs:subClassOf`` (#94, #126).
+    conceptual = bundle.conceptual_schema or {}
+    concept_entities = [
+        e for e in conceptual.get("entities", []) or [] if isinstance(e, dict) and e.get("name")
+    ]
+    subtypes = {str(e["name"]): e.get("subtypes") or [] for e in concept_entities}
+    # A relationship's endpoints live in the conceptual schema in
+    # arango-query-core's contract (its ``turtle_to_mapping`` writes none in
+    # the physical block); the physical spec's own, when given, wins (#126).
+    endpoints = {
+        str(r["type"]): (r.get("fromEntity"), r.get("toEntity"))
+        for r in conceptual.get("relationships", []) or []
+        if isinstance(r, dict) and r.get("type")
+    }
     for label, spec in bundle.entities().items():
         if not isinstance(label, str) or not label:
             continue
@@ -1222,6 +1283,9 @@ def _synthesize_graph_from_bundle(bundle: MappingBundle) -> Graph:
             if value is None:
                 continue
             g.add((iri, _SYNTHETIC_PHYS_NS[phys_local], Literal(str(value))))
+        for member in spec.get("members") or subtypes.get(label) or []:
+            if isinstance(member, str) and member:
+                g.add((_synthetic_iri(member), RDFS.subClassOf, iri))
 
         # Per-property conceptual→physical mapping (CDF CC-12): CSI producers
         # emit OWL-style conceptual property names (``accountId``) with the
@@ -1247,6 +1311,17 @@ def _synthesize_graph_from_bundle(bundle: MappingBundle) -> Graph:
                 elif location[0] != prop_name:
                     g.add((p_iri, _SYNTHETIC_PHYS_NS["attributeName"], Literal(location[0])))
 
+    # A conceptual entity's properties are its datatype properties, as
+    # arango-query-core's ``mapping_to_turtle`` declares them, so a subject
+    # read by one is routed by its domain (#126).
+    for entity in concept_entities:
+        for prop in entity.get("properties") or []:
+            name = prop.get("name") if isinstance(prop, dict) else None
+            if isinstance(name, str) and name:
+                p_iri = _synthetic_iri(name)
+                g.add((p_iri, RDF.type, OWL.DatatypeProperty))
+                g.add((p_iri, RDFS.domain, _synthetic_iri(str(entity["name"]))))
+
     for rtype, spec in bundle.relationships().items():
         if not isinstance(rtype, str) or not rtype:
             continue
@@ -1270,8 +1345,9 @@ def _synthesize_graph_from_bundle(bundle: MappingBundle) -> Graph:
             )
         g.add((iri, _SYNTHETIC_PHYS_NS["mappingStyle"], Literal(style)))
 
-        from_entity = spec.get("fromEntity")
-        to_entity = spec.get("toEntity")
+        concept_from, concept_to = endpoints.get(rtype, (None, None))
+        from_entity = spec.get("fromEntity") or concept_from
+        to_entity = spec.get("toEntity") or concept_to
         if isinstance(from_entity, str) and from_entity:
             g.add((iri, RDFS.domain, _synthetic_iri(from_entity)))
         if isinstance(to_entity, str) and to_entity:
