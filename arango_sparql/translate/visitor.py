@@ -3481,9 +3481,8 @@ class AlgebraVisitor:
         classes in the active graph scope and tenant (so the copy kept is
         one the union keeps), with the same value or the same absence for
         every compared attribute. Emitted once the BGP's triples have
-        filtered the rows; the test of the row's collection does not depend
-        on the probe's loop, so ArangoDB hoists it, and a row no probe
-        concerns costs no lookup.
+        filtered the rows; the row's collection and ``_uri`` guard the
+        probe in a ternary, so a row no probe concerns starts no subquery.
         """
         checks, self.state.pending_copy_checks = self.state.pending_copy_checks, []
         for alias, by_collection, fields, what in checks:
@@ -3497,8 +3496,10 @@ class AlgebraVisitor:
                 )
                 # Only an IRI names a copy in another collection (an ``_id``
                 # includes the collection), so a row with no ``_uri`` is
-                # never probed; both tests are hoisted above the lookup.
-                probe.filter_raw(f"({later}) && {alias}._uri != null")
+                # never probed. The test guards the subquery itself, not a
+                # FILTER inside it: ArangoDB skips a subquery in the branch
+                # a ternary does not take, so such a row starts no lookup.
+                guard = f"({later}) && {alias}._uri != null"
                 probe.filter_raw(f"{other}._uri == {alias}._uri")
                 # A copy in another named graph is another quad (lax default
                 # graph, as pyoxigraph's union default graph reads it).
@@ -3521,7 +3522,7 @@ class AlgebraVisitor:
                 text = self.builder.absorb_child(probe)
                 repeated = self.builder.fresh_alias(prefix="repeated")
                 indented = "\n".join("  " + line for line in text.splitlines())
-                self.builder.let(repeated, f"LENGTH((\n{indented}\n))")
+                self.builder.let(repeated, f"({guard}) ? LENGTH((\n{indented}\n)) : 0")
                 self.builder.filter_raw(f"{repeated} == 0")
 
     def _ensure_subject_alias(self, subject: Any, prop: Any | None = None) -> str:

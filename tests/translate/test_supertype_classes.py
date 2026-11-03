@@ -260,6 +260,11 @@ def test_a_described_subject_keeps_every_copy() -> None:
 def test_only_an_iri_is_probed_for_another_copy() -> None:
     # An ``_id`` names one collection's document, so a row without ``_uri``
     # repeats nothing; the guard keeps it from probing (a full scan per row
-    # on such data, review of #146).
+    # on such data, review of #146). The guard is a ternary around the
+    # subquery, not a FILTER inside it, so such a row starts no subquery.
     aql = _aql(UNION_TTL, "SELECT ?m WHERE { ?m a :Message }")
-    assert ") && doc3._uri != null\nFILTER doc4._uri == doc3._uri\n" in aql.replace("  FILTER", "FILTER")
+    assert (
+        "doc3)) && doc3._uri != null) ? LENGTH((\n  FOR doc4 IN @@c3_Comment\n  FILTER doc4._uri == doc3._uri\n"
+        in aql
+    )
+    assert ")) : 0\nFILTER repeated5 == 0\n" in aql
