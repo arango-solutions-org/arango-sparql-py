@@ -115,7 +115,7 @@ def literal_to_python(literal: Any) -> Any:
     return text
 
 
-def oxi_bindings(store: Any, sparql: str) -> list[dict[str, str]]:
+def oxi_bindings(store: Any, sparql: str, *, union_default_graph: bool = False) -> list[dict[str, str]]:
     """Run *sparql* against *store* and return SELECT bindings as plain dicts.
 
     Values are stringified via the term's ``str()`` so equality comparison
@@ -127,8 +127,11 @@ def oxi_bindings(store: Any, sparql: str) -> list[dict[str, str]]:
     ``QuerySolution`` row supports ``__getitem__`` by either a
     ``Variable`` or its name string and yields ``NamedNode | Literal | ...``
     or ``None`` for unbound projection variables.
+
+    *union_default_graph* reads the default graph as the union of every
+    graph, as the resolver's lax ``default_graph_includes_named`` does.
     """
-    result = store.query(sparql)
+    result = store.query(sparql, use_default_graph_as_union=union_default_graph)
     variables = list(result.variables)
     rows: list[dict[str, str]] = []
     for solution in result:

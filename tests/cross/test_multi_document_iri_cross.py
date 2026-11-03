@@ -48,6 +48,9 @@ class Store:
     resolver_kwargs: dict[str, Any] = field(default_factory=dict)
     strict: bool = False  # strict_subject_resolution, as the service's mapping sets it
     tenant_id: str | None = None
+    # The oracle reads the default graph as the union of every graph (the
+    # lax default graph); otherwise as the default graph only.
+    union_default_graph: bool = False
 
 
 PG_TWO_CLASSES = Store(
@@ -525,6 +528,20 @@ UNION_COPIES = Store(
     resolver_kwargs={"default_graph_includes_named": False},
 )
 
+#: Copies of ``:s`` in two named graphs, read through the lax default graph
+#: (the union of every graph): two quads, so ``:s`` comes back once per
+#: graph, as pyoxigraph and main read it (review of #146).
+UNION_GRAPH_COPIES = Store(
+    ontology=UNION_COPIES.ontology,
+    docs={
+        "Person": [{"_id": "Person/s", "_uri": EX + "s", "_graph": EX + "g2", "name": "S"}],
+        "Org": [{"_id": "Org/s", "_uri": EX + "s", "_graph": EX + "g1", "name": "S"}],
+    },
+    data=':g1 { :s a :Org, :Agent ; :name "S" . }\n:g2 { :s a :Person, :Agent ; :name "S" . }',
+    trig=True,
+    union_default_graph=True,
+)
+
 #: A symmetric property with a self-loop: ``:a :knows :a`` is one triple,
 #: however many ends the edge has (#121). The oracle holds the closure.
 SYMMETRIC_SELF_LOOP = Store(
@@ -741,7 +758,17 @@ _CASES: list[tuple[str, Store, str, str | None]] = [
             # copies stay; so do the copies of an attribute read from another
             # copy (#141).
             ("incoming_edge", "SELECT ?x ?s WHERE { ?s a :Agent . ?x :knows ?s }"),
+            ("incoming_path", "SELECT ?x ?s WHERE { ?s a :Agent . ?x :knows+ ?s }"),
+            ("inverse_path", "SELECT ?s ?x WHERE { ?s a :Agent . ?s ^:knows ?x }"),
             ("attribute_from_another_copy", "SELECT ?s ?y WHERE { ?s a :Agent ; :salary ?y }"),
+        ]
+    ],
+    *[
+        (f"union_graph_copies_{name}", UNION_GRAPH_COPIES, query, None)
+        for name, query in [
+            ("untyped_attribute", "SELECT ?s ?n WHERE { ?s :name ?n }"),
+            ("supertype", "SELECT ?s WHERE { ?s a :Agent }"),
+            ("one_graph", "SELECT ?s WHERE { GRAPH :g1 { ?s :name ?n } }"),
         ]
     ],
     *[
@@ -1298,7 +1325,10 @@ def oracle_rows(store: Store, query: str) -> list[dict[str, Any]]:
     oracle.load(
         (PREFIXES + store.data).encode(), format=oxi.RdfFormat.TRIG if store.trig else oxi.RdfFormat.TURTLE
     )
-    return [normalize_oxi_row(r) for r in oxi_bindings(oracle, "PREFIX : <http://ex.org/>\n" + query)]
+    rows = oxi_bindings(
+        oracle, "PREFIX : <http://ex.org/>\n" + query, union_default_graph=store.union_default_graph
+    )
+    return [normalize_oxi_row(r) for r in rows]
 
 
 @pytest.mark.parametrize("store, query", case_params(interpreter=True))
