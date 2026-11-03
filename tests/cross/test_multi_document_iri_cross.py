@@ -982,6 +982,25 @@ _CASES: list[tuple[str, Store, str, str | None]] = [
         None,
     ),
     ("symmetric_self_loop_from", SYMMETRIC_SELF_LOOP, "SELECT ?f WHERE { :a :knows ?f }", None),
+    # The OPTIONAL fast path and variable predicates read both directions (#133).
+    (
+        "symmetric_optional",
+        SYMMETRIC_SELF_LOOP,
+        "SELECT ?x ?y WHERE { ?x a :Person . OPTIONAL { ?x :knows ?y } }",
+        None,
+    ),
+    (
+        "symmetric_optional_two",
+        SYMMETRIC_SELF_LOOP,
+        "SELECT ?x ?y ?z WHERE { ?x a :Person . OPTIONAL { ?x :knows ?y } OPTIONAL { ?x :knows ?z } }",
+        None,
+    ),
+    (
+        "symmetric_variable_predicate",
+        SYMMETRIC_SELF_LOOP,
+        "SELECT ?x ?p ?y WHERE { ?x a :Person . ?x ?p ?y FILTER(?p = :knows) }",
+        None,
+    ),
     ("symmetric_self_loop_to", SYMMETRIC_SELF_LOOP, "SELECT ?f WHERE { ?f :knows :a }", None),
     ("symmetric_self_loop_both", SYMMETRIC_SELF_LOOP, "SELECT ?x ?y WHERE { ?x :knows ?y }", None),
     (
@@ -1046,7 +1065,7 @@ _CASES: list[tuple[str, Store, str, str | None]] = [
 
 
 #: Cases the AQL interpreter cannot run (a ``UNION`` inside an OPTIONAL
-#: sub-query, a sub-SELECT, ``DOCUMENT()``); ``tests/integration/test_multi_document_iri_live.py``
+#: sub-query, a sub-SELECT, ``DOCUMENT()``, ``ATTRIBUTES()``); ``tests/integration/test_multi_document_iri_live.py``
 #: runs them.
 _LIVE_ONLY = {
     "ng_strict_optional",
@@ -1054,6 +1073,7 @@ _LIVE_ONLY = {
     "graph_outside_optional",
     "repeated_range_subselect_object",
     "tenant_relationship_node_alone",
+    "symmetric_variable_predicate",
 }
 
 

@@ -942,7 +942,15 @@ class AlgebraVisitor:
         for var, prop, edge_collection, subject_alias in edge_bindings:
             v_alias = child.fresh_alias(prefix="v")
             e_alias = child.fresh_alias(prefix="e")
-            child.for_traversal(v_alias, e_alias, subject_alias, edge_collection)
+            # A symmetric property is read in both directions here too (#133),
+            # as the required-side triple reads it (:meth:`_emit_edge_triple`).
+            child.for_traversal(
+                v_alias,
+                e_alias,
+                subject_alias,
+                edge_collection,
+                direction="ANY" if prop.symmetric else "OUTBOUND",
+            )
             # The same edge-type filter the required-side triple applies
             # (``_emit_edge_triple``).
             if prop.mapping_style == "GENERIC_WITH_TYPE" and prop.type_field and prop.type_value:
@@ -1321,6 +1329,34 @@ class AlgebraVisitor:
         self.builder.collect(keys=keys, aggregates=aggregates, count_into=count_into)
         if keys:
             self.builder.set_empty_result_fallback()
+        self._leave_pattern_scope(pattern_scope)
+
+    def _leave_pattern_scope(self, pattern_scope: dict[str, str]) -> None:
+        """After a COLLECT, only its keys and aggregates are in scope.
+
+        A pattern variable that is not a GROUP BY key is out of scope in
+        SPARQL after grouping (§18.2.4.1), and its AQL — a FOR alias's
+        attribute, a document — is out of scope after the COLLECT. Left in
+        ``var_to_expr``, a later join read it: a trailing ``VALUES ?s`` after
+        ``SELECT (COUNT(*) AS ?k)`` compared ``doc1`` after the COLLECT, and
+        ArangoDB refused it (ERR 1203, issue #116). Now such a VALUES binds a
+        variable the solutions do not have, a join with every row, as SPARQL
+        and pyoxigraph read it.
+        """
+        state = self.state
+        state.var_to_expr = {
+            name: expr for name, expr in state.var_to_expr.items() if pattern_scope.get(name) != expr
+        }
+        state.var_to_doc_alias = {}
+        state.const_subject_alias = {}
+        # A GROUP BY key keeps its value, the subject's IRI, and with it the
+        # triples table an RPT subject is read from (``DESCRIBE ?s … GROUP BY
+        # ?s``); a constant's table does not depend on the scope.
+        state.var_to_rpt_class = {k: v for k, v in state.var_to_rpt_class.items() if k in state.var_to_expr}
+        state.relationship_nodes = {}
+        state.reified_edges = {}
+        state.maybe_unbound &= set(state.var_to_expr)
+        state.date_shift_vars &= set(state.var_to_expr)
 
     def _aggregate_arg_expr(self, agg: Any, scope: dict[str, str], *, unbound: str | None = None) -> str:
         """Translate the argument of a SPARQL aggregate to an AQL expression.
