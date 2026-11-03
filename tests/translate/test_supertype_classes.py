@@ -250,3 +250,16 @@ def test_supertype_members_agree_with_arango_query_core() -> None:
         "Node",
         True,
     )
+
+
+def test_a_described_subject_keeps_every_copy() -> None:
+    # DESCRIBE reads every attribute of every copy (review of #146, #124).
+    assert "repeated" not in _aql(UNION_TTL, "DESCRIBE ?m WHERE { ?m a :Message }")
+
+
+def test_only_an_iri_is_probed_for_another_copy() -> None:
+    # An ``_id`` names one collection's document, so a row without ``_uri``
+    # repeats nothing; the guard keeps it from probing (a full scan per row
+    # on such data, review of #146).
+    aql = _aql(UNION_TTL, "SELECT ?m WHERE { ?m a :Message }")
+    assert ") && doc3._uri != null\nFILTER doc4._uri == doc3._uri\n" in aql.replace("  FILTER", "FILTER")

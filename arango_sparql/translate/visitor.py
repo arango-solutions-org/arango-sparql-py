@@ -3407,7 +3407,7 @@ class AlgebraVisitor:
         alias = self.builder.fresh_alias()
         self.builder.for_union(alias, arm_aqls, scans_documents=True)
         self.state.doc_collections[alias] = frozenset(by_collection)
-        compare = self._copy_comparison_fields(subject)
+        compare = self._copy_comparison_fields(subject, frozenset(by_collection))
         if compare is not None:
             # Checked once the BGP's triples have filtered the rows
             # (:meth:`_drop_repeated_copies`): probing every document of
@@ -3419,7 +3419,7 @@ class AlgebraVisitor:
         self._bind_opened_subject(subject, alias, matched=match_in_arms)
         return alias
 
-    def _copy_comparison_fields(self, subject: Any) -> list[tuple[str, ...]] | None:
+    def _copy_comparison_fields(self, subject: Any, members: frozenset[str]) -> list[tuple[str, ...]] | None:
         """The attribute paths that tell two copies of *subject* apart in this
         BGP, when a union of its class's collections can drop a repeated one
         (#124); ``None`` when it cannot.
@@ -3436,11 +3436,19 @@ class AlgebraVisitor:
         """
         if self.query_triples is None:
             return None
+        if any(str(r) == str(subject) for r in self.describe_resources or ()):
+            # DESCRIBE reads every attribute of every copy.
+            return None
         graph = self.state.graph_scope[-1] if self.state.graph_scope else None
         if isinstance(graph, Variable) and str(graph) not in self.state.var_to_expr:
             return None
         fields: list[tuple[str, ...]] = []
-        for s, p, _o in self.query_triples:
+        for s, p, o in self.query_triples:
+            if o == subject and s != subject and (not isinstance(p, URIRef) or p != RDF.type):
+                # Reached by an edge or a path (``?x :knows ?s``): only the
+                # copy the edge points at carries it (review of #146).
+                if not isinstance(p, URIRef) or self.resolver.resolve_property(p).is_object_property:
+                    return None
             if s != subject:
                 continue
             if not isinstance(p, URIRef):
@@ -3450,9 +3458,20 @@ class AlgebraVisitor:
             prop = self.resolver.resolve_property(p)
             if prop.is_object_property or prop.edge_target_of or prop.edge_collection:
                 return None
+            if not self._read_from_own_copy(prop, members):
+                # The attribute may be read from another copy
+                # (:meth:`_attribute_source`), which a probe comparing the
+                # rows' own documents would not see (review of #146).
+                return None
             if prop.field_path not in fields:
                 fields.append(prop.field_path)
         return fields
+
+    def _read_from_own_copy(self, prop: ResolvedProperty, members: frozenset[str]) -> bool:
+        """Whether every member collection is in *prop*'s domain, so each
+        union row reads the attribute from its own document."""
+        domain = self._range_classes(self.resolver.domain_classes(prop.iri))
+        return not domain or members <= set(domain)
 
     def _drop_repeated_copies(self) -> None:
         """Drop a union row that repeats an earlier member's copy (#124).
@@ -3476,8 +3495,15 @@ class AlgebraVisitor:
                 later = " || ".join(
                     f"IS_SAME_COLLECTION({probe.bind(c, hint='coll')}, {alias})" for c in order[j + 1 :]
                 )
-                probe.filter_raw(f"({later})")
-                probe.filter_raw(subject_matches_value(other, subject_ref(alias)))
+                # Only an IRI names a copy in another collection (an ``_id``
+                # includes the collection), so a row with no ``_uri`` is
+                # never probed; both tests are hoisted above the lookup.
+                probe.filter_raw(f"({later}) && {alias}._uri != null")
+                probe.filter_raw(f"{other}._uri == {alias}._uri")
+                # A copy in another named graph is another quad (lax default
+                # graph, as pyoxigraph's union default graph reads it).
+                graph = self.resolver.graph_field
+                probe.filter_raw(f"{attribute_ref(other, graph)} == {attribute_ref(alias, graph)}")
                 for test in self._class_tests(probe, other, by_collection[earlier], what):
                     probe.filter_raw(test)
                 scope = self._graph_scope_test(other)

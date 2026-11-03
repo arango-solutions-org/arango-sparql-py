@@ -620,14 +620,20 @@ routes the subject (`translate/visitor.py`):
   supertype in the domain stands for its members. One IRI stored in two
   members (a PG entity of two classes) is one subject: once the BGP's
   triples have filtered the rows, a row is dropped when an earlier member
-  (in name order) holds a copy with the same IRI, in the same graph scope
-  and tenant, and the same value or absence for every attribute the query
-  reads on the subject (`_drop_repeated_copies`, #124). When the query
-  walks an edge, uses a variable predicate or a path on the subject, or
-  binds `GRAPH ?g` per copy, every copy is kept (their edges and graphs
-  differ); so is every copy read in a child scope (a UNION arm, a
-  sub-select, an OPTIONAL or EXISTS body). Known limit: an OPTIONAL
-  attribute held by only one copy still yields a row per copy.
+  (in name order) holds a copy with the same `_uri`, in the same graph (a
+  copy in another named graph is another quad) and tenant, and the same
+  value or absence for every attribute the query reads on the subject
+  (`_drop_repeated_copies`, #124). Every copy is kept when the query reaches
+  the subject by an edge or a path (as subject or object), uses a variable
+  predicate on it, reads one of its attributes from another copy
+  (`_attribute_source`), describes it, or binds `GRAPH ?g` per copy, and in
+  a child scope (a UNION arm, a sub-select, an OPTIONAL or EXISTS body). A
+  row with no `_uri` (an `_id` identity names one collection's document) is
+  never probed. The probe is an indexed `_uri` lookup: a member collection
+  whose documents carry `_uri` needs a persistent index on it, as the copy
+  and constant-subject lookups above already do; without one each union
+  row scans the earlier member. Known limit: an OPTIONAL attribute held by
+  only one copy still yields a row per copy.
   A repeated `rdfs:domain` or `rdfs:range` (one triple per class, as
   arango-query-core's `mapping_to_turtle` and the schema analyzer's
   `owl_export` write for a shared property) means any of the classes, like

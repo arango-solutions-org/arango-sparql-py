@@ -495,8 +495,11 @@ UNION_COPIES = Store(
 :Person a owl:Class ; phys:collectionName "Person" ; rdfs:subClassOf :Agent .
 :Org a owl:Class ; phys:collectionName "Org" ; rdfs:subClassOf :Agent .
 :Agent a owl:Class ; phys:mappingStyle "UNION" .
+:Employee a owl:Class ; phys:collectionName "Employee" .
 :name a owl:DatatypeProperty ; rdfs:domain [ owl:unionOf ( :Person :Org ) ] .
 :age a owl:DatatypeProperty ; rdfs:domain :Agent .
+:salary a owl:DatatypeProperty ; rdfs:domain [ owl:unionOf ( :Org :Employee ) ] .
+:knows a owl:ObjectProperty ; phys:edgeCollectionName "knows" ; rdfs:domain :Person .
 """,
     docs={
         "Person": [
@@ -504,6 +507,7 @@ UNION_COPIES = Store(
             {"_id": "Person/d", "_uri": EX + "d", "name": "D1"},
             {"_id": "Person/m", "_uri": EX + "m", "name": "M"},
             {"_id": "Person/g", "_uri": EX + "g1", "_graph": EX + "g", "name": "G"},
+            {"_id": "Person/x", "_uri": EX + "x", "name": "X"},
         ],
         "Org": [
             {"_id": "Org/s", "_uri": EX + "s", "name": "S", "age": 3},
@@ -511,9 +515,12 @@ UNION_COPIES = Store(
             {"_id": "Org/m", "_uri": EX + "m"},
             {"_id": "Org/g", "_uri": EX + "g1", "_graph": EX + "g", "name": "G"},
         ],
+        "Employee": [{"_id": "Employee/s", "_uri": EX + "s", "salary": 10}],
+        "knows": [{"_id": "knows/1", "_from": "Person/x", "_to": "Person/s"}],
     },
-    data=':s a :Person, :Org, :Agent ; :name "S" ; :age 3 . :d a :Person, :Org, :Agent ; :name "D1", "D2" . '
-    ':m a :Person, :Org, :Agent ; :name "M" .\n:g { :g1 a :Person, :Org, :Agent ; :name "G" . }',
+    data=':s a :Person, :Org, :Agent, :Employee ; :name "S" ; :age 3 ; :salary 10 . '
+    ':d a :Person, :Org, :Agent ; :name "D1", "D2" . :m a :Person, :Org, :Agent ; :name "M" . '
+    ':x a :Person, :Agent ; :name "X" ; :knows :s .\n:g { :g1 a :Person, :Org, :Agent ; :name "G" . }',
     trig=True,
     resolver_kwargs={"default_graph_includes_named": False},
 )
@@ -730,6 +737,11 @@ _CASES: list[tuple[str, Store, str, str | None]] = [
             ("supertype_attribute", "SELECT ?s ?n WHERE { ?s a :Agent ; :name ?n }"),
             ("two_attributes", "SELECT ?s ?n ?a WHERE { ?s :name ?n ; :age ?a }"),
             ("graph", "SELECT ?s ?n WHERE { GRAPH :g { ?s :name ?n } }"),
+            # Review of #146: only the Person copy has the edge, so both
+            # copies stay; so do the copies of an attribute read from another
+            # copy (#141).
+            ("incoming_edge", "SELECT ?x ?s WHERE { ?s a :Agent . ?x :knows ?s }"),
+            ("attribute_from_another_copy", "SELECT ?s ?y WHERE { ?s a :Agent ; :salary ?y }"),
         ]
     ],
     *[
