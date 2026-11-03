@@ -577,6 +577,10 @@ routes the subject (`translate/visitor.py`):
   object stored outside its range class is not found, so the triple matches
   nothing for it. A mapping the schema analyzer builds agrees with its data
   (ranges come from the edges' `_to` collections); a hand-written one must.
+  A domain or range that names a class the ontology does not declare
+  (arango-query-core writes `rdfs:domain :Any` for a relationship with no
+  `fromEntity`) says nothing about where its subjects or objects are, so it
+  routes nothing: the subject falls back as with no domain (#126).
   An object already bound to a document is walked from **every document
   carrying its IRI in the range** (`_every_copy`, issue #105): one IRI can
   be several documents (an entity of two classes, one per named graph) and
@@ -794,7 +798,11 @@ Heuristics, in order:
 
 The heuristic detector emits a `MappingBundle` (the same shape the
 analyzer produces — see §6.3.2) so downstream code does not branch on
-"who built this mapping". `metadata.confidence` is fixed at `0.1` and
+"who built this mapping". A bundle without inline OWL is read through
+a synthesized graph carrying the same `phys:*` annotations, including
+`labelsField` / `labelValue` (`LABELS`, `MULTI_LABEL`) and a `UNION`
+entity's `members` (else its conceptual `subtypes`) as `rdfs:subClassOf`
+(#126). `metadata.confidence` is fixed at `0.1` and
 `metadata.reviewRequired = true` (mirrors the sister project's
 heuristic-path conventions); `metadata.detectedPatterns` lists string
 tags `PG_ENTITY_COLLECTION`, `LPG_LABEL`, `RPT_TRIPLES`,

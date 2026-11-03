@@ -409,6 +409,29 @@ NO_DEFAULT_COLLECTION = Store(
     data=":y a :Person . :a a :Person . :a :knows :y .",
 )
 
+#: A domain or range naming an undeclared class (#126): arango-query-core
+#: writes ``rdfs:domain :Any`` for a relationship with no ``fromEntity``. It
+#: routes nothing; the subject falls back to the default collection, as in
+#: 0.5.0 (0.6.0 raised SchemaResolutionError).
+UNDECLARED_DOMAIN = Store(
+    ontology=PREFIXES
+    + """
+:Person a owl:Class ; phys:collectionName "Person" .
+:name a owl:DatatypeProperty ; rdfs:domain :Any .
+:age a owl:DatatypeProperty ; rdfs:domain :Person, :Any .
+:knows a owl:ObjectProperty ; phys:edgeCollectionName "knows" ; rdfs:domain :Any ; rdfs:range :Any .
+""",
+    docs={
+        "Person": [
+            {"_id": "Person/a", "_uri": EX + "a", "name": "A", "age": 3},
+            {"_id": "Person/b", "_uri": EX + "b", "name": "B"},
+        ],
+        "knows": [{"_id": "knows/1", "_from": "Person/a", "_to": "Person/b"}],
+    },
+    data=':a a :Person ; :name "A" ; :age 3 ; :knows :b . :b a :Person ; :name "B" .',
+    resolver_kwargs={"default_collection": "Person"},
+)
+
 #: A symmetric property with a self-loop: ``:a :knows :a`` is one triple,
 #: however many ends the edge has (#121). The oracle holds the closure.
 SYMMETRIC_SELF_LOOP = Store(
@@ -611,6 +634,18 @@ LPG_LABELS = Store(
 
 _CASES: list[tuple[str, Store, str, str | None]] = [
     # (id, store, query, issue it is wrong under on main — or None)
+    *[
+        (f"undeclared_domain_{name}", UNDECLARED_DOMAIN, query, None)
+        for name, query in [
+            ("untyped_subject", "SELECT ?s ?n WHERE { ?s :name ?n }"),
+            ("constant_subject", "SELECT ?n WHERE { :a :name ?n }"),
+            ("mixed_domain", "SELECT ?s ?g WHERE { ?s :age ?g }"),
+            ("reverse_walk_constant", "SELECT ?x WHERE { ?x :knows :b }"),
+            ("forward_walk", "SELECT ?y WHERE { :a :knows ?y }"),
+            ("both_variable", "SELECT ?x ?y WHERE { ?x :knows ?y }"),
+            ("reverse_walk_typed", "SELECT ?x WHERE { ?p a :Person . ?x :knows ?p }"),
+        ]
+    ],
     (
         "tenant_label_in_another_collection",
         TENANT_SHARED_LABEL,

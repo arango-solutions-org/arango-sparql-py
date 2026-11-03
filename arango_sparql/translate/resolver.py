@@ -922,7 +922,20 @@ class SchemaResolver:
             members = self.ontology.value(value, OWL.unionOf)
             if members is not None:
                 out.update(str(m) for m in Collection(self.ontology, members) if isinstance(m, URIRef))
+        if not self.permissive_class_resolution and any(not self._declares_class(c) for c in out):
+            # A class the ontology does not declare says nothing about where
+            # the subjects (objects) are stored: arango-query-core writes
+            # ``rdfs:domain :Any`` for a relationship with no ``fromEntity``.
+            # Such a domain or range routes nothing, so the subject falls back
+            # (the default collection, a walk from the bound document) as in
+            # 0.5.0, rather than failing on the undeclared class (#126).
+            return ()
         return tuple(sorted(out))
+
+    def _declares_class(self, iri: str) -> bool:
+        """Whether *iri* is something a domain or range can name: an
+        ``owl:Class``, or a reified relationship (plan D8)."""
+        return (URIRef(iri), RDF.type, OWL.Class) in self.ontology or self.is_reified_entry(iri)
 
     def triple_store_class(self) -> ResolvedClass | None:
         """The triples table, when the whole mapping is one triple store.
@@ -1135,6 +1148,9 @@ _BUNDLE_ENTITY_ANNOTATIONS: tuple[tuple[str, str], ...] = (
     ("objectValueColumn", "objectValueColumn"),
     ("tenantField", "tenantField"),
     ("tenantEntity", "tenantEntity"),
+    # ``LABELS`` / ``MULTI_LABEL``: ``labelValue IN doc[labelsField]`` (#94, #126).
+    ("labelsField", "labelsField"),
+    ("labelValue", "labelValue"),
 )
 
 _BUNDLE_RELATIONSHIP_ANNOTATIONS: tuple[tuple[str, str], ...] = (
@@ -1201,6 +1217,14 @@ def _synthesize_graph_from_bundle(bundle: MappingBundle) -> Graph:
     """
 
     g = Graph()
+    # A ``UNION`` supertype's members: the physical ``members`` list or, failing
+    # that, the conceptual entity's ``subtypes`` (arango-query-core's mapping
+    # contract). The resolver reads them as ``rdfs:subClassOf`` (#94, #126).
+    subtypes = {
+        str(e.get("name")): e.get("subtypes") or []
+        for e in (bundle.conceptual_schema or {}).get("entities", []) or []
+        if isinstance(e, dict) and e.get("name")
+    }
     for label, spec in bundle.entities().items():
         if not isinstance(label, str) or not label:
             continue
@@ -1222,6 +1246,9 @@ def _synthesize_graph_from_bundle(bundle: MappingBundle) -> Graph:
             if value is None:
                 continue
             g.add((iri, _SYNTHETIC_PHYS_NS[phys_local], Literal(str(value))))
+        for member in spec.get("members") or subtypes.get(label) or []:
+            if isinstance(member, str) and member:
+                g.add((_synthetic_iri(member), RDFS.subClassOf, iri))
 
         # Per-property conceptual→physical mapping (CDF CC-12): CSI producers
         # emit OWL-style conceptual property names (``accountId``) with the
