@@ -565,7 +565,8 @@ routes the subject (`translate/visitor.py`):
   one edge-index lookup on `_from` or `_to`
   (`AqlQueryBuilder.for_traversal`, direction `ANY`). ArangoDB's `ANY`
   traversal reached a self-loop once per direction, so `:a :knows :a` came
-  back twice (#121);
+  back twice (#121). Required, OPTIONAL and variable-predicate (`?s ?p ?o`)
+  triples all read it so (#133);
 - a subject nothing has bound, with a known object, is reached by walking the
   edge `INBOUND` from that object, keeping only vertices in the subject's
   domain collections (`_keep_subject_collections`). An object known only as
