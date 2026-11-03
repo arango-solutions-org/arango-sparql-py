@@ -328,11 +328,14 @@ def _emit_document_edge_union(
         child = visitor.builder.create_child()
         vertex_alias = child.fresh_alias(prefix="v")
         edge_alias = child.fresh_alias(prefix="e")
+        # ``?s ?p ?o`` over a symmetric property holds in both directions of
+        # each stored edge (#133).
         child.for_traversal(
             vertex_alias,
             edge_alias,
             subject_alias,
             edge_collection,
+            direction="ANY" if prop.symmetric else "OUTBOUND",
         )
         if prop.mapping_style == "GENERIC_WITH_TYPE":
             if not prop.type_field or prop.type_value is None:

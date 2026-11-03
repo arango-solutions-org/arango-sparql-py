@@ -951,7 +951,15 @@ class AlgebraVisitor:
         for var, prop, edge_collection, subject_alias in edge_bindings:
             v_alias = child.fresh_alias(prefix="v")
             e_alias = child.fresh_alias(prefix="e")
-            child.for_traversal(v_alias, e_alias, subject_alias, edge_collection)
+            # A symmetric property is read in both directions here too (#133),
+            # as the required-side triple reads it (:meth:`_emit_edge_triple`).
+            child.for_traversal(
+                v_alias,
+                e_alias,
+                subject_alias,
+                edge_collection,
+                direction="ANY" if prop.symmetric else "OUTBOUND",
+            )
             # The same edge-type filter the required-side triple applies
             # (``_emit_edge_triple``).
             if prop.mapping_style == "GENERIC_WITH_TYPE" and prop.type_field and prop.type_value:
@@ -1330,6 +1338,34 @@ class AlgebraVisitor:
         self.builder.collect(keys=keys, aggregates=aggregates, count_into=count_into)
         if keys:
             self.builder.set_empty_result_fallback()
+        self._leave_pattern_scope(pattern_scope)
+
+    def _leave_pattern_scope(self, pattern_scope: dict[str, str]) -> None:
+        """After a COLLECT, only its keys and aggregates are in scope.
+
+        A pattern variable that is not a GROUP BY key is out of scope in
+        SPARQL after grouping (§18.2.4.1), and its AQL — a FOR alias's
+        attribute, a document — is out of scope after the COLLECT. Left in
+        ``var_to_expr``, a later join read it: a trailing ``VALUES ?s`` after
+        ``SELECT (COUNT(*) AS ?k)`` compared ``doc1`` after the COLLECT, and
+        ArangoDB refused it (ERR 1203, issue #116). Now such a VALUES binds a
+        variable the solutions do not have, a join with every row, as SPARQL
+        and pyoxigraph read it.
+        """
+        state = self.state
+        state.var_to_expr = {
+            name: expr for name, expr in state.var_to_expr.items() if pattern_scope.get(name) != expr
+        }
+        state.var_to_doc_alias = {}
+        state.const_subject_alias = {}
+        # A GROUP BY key keeps its value, the subject's IRI, and with it the
+        # triples table an RPT subject is read from (``DESCRIBE ?s … GROUP BY
+        # ?s``); a constant's table does not depend on the scope.
+        state.var_to_rpt_class = {k: v for k, v in state.var_to_rpt_class.items() if k in state.var_to_expr}
+        state.relationship_nodes = {}
+        state.reified_edges = {}
+        state.maybe_unbound &= set(state.var_to_expr)
+        state.date_shift_vars &= set(state.var_to_expr)
 
     def _aggregate_arg_expr(self, agg: Any, scope: dict[str, str], *, unbound: str | None = None) -> str:
         """Translate the argument of a SPARQL aggregate to an AQL expression.
@@ -2559,7 +2595,7 @@ class AlgebraVisitor:
             self._keep_subject_collections(v_alias, prop)
             self._guard_tenants(v_alias)
             self.state.doc_to_collection[v_alias] = prop.edge_collection
-            self._record_vertex_home(v_alias, self.resolver.domain_classes(prop.iri))
+            self._record_vertex_home(v_alias, self.resolver.domain_classes(prop.iri), domain_of=prop.iri)
             self._bind_subject(subject, v_alias)
             return
 
@@ -2579,7 +2615,7 @@ class AlgebraVisitor:
         # object (a reified relationship binds the edge instead:
         # :meth:`_emit_reified_entry`).
         self.state.doc_to_collection[v_alias] = prop.edge_collection
-        self._record_vertex_home(v_alias, prop.range_iris)
+        self._record_vertex_home(v_alias, self._usable_range(prop))
         self._bind_vertex_object(obj, v_alias, prop, triple)
 
     def _emit_reified_entry(self, subject: Any, prop: Any, obj: Any) -> None:
@@ -2645,7 +2681,7 @@ class AlgebraVisitor:
             # No such triple in RDF: no rows, but the object stays bound so
             # it can still be projected.
             self.builder.filter_raw("false")
-        elif prop.range_iris:
+        elif self._usable_range(prop):
             classes = self._concrete_classes(prop.range_iris)
             tests = []
             for collection in sorted({c.collection for c in classes}):
@@ -2987,14 +3023,16 @@ class AlgebraVisitor:
         self.state.doc_to_class[v_alias] = resolved
         self._bind_subject(s, v_alias)
 
-    def _record_vertex_home(self, v_alias: str, class_iris: tuple[str, ...]) -> None:
+    def _record_vertex_home(
+        self, v_alias: str, class_iris: tuple[str, ...], *, domain_of: str | None = None
+    ) -> None:
         """Record the class a traversal vertex is a document of, when the
         property's domain or range (*class_iris*) puts it in one collection
         under one tenant scoping, so a GRAPH scope can re-read it there
         (:meth:`_reopen_at_home`). The traversal itself reaches any
         collection; with no such class the vertex has no known home."""
         try:
-            classes = self._concrete_classes(class_iris)
+            classes = self._concrete_classes(class_iris, domain_of=domain_of)
         except SchemaResolutionError:
             return
         if (
@@ -3010,7 +3048,7 @@ class AlgebraVisitor:
         repeated range, a supertype's members), by the collection each is
         stored in (a sharded class in each member of its family); empty when
         there is no range or it is not stored as documents (RPT)."""
-        if not range_iris:
+        if not range_iris or not self._declared_range(range_iris, "an rdfs:range"):
             return {}
         try:
             classes = self._concrete_classes(range_iris)
@@ -3024,13 +3062,51 @@ class AlgebraVisitor:
                 out.setdefault(name, []).append(c)
         return dict(sorted(out.items()))
 
-    def _concrete_classes(self, class_iris: tuple[str, ...] | list[str]) -> list[ResolvedClass]:
+    def _usable_range(self, prop: ResolvedProperty) -> tuple[str, ...]:
+        """*prop*'s range classes, or none when the range names an undeclared
+        class (:meth:`_declared_range`)."""
+        if prop.range_iris and self._declared_range(prop.range_iris, f"the rdfs:range of {prop.iri!r}"):
+            return prop.range_iris
+        return ()
+
+    def _declared_range(self, range_iris: tuple[str, ...], where: str) -> bool:
+        """Whether every class of a range is declared. One that is not says
+        nothing about where the objects are, so the range is not used to look
+        them up (#126): the walk starts from the bound document, as with no
+        range. Looking in the default collection instead, as a domain does,
+        would read a collection the database may not have (ERR 1203, #109)."""
+        if self.resolver.permissive_class_resolution:
+            return True
+        undeclared = [iri for iri in range_iris if not self.resolver.declares_class(iri)]
+        for iri in undeclared:
+            self.resolver.warn_undeclared_range(iri, where)
+        return not undeclared
+
+    def _concrete_classes(
+        self, class_iris: tuple[str, ...] | list[str], *, domain_of: str | None = None
+    ) -> list[ResolvedClass]:
         """Resolve *class_iris*, without duplicates: a ``UNION`` supertype
         stands for its members (:meth:`SchemaResolver.supertype_members`), a
         reified relationship for its edges
-        (:meth:`SchemaResolver.relationship_edge_class`, plan D8)."""
+        (:meth:`SchemaResolver.relationship_edge_class`, plan D8).
+
+        *domain_of* (a property IRI) reads *class_iris* as its ``rdfs:domain``:
+        an undeclared class there stands for the default collection
+        (:meth:`SchemaResolver.undeclared_class_fallback`, #126), unless strict
+        subject resolution refuses that fallback; then it raises, as a type
+        pattern on it does."""
         out: list[ResolvedClass] = []
         for iri in class_iris:
+            if (
+                domain_of is not None
+                and not self.resolver.strict_subject_resolution
+                and not self.resolver.permissive_class_resolution
+                and not self.resolver.declares_class(iri)
+            ):
+                fallback = self.resolver.undeclared_class_fallback(iri, f"the rdfs:domain of {domain_of!r}")
+                if fallback not in out:
+                    out.append(fallback)
+                continue
             if self.resolver.is_reified_entry(iri):
                 # A reified relationship in a domain (D8): its edges.
                 edge_class = self.resolver.relationship_edge_class(iri)
@@ -3052,7 +3128,7 @@ class AlgebraVisitor:
         strict mapping with no domain has no forward plan to match (it
         refuses the subject), so its vertices stay as the edge finds them.
         """
-        classes = self._concrete_classes(self.resolver.domain_classes(prop.iri))
+        classes = self._concrete_classes(self.resolver.domain_classes(prop.iri), domain_of=prop.iri)
         if any(c.style == "RPT" for c in classes):
             classes = []  # as _route_by_domain: an RPT domain does not route
         if classes:
@@ -3085,7 +3161,7 @@ class AlgebraVisitor:
         class_iris = self.resolver.domain_classes(prop.iri)
         if not class_iris:
             return None
-        classes = self._concrete_classes(class_iris)
+        classes = self._concrete_classes(class_iris, domain_of=prop.iri)
         if any(c.style == "RPT" for c in classes):
             return None
         return self._open_classes(subject, classes, f"the rdfs:domain of {prop.iri!r}")
