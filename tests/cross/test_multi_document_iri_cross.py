@@ -70,6 +70,20 @@ PG_TWO_CLASSES = Store(
     data=':s a :Person, :Employee ; :name "S" ; :salary 10 . :a a :Person ; :name "A" ; :knows :s .',
 )
 
+#: As PG_TWO_CLASSES, with the attribute on both copies (a replica layout):
+#: reading the domain copy too must not repeat the value (review of #141).
+PG_TWO_CLASSES_REPLICA = Store(
+    ontology=PG_TWO_CLASSES.ontology,
+    docs={
+        **PG_TWO_CLASSES.docs,
+        "Person": [
+            {"_id": "Person/s", "_uri": EX + "s", "name": "S", "salary": 10},
+            {"_id": "Person/a", "_uri": EX + "a", "name": "A"},
+        ],
+    },
+    data=PG_TWO_CLASSES.data,
+)
+
 #: An edge into a document outside its property's declared range: a walk
 #: from that document still finds it (the range is only where copies are
 #: looked for).
@@ -668,6 +682,18 @@ _CASES: list[tuple[str, Store, str, str | None]] = [
     ),
     ("pg_type_then_other_attr", PG_TWO_CLASSES, "SELECT ?n WHERE { ?s a :Employee ; :name ?n }", None),
     ("pg_both_attrs", PG_TWO_CLASSES, "SELECT ?n ?y WHERE { ?s :name ?n ; :salary ?y }", None),
+    (
+        "pg_replica_edge_attr",
+        PG_TWO_CLASSES_REPLICA,
+        "SELECT ?s ?y WHERE { :a :knows ?s . ?s :salary ?y }",
+        None,
+    ),
+    (
+        "pg_replica_edge_count",
+        PG_TWO_CLASSES_REPLICA,
+        "SELECT (COUNT(*) AS ?c) WHERE { :a :knows ?s . ?s :salary ?y }",
+        None,
+    ),
     ("pg_untyped_reverse", PG_TWO_CLASSES, "SELECT ?x ?s WHERE { ?s a :Employee . ?x :knows ?s }", None),
     ("w3c_const_then_type", W3C_COPIES, "SELECT ?y WHERE { :a :knows ?y . ?y a :Person }", None),
     ("w3c_var_chain", W3C_COPIES, 'SELECT ?x ?y WHERE { ?x :name "A" . ?x :knows ?y . ?y a :Person }', None),

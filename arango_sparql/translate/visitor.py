@@ -2855,7 +2855,7 @@ class AlgebraVisitor:
             # would cost a lookup per collection on every row (LDBC's shared
             # ``id`` names ten), for a layout that rarely needs it.
             return alias
-        return self._every_copy(alias, domain, only_outside=True)
+        return self._every_copy(alias, domain, only_outside=True, missing=prop.field_path)
 
     def _doc_collections(self, alias: str) -> frozenset[str]:
         """The collections the document at *alias* is known to be in; empty
@@ -2870,7 +2870,14 @@ class AlgebraVisitor:
         # under the edge collection it was reached through.
         return frozenset()
 
-    def _every_copy(self, alias: str, range_iris: tuple[str, ...], *, only_outside: bool = False) -> str:
+    def _every_copy(
+        self,
+        alias: str,
+        range_iris: tuple[str, ...],
+        *,
+        only_outside: bool = False,
+        missing: tuple[str, ...] | None = None,
+    ) -> str:
         """The documents carrying the IRI of the document at *alias* that an
         edge can point at, as one alias to walk backwards from (issue #105).
 
@@ -2892,7 +2899,8 @@ class AlgebraVisitor:
 
         *only_outside* (an attribute read, :meth:`_attribute_source`): the
         bound document always, and its copies only when it is outside the
-        collections; a document inside them is read alone, at no lookup.
+        collections (and, given *missing*, an attribute path, lacks that
+        attribute); a document inside them is read alone, at no lookup.
 
         With no declared range (the W3C loader's layout, for one) the walk
         starts from the bound document alone, as before: looking in every
@@ -2927,6 +2935,10 @@ class AlgebraVisitor:
                     f"IS_SAME_COLLECTION({child.bind(c, hint='coll')}, {alias})" for c in by_collection
                 )
                 child.filter_raw(f"!({outside})")
+                if missing is not None:
+                    # Nor for one that carries the attribute itself: reading
+                    # its copies too returned its value twice (review of #141).
+                    child.filter_raw(f"!({child.attribute_exists(alias, missing)})")
             child.filter_raw(subject_matches_value(inner, subject_ref(alias)))
             scope = in_scope(inner)
             if scope is not None:
