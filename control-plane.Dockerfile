@@ -14,7 +14,7 @@
 # (the tenant this deployment serves), ARANGO_SPARQL_SOURCE (the control
 # plane's id for the ArangoDB deployment below), and ARANGO_URL, ARANGO_USER,
 # ARANGO_PASSWORD (a credential that can read the projects' databases; a
-# read-only user is enough). CONTROL_PLANE_HOME is where a user without a
+# read-only user is enough, and ARANGO_USER has no default). CONTROL_PLANE_HOME is where a user without a
 # context is sent. The language model is the deployment's (OPENAI_API_KEY or
 # ANTHROPIC_API_KEY, see README).
 # ============================================================================

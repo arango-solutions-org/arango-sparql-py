@@ -279,7 +279,9 @@ def _control_plane_session(request: Request) -> _Session:
             client = _arango_client_class()(hosts=url)
             db = client.db(
                 database,
-                username=read_arango_username(default="root", caller="control_plane") or "root",
+                # No default user: the deployment names one (configuration_problem), and a
+                # read-only one is enough.
+                username=read_arango_username(caller="control_plane") or "",
                 password=read_arango_password(caller="control_plane") or "",
             )
             db.version()  # python-arango's .db() is lazy: check the credential now
@@ -436,8 +438,13 @@ def _client_key(request: Request) -> str:
     """Per-client rate-limit key.
 
     Authorization header (a session token in our case) when available,
-    else the remote IP, else the literal string ``"anon"``.
+    else the remote IP, else the literal string ``"anon"``. Under a control
+    plane, the verified context's user and project: the token is renewed
+    every few minutes, and a renewal must not reset the user's budget.
     """
+    identity = getattr(request.state, "control_plane_identity", None)
+    if isinstance(identity, control_plane.Identity):
+        return "control-plane:" + "\x1f".join((identity.tenant, identity.project, identity.principal))
     return request.headers.get("Authorization") or (request.client.host if request.client else "anon")
 
 

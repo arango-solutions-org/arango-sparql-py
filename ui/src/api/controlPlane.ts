@@ -10,6 +10,10 @@
 const KEY = "arango-sparql.context";
 /** Renew this long before the token expires. */
 const RENEW_BEFORE_MS = 120_000;
+/** After a failed renewal, try again this soon (while the token is still valid). */
+const RETRY_RENEWAL_MS = 15_000;
+/** How long the page waits to learn whether it runs under a control plane. */
+const MODE_TIMEOUT_MS = 10_000;
 
 export const controlPlane = {
   /** True once the server said it runs under a control plane. */
@@ -22,6 +26,8 @@ export type ControlPlaneStart = "off" | "no-context" | "ready";
 
 let renewal: ReturnType<typeof setTimeout> | undefined;
 let ended: (() => void) | null = null;
+/** The context, also held here: a browser that refuses storage keeps it for this page load. */
+let held: string | null = null;
 
 function storage(): Storage | null {
   try {
@@ -34,10 +40,28 @@ function storage(): Storage | null {
 /** The context this tab holds, or null. */
 export function contextToken(): string | null {
   try {
-    return storage()?.getItem(KEY) ?? null;
+    return storage()?.getItem(KEY) ?? held;
   } catch {
-    return null;
+    return held;
   }
+}
+
+function keep(token: string): void {
+  held = token;
+  try {
+    storage()?.setItem(KEY, token);
+  } catch {
+    /* storage refused: the context lives only in this page load */
+  }
+}
+
+/** Where the page keeps state a project owns, and under which key. Off a control plane:
+ * localStorage under `key`, as always. Under one: this tab's sessionStorage, under `key` and
+ * the context's project, so a tab given a context for another project starts clean. */
+export function projectStore(key: string): { storage: Storage; key: string } {
+  if (!controlPlane.on) return { storage: window.localStorage, key };
+  const project = tokenClaims(contextToken())?.ctx?.project ?? "";
+  return { storage: window.sessionStorage, key: `${key}:${project}` };
 }
 
 /** The headers that carry the context: the only credential under a control plane. */
@@ -66,14 +90,9 @@ export function adoptContext(): string | null {
   const url = new URL(window.location.href);
   const arrived = url.searchParams.get("ctx");
   if (arrived) {
-    try {
-      storage()?.setItem(KEY, arrived);
-    } catch {
-      /* storage refused: the context lives only in this page load */
-    }
+    keep(arrived);
     url.searchParams.delete("ctx");
     window.history.replaceState(window.history.state, "", url.pathname + url.search + url.hash);
-    if (contextToken() === null) return arrived;
   }
   return contextToken();
 }
@@ -83,35 +102,42 @@ export function adoptContext(): string | null {
 export function scheduleRenewal(now: () => number = Date.now): void {
   const claims = tokenClaims(contextToken());
   if (!claims?.exp || !claims.ctx?.project) return;
-  clearTimeout(renewal);
   const project = claims.ctx.project;
-  const delay = Math.max(0, claims.exp * 1000 - RENEW_BEFORE_MS - now());
-  renewal = setTimeout(async () => {
-    try {
-      // Root-absolute on purpose: renewal is the control plane's endpoint, not this tool's.
-      const res = await fetch("/api/context", {
-        method: "POST",
-        credentials: "same-origin",
-        headers: { "Content-Type": "application/json", "X-Control-Plane": "1" },
-        body: JSON.stringify({ project }),
-      });
-      if (!res.ok) return; // the current token stays until it expires
-      const body = (await res.json()) as { token?: string };
-      if (body.token) {
-        storage()?.setItem(KEY, body.token);
-        scheduleRenewal(now);
+  const expiresAt = claims.exp * 1000;
+  const attempt = (delay: number) => {
+    clearTimeout(renewal);
+    renewal = setTimeout(async () => {
+      try {
+        // Root-absolute on purpose: renewal is the control plane's endpoint, not this tool's.
+        const res = await fetch("/api/context", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json", "X-Control-Plane": "1" },
+          body: JSON.stringify({ project }),
+        });
+        const body = res.ok ? ((await res.json()) as { token?: string }) : {};
+        if (body.token) {
+          keep(body.token);
+          scheduleRenewal(now);
+          return;
+        }
+      } catch {
+        /* retried below */
       }
-    } catch {
-      /* the current token stays until it expires */
-    }
-  }, delay);
+      // A failed renewal is tried again while the current token is still valid: one
+      // transient failure must not end an active user's session.
+      if (now() + RETRY_RENEWAL_MS < expiresAt) attempt(RETRY_RENEWAL_MS);
+    }, delay);
+  };
+  attempt(Math.max(0, expiresAt - RENEW_BEFORE_MS - now()));
 }
 
 /** Ask the server whether it runs under a control plane; if so, adopt this tab's context
  * and keep it renewed. `apiBase` is where this tool's API is mounted. */
 export async function startControlPlane(apiBase: string): Promise<ControlPlaneStart> {
   try {
-    const res = await fetch(apiBase + "/control-plane/mode");
+    // Bounded: a request that hangs must not leave the page on its loading screen.
+    const res = await fetch(apiBase + "/control-plane/mode", { signal: AbortSignal.timeout(MODE_TIMEOUT_MS) });
     const body = res.ok ? ((await res.json()) as { control_plane?: boolean; home?: string | null }) : {};
     controlPlane.on = !!body.control_plane;
     controlPlane.home = body.home || "/";
@@ -122,6 +148,13 @@ export async function startControlPlane(apiBase: string): Promise<ControlPlaneSt
   if (!adoptContext()) return "no-context";
   scheduleRenewal();
   return "ready";
+}
+
+/** Tests: forget the page's state between cases. */
+export function __resetForTest(): void {
+  clearTimeout(renewal);
+  held = null;
+  ended = null;
 }
 
 /** Called when the server refuses this tab's context: signed out, or expired while idle. */

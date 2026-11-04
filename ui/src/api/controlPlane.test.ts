@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  __resetForTest,
   adoptContext,
   contextHeaders,
   contextToken,
@@ -9,6 +10,7 @@ import {
   startControlPlane,
 } from "./controlPlane";
 import { listGraphs, translateSparql } from "./client";
+import { __loadSavedStateForTest, __saveStateForTest, initialState } from "./store";
 
 // The page under a governance control plane: the context is kept per tab, out of the
 // address bar, sent as the only credential, and renewed. Vitest runs in node here, so
@@ -61,6 +63,7 @@ beforeEach(() => {
   });
   controlPlane.on = false;
   controlPlane.home = "/";
+  __resetForTest();
 });
 
 afterEach(() => {
@@ -82,6 +85,21 @@ describe("adoptContext", () => {
     address = "http://localhost/query/";
     expect(adoptContext()).toBe("CTX-1");
     expect(replaceState).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the context for the page load when the browser refuses storage", () => {
+    vi.stubGlobal("window", {
+      get location() {
+        return { href: address, pathname: new URL(address).pathname };
+      },
+      history: { state: null, replaceState },
+      get sessionStorage(): Storage {
+        throw new DOMException("denied", "SecurityError");
+      },
+    });
+    expect(adoptContext()).toBe("CTX-1");
+    expect(contextHeaders()).toEqual({ Authorization: "Bearer CTX-1" });
+    expect(address).toBe("http://localhost/query/?tab=x#top");
   });
 
   it("has nothing when the tab never got a context", () => {
@@ -106,7 +124,9 @@ describe("startControlPlane", () => {
     mode({ control_plane: true, home: "/projects" });
     expect(await startControlPlane("/query")).toBe("ready");
     expect(controlPlane).toEqual({ on: true, home: "/projects" });
+    // A new tab: its own storage and a fresh page.
     session = new MemoryStorage();
+    __resetForTest();
     address = "http://localhost/query/";
     expect(await startControlPlane("/query")).toBe("no-context");
   });
@@ -135,6 +155,64 @@ describe("renewal", () => {
     );
     expect(contextToken()).toBe(renewed);
     expect(contextHeaders()).toEqual({ Authorization: `Bearer ${renewed}` });
+  });
+});
+
+describe("renewal that fails", () => {
+  it("is tried again while the token is still valid", async () => {
+    vi.useFakeTimers();
+    const now = 1_000_000_000_000;
+    session.setItem("arango-sparql.context", token("library", now / 1000 + 600));
+    const renewed = token("library", now / 1000 + 1200);
+    const answers = [
+      new Response("unavailable", { status: 503 }),
+      new Response(JSON.stringify({ token: renewed })),
+    ];
+    const fetchMock = vi.fn(async () => answers.shift()!);
+    vi.stubGlobal("fetch", fetchMock);
+    let clock = now;
+    scheduleRenewal(() => clock);
+    clock = now + 480_000;
+    await vi.advanceTimersByTimeAsync(480_000);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(contextToken()).not.toBe(renewed);
+    clock += 15_000;
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(contextToken()).toBe(renewed);
+  });
+});
+
+describe("the mode check", () => {
+  it("is bounded, so a request that hangs cannot keep the page loading", async () => {
+    const fetchMock = vi.fn<(url: string, init?: RequestInit) => Promise<Response>>(
+      async () => new Response(JSON.stringify({ control_plane: false })),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    await startControlPlane("/query");
+    expect(fetchMock.mock.calls[0][1]?.signal).toBeInstanceOf(AbortSignal);
+  });
+});
+
+describe("saved state", () => {
+  const edited = { ...initialState, sparql: "ASK { ?s ?p ?o }" };
+
+  it("stays in the tab, under the project, under a control plane", () => {
+    controlPlane.on = true;
+    session.setItem("arango-sparql.context", token("library", 2_000_000_000));
+    __saveStateForTest(edited);
+    expect(local.getItem("sparql-workbench")).toBeNull();
+    expect(JSON.parse(session.getItem("sparql-workbench:library")!).sparql).toBe("ASK { ?s ?p ?o }");
+    expect(__loadSavedStateForTest().sparql).toBe("ASK { ?s ?p ?o }");
+    // the same tab given a context for another project starts clean
+    session.setItem("arango-sparql.context", token("equity", 2_000_000_000));
+    expect(__loadSavedStateForTest().sparql).toBeUndefined();
+  });
+
+  it("stays in localStorage off a control plane, as before", () => {
+    __saveStateForTest(edited);
+    expect(JSON.parse(local.getItem("sparql-workbench")!).sparql).toBe("ASK { ?s ?p ?o }");
+    expect(session.getItem("sparql-workbench")).toBeNull();
   });
 });
 

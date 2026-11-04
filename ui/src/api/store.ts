@@ -1,5 +1,5 @@
 import { useCallback, useReducer } from "react";
-import { controlPlane } from "./controlPlane";
+import { projectStore } from "./controlPlane";
 import { appendTurn, type TranscriptTurn } from "../utils/transcript";
 import type { EditorVocab } from "../lang/sparqlEditorCore";
 
@@ -166,19 +166,16 @@ export interface AppState {
 
 const STORAGE_KEY = "sparql-workbench";
 
-/** Where the workbench keeps its editor, ontology and history. Under a control plane they
- * belong to a project, so they stay in this tab (sessionStorage): every tab on the origin
- * shares localStorage, and a tab on another project would read them. */
-function savedStateStorage(): Storage {
-  return controlPlane.on ? sessionStorage : localStorage;
-}
 
 const MAX_HISTORY = 50;
 const MAX_NL_HISTORY = 50;
 
 function loadSavedState(): Partial<AppState> {
   try {
-    const raw = savedStateStorage().getItem(STORAGE_KEY);
+    // Under a control plane the editor, ontology and history belong to a project: they stay
+    // in this tab, under its project (every tab on the origin shares localStorage).
+    const { storage, key } = projectStore(STORAGE_KEY);
+    const raw = storage.getItem(key);
     if (!raw) return {};
     const saved = JSON.parse(raw);
     return {
@@ -197,8 +194,9 @@ function loadSavedState(): Partial<AppState> {
 
 function saveState(state: AppState) {
   try {
-    savedStateStorage().setItem(
-      STORAGE_KEY,
+    const { storage, key } = projectStore(STORAGE_KEY);
+    storage.setItem(
+      key,
       JSON.stringify({
         sparql: state.sparql,
         ontologyTtl: state.ontologyTtl,
@@ -618,6 +616,7 @@ function reducer(state: AppState, action: Action): AppState {
 // Re-exported pure reducer so unit tests can drive state transitions
 // without a React tree. Mirrors the Cypher UI's `__reducerForTest`.
 export { reducer as __reducerForTest };
+export { loadSavedState as __loadSavedStateForTest, saveState as __saveStateForTest };
 
 export function useAppState() {
   // Saved state is read when the workbench mounts, not when this module loads: under a

@@ -59,8 +59,32 @@ class _FakeControlPlane:
 
 
 class _FakeDb:
+    #: Every call that would change the database, from any test's sessions.
+    writes: list[str] = []
+
     def __init__(self, name: str) -> None:
         self.name = name
+
+    def has_collection(self, name: str) -> bool:
+        return True
+
+    def create_collection(self, name: str) -> Any:
+        _FakeDb.writes.append(f"create {name}")
+        raise AssertionError("must not create a collection in the project's database")
+
+    def collection(self, name: str) -> Any:
+        db = self
+
+        class _Col:
+            def delete(self, key: str, **_: Any) -> bool:
+                _FakeDb.writes.append(f"delete {name}/{key} in {db.name}")
+                return True
+
+            def insert(self, doc: Any, **_: Any) -> Any:
+                _FakeDb.writes.append(f"insert {name} in {db.name}")
+                return {}
+
+        return _Col()
 
     def version(self) -> str:
         return "3.12.4"
@@ -110,6 +134,7 @@ def governed(monkeypatch: pytest.MonkeyPatch):
     fake = _FakeControlPlane(dict(TOKENS))
     control_plane.set_instance(fake)
     _FakeClient.opened = []
+    _FakeDb.writes = []
     _sessions.clear()
     yield fake
     control_plane.set_instance(None)
@@ -236,6 +261,48 @@ def test_a_context_in_the_query_string_is_not_accepted(governed, client) -> None
     assert _FakeClient.opened == []
 
 
+def test_a_request_carries_one_authorization_header(governed) -> None:
+    """The gate and the rate limits must read the same credential: with two headers, the
+    gate verified the last while the limits counted the first, so junk first headers made
+    every request a new client."""
+    from starlette.testclient import TestClient as Raw
+
+    raw = Raw(app)
+    two = [("authorization", "Bearer junk"), ("authorization", "Bearer tok-alice")]
+    assert raw.get("/graphs", headers=two).status_code == 400
+    assert raw.get("/graphs", headers=[two[1]]).status_code == 200  # positive control
+
+
+def test_rate_limits_count_the_user_not_the_token(governed, client, monkeypatch) -> None:
+    """A renewed token is the same user: it does not get a fresh budget."""
+    from arango_sparql.service import security
+
+    monkeypatch.setattr(svc, "_compute_bucket", security._TokenBucket(2))
+    body = {"sparql": "ASK { ?s ?p ?o }"}
+    answers = [
+        client.post("/validate", json=body, headers=_bearer(t)).status_code
+        for t in ("tok-alice", "tok-alice", "tok-alice-renewed")
+    ]
+    assert answers == [200, 200, 429]
+    assert client.post("/validate", json=body, headers=_bearer("tok-bob")).status_code == 200
+
+
+def test_the_schema_cache_writes_nothing_to_the_projects_database(governed, client) -> None:
+    """The service only reads the project's database: refreshing the schema drops the
+    in-memory copy and writes nothing there."""
+    response = client.post("/schema/invalidate-cache", headers=_bearer("tok-alice"))
+    assert response.status_code == 200
+    assert response.json()["persistent_dropped"] is False
+    assert _FakeDb.writes == []
+
+
+def test_routes_without_a_required_session_still_get_the_contexts(governed, client) -> None:
+    """``/translate`` and the plain-English routes take a session when there is one, to use
+    the database's schema: under a control plane that is the context's."""
+    client.post("/translate", json={"sparql": "ASK { ?s ?p ?o }"}, headers=_bearer("tok-alice"))
+    assert [o["db"] for o in _FakeClient.opened] == ["library"]
+
+
 def test_an_unreachable_control_plane_answers_503(governed, client) -> None:
     governed.unavailable = True
     assert client.get("/graphs", headers=_bearer("tok-alice")).status_code == 503
@@ -311,11 +378,15 @@ def test_the_mode_needs_a_tenant_a_source_and_the_sdk(monkeypatch) -> None:
     monkeypatch.setenv("CONTROL_PLANE_URL", "http://control-plane:8000/api")
     monkeypatch.delenv("ARANGO_SPARQL_TENANT", raising=False)
     monkeypatch.setenv("ARANGO_SPARQL_SOURCE", SOURCE)
+    monkeypatch.setenv("ARANGO_USER", "reader")
     assert "ARANGO_SPARQL_TENANT" in (control_plane.configuration_problem() or "")
     monkeypatch.setenv("ARANGO_SPARQL_TENANT", TENANT)
     monkeypatch.delenv("ARANGO_SPARQL_SOURCE")
     assert "ARANGO_SPARQL_SOURCE" in (control_plane.configuration_problem() or "")
     monkeypatch.setenv("ARANGO_SPARQL_SOURCE", SOURCE)
+    monkeypatch.delenv("ARANGO_USER")
+    assert "ARANGO_USER" in (control_plane.configuration_problem() or "")
+    monkeypatch.setenv("ARANGO_USER", "reader")
     monkeypatch.setitem(sys.modules, "control_plane_sdk", None)  # import fails
     assert "SDK" in (control_plane.configuration_problem() or "")
     monkeypatch.setitem(sys.modules, "control_plane_sdk", types.ModuleType("control_plane_sdk"))

@@ -56,8 +56,9 @@ REFUSED: dict[tuple[str, str], str] = {
     ("POST", "/execute-aql"): "caller-written AQL can change the data",
 }
 
-#: Routes served to a verified context. Each reads the project's database, or changes only
-#: this service's own cache of its schema, or touches no database at all.
+#: Routes served to a verified context. Each reads the project's database or touches no
+#: database at all; in this mode the schema cache stays in memory (``routes/schema.py``), so
+#: refreshing or re-analysing the schema writes nothing to the project's database.
 SERVED: frozenset[tuple[str, str]] = frozenset(
     {
         ("GET", "/control-plane/context"),
@@ -149,6 +150,11 @@ def configuration_problem() -> str | None:
     if not tenant():
         return (
             "CONTROL_PLANE_URL is set but ARANGO_SPARQL_TENANT is not: name the tenant this deployment serves"
+        )
+    if not os.environ.get("ARANGO_USER", "").strip():
+        return (
+            "CONTROL_PLANE_URL is set but ARANGO_USER is not: name the database user the service "
+            "reads the projects' databases as (a read-only user is enough)"
         )
     if not source():
         return (

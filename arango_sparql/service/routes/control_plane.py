@@ -54,6 +54,10 @@ class ControlPlaneGate:
         if key is None or key in control_plane.OPEN:
             await self.app(scope, receive, send)
             return
+        if sum(name.lower() == b"authorization" for name, _ in scope.get("headers", [])) > 1:
+            # The gate and the rate limits must read the same credential.
+            await _deny(400, "A request carries one Authorization header")(scope, receive, send)
+            return
         refusal = control_plane.REFUSED.get(key)
         if refusal is None and key not in control_plane.SERVED:
             refusal = "this route is not classified for use under a control plane"
