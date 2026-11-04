@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
@@ -375,16 +375,16 @@ class SchemaResolver:
     Tuples (rather than lists) so a freshly-constructed resolver is
     cheap to hash / compare in the schema cache layer."""
 
-    unindexed_uri_collections: frozenset[str] = frozenset()
-    """Collections whose documents carry ``_uri`` with no persistent index
-    on it, as the schema analysis records them
-    (:func:`project_unindexed_uri_collections`).
+    uri_indexes: UriIndexes | None = None
+    """What the schema analysis records about ``_uri`` and its indexes
+    (:func:`analyze_uri_indexes`).
 
     A union read checks each later member's row for a copy in an earlier
-    member by an ``_uri`` lookup (#124, PRD §6.1); in a collection listed
-    here that lookup scans it once per row, so the visitor warns
-    (``W_SCHEMA_URI_INDEX_MISSING``). Empty when the mapping carries no
-    index information (a hand-written ontology): nothing is warned."""
+    member by an ``_uri`` lookup (#124, PRD §6.1); when that member has no
+    usable index the lookup scans it once per row, so the visitor warns
+    (``W_SCHEMA_URI_INDEX_MISSING``, :meth:`UriIndexes.scanned`). ``None``
+    when the mapping records no indexes (a hand-written ontology or
+    mapping): nothing is warned."""
 
     _class_cache: dict[str, ResolvedClass] = field(default_factory=dict)
     _property_cache: dict[str, ResolvedProperty] = field(default_factory=dict)
@@ -511,7 +511,7 @@ class SchemaResolver:
         """
 
         shard_families = _project_shard_families(bundle.physical_mapping)
-        unindexed_uri = project_unindexed_uri_collections(bundle.physical_mapping)
+        uri_indexes = analyze_uri_indexes(bundle)
         if bundle.owl_turtle:
             graph = Graph()
             graph.parse(data=bundle.owl_turtle, format="turtle")
@@ -521,7 +521,7 @@ class SchemaResolver:
                 shard_families=shard_families,
                 permissive_class_resolution=permissive_class_resolution,
                 predicates=dict(predicates or {}),
-                unindexed_uri_collections=unindexed_uri,
+                uri_indexes=uri_indexes,
             )
         graph = _synthesize_graph_from_bundle(bundle)
         return cls(
@@ -530,7 +530,7 @@ class SchemaResolver:
             shard_families=shard_families,
             permissive_class_resolution=permissive_class_resolution,
             predicates=dict(predicates or {}),
-            unindexed_uri_collections=unindexed_uri,
+            uri_indexes=uri_indexes,
         )
 
     # ------------------------------------------------------------------
@@ -986,9 +986,10 @@ class SchemaResolver:
         self._warn_schema(
             code="W_SCHEMA_URI_INDEX_MISSING",
             message=(
-                f"collection {collection!r} has documents with _uri but no persistent index on "
-                f"_uri; a union read looks up each row's copies there by _uri, which scans the "
-                f"whole collection once per row. Add a persistent index on _uri to {collection!r}"
+                f"collection {collection!r} has no persistent index on _uri; a union read looks "
+                f"up each row's copies there by _uri, which scans the whole collection once per "
+                f"row. Add a persistent index on _uri to {collection!r}, then refresh the schema "
+                f"analysis (/schema/introspect?force=true), which is cached"
             ),
             iri=collection,
             collection=collection,
@@ -1217,13 +1218,55 @@ _BUNDLE_RELATIONSHIP_ANNOTATIONS: tuple[tuple[str, str], ...] = (
 )
 
 
-#: Index types an equality FILTER on their first field is served by.
+#: Index types an equality FILTER on their first field is served by. A sparse
+#: one serves it too: the copy check also filters ``_uri != null``.
 _EQUALITY_INDEX_TYPES = frozenset({"persistent", "hash", "skiplist"})
 
 
-def project_unindexed_uri_collections(physical_mapping: dict[str, Any]) -> frozenset[str]:
-    """The collections ``physicalMapping`` records as carrying ``_uri`` with
-    no persistent index on it (:attr:`SchemaResolver.unindexed_uri_collections`).
+@dataclass(frozen=True)
+class UriIndexes:
+    """What a schema analysis records about ``_uri`` and its indexes, by
+    collection (:attr:`SchemaResolver.uri_indexes`, :func:`analyze_uri_indexes`).
+
+    ``collections`` are the collections the analysis describes; ``carrying``
+    those whose documents hold ``_uri``; ``indexed`` those with an equality
+    index whose first field is ``_uri``."""
+
+    collections: frozenset[str] = frozenset()
+    carrying: frozenset[str] = frozenset()
+    indexed: frozenset[str] = frozenset()
+
+    def scanned(self, earlier: str, later: Iterable[str]) -> bool:
+        """Whether the copy check that looks in *earlier* for the rows of the
+        *later* members scans it: the analysis knows *earlier*, finds no
+        usable index on it, and a later member's documents carry ``_uri``
+        (only such a row starts the lookup). A collection the analysis does
+        not describe is not judged."""
+        return (
+            earlier in self.collections
+            and earlier not in self.indexed
+            and any(c in self.carrying for c in later)
+        )
+
+
+def _records_indexes(bundle: MappingBundle) -> bool:
+    """Whether *bundle* comes from a schema analysis of the database, which
+    lists every non-primary index (so a collection without ``indexes`` has
+    none): the service's own analysis, or a CSI the schema analyzer wrote in
+    reverse. A hand-written or forward-produced mapping records no indexes."""
+    if bundle.source is not None and bundle.source.kind == "analyzer":
+        return True
+    provenance = bundle.metadata.get("csiProvenance") if isinstance(bundle.metadata, dict) else None
+    return (
+        isinstance(provenance, dict)
+        and provenance.get("producer") == "arango-schema-analyzer"
+        and provenance.get("direction") == "reverse"
+    )
+
+
+def analyze_uri_indexes(bundle: MappingBundle | None) -> UriIndexes | None:
+    """What *bundle*'s physical mapping records about ``_uri`` and its
+    indexes, or ``None`` when it records no indexes (:func:`_records_indexes`).
 
     A collection carries ``_uri`` when an entity mapped to it maps a property
     to the ``_uri`` field (the schema analyzer lists every observed field).
@@ -1233,10 +1276,13 @@ def project_unindexed_uri_collections(physical_mapping: dict[str, Any]) -> froze
     has none. Malformed entries are skipped, as :func:`_project_shard_families`
     skips them.
     """
-    entities = physical_mapping.get("entities") if physical_mapping else None
+    if bundle is None or not _records_indexes(bundle):
+        return None
+    entities = bundle.physical_mapping.get("entities") if bundle.physical_mapping else None
     if not isinstance(entities, dict):
-        return frozenset()
-    carries: set[str] = set()
+        return UriIndexes()
+    collections: set[str] = set()
+    carrying: set[str] = set()
     indexed: set[str] = set()
     for entity in entities.values():
         if not isinstance(entity, dict):
@@ -1244,18 +1290,19 @@ def project_unindexed_uri_collections(physical_mapping: dict[str, Any]) -> froze
         collection = entity.get("collectionName")
         if not isinstance(collection, str) or not collection:
             continue
+        collections.add(collection)
         properties = entity.get("properties")
         if isinstance(properties, dict) and any(
             isinstance(p, dict) and p.get("field") == "_uri" for p in properties.values()
         ):
-            carries.add(collection)
+            carrying.add(collection)
         for index in entity.get("indexes") or []:
             if not isinstance(index, dict) or index.get("type") not in _EQUALITY_INDEX_TYPES:
                 continue
             fields = index.get("fields")
             if isinstance(fields, list) and fields and fields[0] == "_uri":
                 indexed.add(collection)
-    return frozenset(carries - indexed)
+    return UriIndexes(frozenset(collections), frozenset(carrying), frozenset(indexed))
 
 
 def _project_shard_families(
