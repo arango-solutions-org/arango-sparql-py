@@ -634,7 +634,12 @@ routes the subject (`translate/visitor.py`):
   The probe is an indexed `_uri` lookup: a member collection
   whose documents carry `_uri` needs a persistent index on it, as the copy
   and constant-subject lookups above already do; without one each union
-  row scans the earlier member. Even with the index, a union read with
+  row scans the earlier member. When the schema analysis shows a member the
+  probe looks copies up in carries `_uri` (an entity maps a property to it)
+  and lists no persistent or hash index whose first field is `_uri`, the
+  translation reports `W_SCHEMA_URI_INDEX_MISSING` naming that collection
+  (`project_unindexed_uri_collections`); a hand-written ontology records no
+  indexes, so it reports nothing. Even with the index, a union read with
   nothing else to narrow it pays a check per later-member row (2 × 100k:
   0.16 s against 0.03 s without the check; 0.09 s on `_id`-only data,
   where the guard alone runs). Known limit: an OPTIONAL attribute held by

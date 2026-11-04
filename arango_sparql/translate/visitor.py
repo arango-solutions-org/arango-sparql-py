@@ -3488,6 +3488,8 @@ class AlgebraVisitor:
         for alias, by_collection, fields, what in checks:
             order = sorted(by_collection)
             for j, earlier in enumerate(order[:-1]):
+                if earlier in self.resolver.unindexed_uri_collections:
+                    self.resolver.warn_unindexed_uri(earlier)
                 probe = self.builder.create_child()
                 other = probe.fresh_alias()
                 probe.for_(other, earlier)

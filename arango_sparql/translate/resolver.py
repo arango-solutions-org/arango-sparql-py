@@ -375,6 +375,17 @@ class SchemaResolver:
     Tuples (rather than lists) so a freshly-constructed resolver is
     cheap to hash / compare in the schema cache layer."""
 
+    unindexed_uri_collections: frozenset[str] = frozenset()
+    """Collections whose documents carry ``_uri`` with no persistent index
+    on it, as the schema analysis records them
+    (:func:`project_unindexed_uri_collections`).
+
+    A union read checks each later member's row for a copy in an earlier
+    member by an ``_uri`` lookup (#124, PRD §6.1); in a collection listed
+    here that lookup scans it once per row, so the visitor warns
+    (``W_SCHEMA_URI_INDEX_MISSING``). Empty when the mapping carries no
+    index information (a hand-written ontology): nothing is warned."""
+
     _class_cache: dict[str, ResolvedClass] = field(default_factory=dict)
     _property_cache: dict[str, ResolvedProperty] = field(default_factory=dict)
     _attribute_uri_map: dict[str, str] | None = field(default=None)
@@ -500,6 +511,7 @@ class SchemaResolver:
         """
 
         shard_families = _project_shard_families(bundle.physical_mapping)
+        unindexed_uri = project_unindexed_uri_collections(bundle.physical_mapping)
         if bundle.owl_turtle:
             graph = Graph()
             graph.parse(data=bundle.owl_turtle, format="turtle")
@@ -509,6 +521,7 @@ class SchemaResolver:
                 shard_families=shard_families,
                 permissive_class_resolution=permissive_class_resolution,
                 predicates=dict(predicates or {}),
+                unindexed_uri_collections=unindexed_uri,
             )
         graph = _synthesize_graph_from_bundle(bundle)
         return cls(
@@ -517,6 +530,7 @@ class SchemaResolver:
             shard_families=shard_families,
             permissive_class_resolution=permissive_class_resolution,
             predicates=dict(predicates or {}),
+            unindexed_uri_collections=unindexed_uri,
         )
 
     # ------------------------------------------------------------------
@@ -966,6 +980,20 @@ class SchemaResolver:
             iri=iri,
         )
 
+    def warn_unindexed_uri(self, collection: str) -> None:
+        """Warn that a union read looks copies up by ``_uri`` in *collection*,
+        which has no persistent index on it, so each row scans it (#124)."""
+        self._warn_schema(
+            code="W_SCHEMA_URI_INDEX_MISSING",
+            message=(
+                f"collection {collection!r} has documents with _uri but no persistent index on "
+                f"_uri; a union read looks up each row's copies there by _uri, which scans the "
+                f"whole collection once per row. Add a persistent index on _uri to {collection!r}"
+            ),
+            iri=collection,
+            collection=collection,
+        )
+
     def triple_store_class(self) -> ResolvedClass | None:
         """The triples table, when the whole mapping is one triple store.
 
@@ -1187,6 +1215,47 @@ _BUNDLE_RELATIONSHIP_ANNOTATIONS: tuple[tuple[str, str], ...] = (
     ("typeValue", "typeValue"),
     ("triplesCollection", "triplesCollection"),
 )
+
+
+#: Index types an equality FILTER on their first field is served by.
+_EQUALITY_INDEX_TYPES = frozenset({"persistent", "hash", "skiplist"})
+
+
+def project_unindexed_uri_collections(physical_mapping: dict[str, Any]) -> frozenset[str]:
+    """The collections ``physicalMapping`` records as carrying ``_uri`` with
+    no persistent index on it (:attr:`SchemaResolver.unindexed_uri_collections`).
+
+    A collection carries ``_uri`` when an entity mapped to it maps a property
+    to the ``_uri`` field (the schema analyzer lists every observed field).
+    It is indexed when an entity on it lists an index of an equality type
+    whose first field is ``_uri``. The analyzer writes ``indexes`` only for a
+    collection that has a non-primary index, so an entity without the key
+    has none. Malformed entries are skipped, as :func:`_project_shard_families`
+    skips them.
+    """
+    entities = physical_mapping.get("entities") if physical_mapping else None
+    if not isinstance(entities, dict):
+        return frozenset()
+    carries: set[str] = set()
+    indexed: set[str] = set()
+    for entity in entities.values():
+        if not isinstance(entity, dict):
+            continue
+        collection = entity.get("collectionName")
+        if not isinstance(collection, str) or not collection:
+            continue
+        properties = entity.get("properties")
+        if isinstance(properties, dict) and any(
+            isinstance(p, dict) and p.get("field") == "_uri" for p in properties.values()
+        ):
+            carries.add(collection)
+        for index in entity.get("indexes") or []:
+            if not isinstance(index, dict) or index.get("type") not in _EQUALITY_INDEX_TYPES:
+                continue
+            fields = index.get("fields")
+            if isinstance(fields, list) and fields and fields[0] == "_uri":
+                indexed.add(collection)
+    return frozenset(carries - indexed)
 
 
 def _project_shard_families(

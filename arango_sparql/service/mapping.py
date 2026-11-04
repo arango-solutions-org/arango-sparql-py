@@ -52,6 +52,7 @@ from ..translate.resolver import (
     _SYNTHETIC_PHYS_NS,
     SchemaResolver,
     local_name,
+    project_unindexed_uri_collections,
 )
 
 # ---------------------------------------------------------------------------
@@ -207,11 +208,15 @@ def _resolver_from_request(req: Any, *, analyzer_bundle: MappingBundle | None = 
     ``_resolver_from_ttl`` helper that this function replaces.
     """
     graph = _graph_from_request(req)
+    unindexed_uri: frozenset[str] = frozenset()
     if analyzer_bundle is not None:
         _enrich_graph_with_bundle(graph, analyzer_bundle)
+        unindexed_uri = project_unindexed_uri_collections(analyzer_bundle.physical_mapping)
     # The live service runs against a real customer database with no
     # ``Document`` catch-all collection, so an unroutable subject must fail
     # at translate time with a typed E_SCHEMA_RESOLVE rather than emit
     # ``FOR doc IN @@…_Document`` that dies later on ``ERR 1203`` (AGENTS.md
     # hard-rule #5). The translation-only / W3C harness leave this off.
-    return SchemaResolver(ontology=graph, strict_subject_resolution=True)
+    return SchemaResolver(
+        ontology=graph, strict_subject_resolution=True, unindexed_uri_collections=unindexed_uri
+    )
