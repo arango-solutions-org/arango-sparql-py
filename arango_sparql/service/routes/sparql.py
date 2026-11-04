@@ -42,7 +42,6 @@ from ..security import (
     _sanitize_error,
     _Session,
     _translate_errors,
-    background_database,
 )
 from ..tenant import resolve_tenant_id
 
@@ -115,13 +114,11 @@ def _analyzer_bundle_for_session(session: _Session | None) -> Any | None:
     try:
         # Lazy import: both route modules register on the same ``app`` at
         # import time; importing at call time avoids any load-order cycle.
-        from .schema import _read_or_warm
+        from .schema import _session_schema
 
-        bundle, _cache_hit, _warming = _read_or_warm(
-            session.db,
-            background_db=lambda: background_database(session),
+        bundle, _cache_hit, _warming = _session_schema(
+            session,
             strategy="auto",
-            graph_name=getattr(session, "graph_name", None),
         )
         return bundle
     except Exception as exc:  # noqa: BLE001 — enrichment is strictly optional

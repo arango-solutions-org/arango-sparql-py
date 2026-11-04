@@ -1945,9 +1945,21 @@ applies and the service is unchanged.
   connect dialog: the bar shows the project, the user and the database. Opened without a
   context it says to open it from a project; a refused context says the session ended.
 - **The language model** is the deployment's (§7); the ask bar says questions go to it.
-- **Not yet:** the project ontology's IRIs joined to the collections that hold each class (the
-  mapping comes from introspection, as without a control plane); choosing among several
-  databases; recording questions in the project's history.
+- **The project's terms.** When the control plane serves the project's ontology joined to where
+  its data lives (OWL with `phys:collectionName`, `phys:attributeName` and
+  `phys:edgeCollectionName`, read through its SDK's `project_mapping` with the request's
+  context), that is the session's schema. It is read when the session opens and again after
+  `MAPPING_REFRESH_SECONDS` (60), and it is never replaced by an analysis of the database,
+  whose terms would differ. Its conceptual half (classes with their data properties,
+  relationships with domain and range) is derived from the OWL, for the NL prompt and the
+  editor; a class inherits the data properties of the classes above it. A request that brings
+  no ontology of its own (the plain-English routes included) is resolved, and prompted, in it.
+  "Refresh schema" (`/schema/invalidate-cache`) reads it again; `/schema/status` reports
+  nothing to rebuild; a forced re-analysis keeps it. A project with no such mapping, or one
+  that maps no class, is introspected as without a control plane. If the mapping cannot be read, a
+  session that has one keeps it, and one that has none answers 503.
+- **Not yet:** choosing among several databases; recording questions in the project's
+  history.
 
 ---
 

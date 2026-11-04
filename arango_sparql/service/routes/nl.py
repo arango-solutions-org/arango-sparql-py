@@ -139,17 +139,20 @@ def _pipeline_for(
         )
     from ...nl2sparql import NlPipeline
 
-    resolver = _resolver_or_422(req)
+    # Under a governance control plane the session's schema is the project's ontology (PRD
+    # §8.7): a question that brings no ontology of its own is asked in it.
+    pinned = getattr(session, "project_mapping", None) if session is not None else None
+    resolver = _resolver_or_422(req, analyzer_bundle=pinned)
     return NlPipeline(
         client=client,
         resolver=resolver,
-        ontology_ttl=getattr(req, "ontology_ttl", None) or "",
+        ontology_ttl=getattr(req, "ontology_ttl", None) or getattr(pinned, "owl_turtle", None) or "",
         max_repairs=max_repairs,
         schema_summary=_schema_summary_for(req, session),
     )
 
 
-def _resolver_or_422(req: Any) -> Any:
+def _resolver_or_422(req: Any, *, analyzer_bundle: Any | None = None) -> Any:
     """Build a resolver from ``req``; map malformed-Turtle errors to 422.
 
     Same posture as the SPARQL routes' helper of the same name; copied
@@ -159,7 +162,7 @@ def _resolver_or_422(req: Any) -> Any:
     module's import graph.
     """
     try:
-        return _resolver_from_request(req)
+        return _resolver_from_request(req, analyzer_bundle=analyzer_bundle)
     except Exception as exc:
         raise HTTPException(
             status_code=422,

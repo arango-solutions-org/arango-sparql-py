@@ -47,6 +47,7 @@ import re
 from typing import Any
 
 from rdflib import OWL, RDF, RDFS, Graph, Literal, URIRef
+from rdflib.collection import Collection
 
 from ..errors import SparqlError
 from .mapping import (
@@ -320,6 +321,7 @@ def turtle_to_mapping(
     max_triples: int | None = None,
     preserve_owl: bool = True,
     source_notes: str | None = None,
+    derive_conceptual: bool = False,
 ) -> MappingBundle:
     """Parse *turtle* and project it into a :class:`MappingBundle`.
 
@@ -414,7 +416,11 @@ def turtle_to_mapping(
         owl_turtle_value = graph.serialize(format="turtle")
 
     bundle = MappingBundle(
-        conceptual_schema={"entities": [], "relationships": []},
+        conceptual_schema=(
+            conceptual_schema_from_graph(graph)
+            if derive_conceptual
+            else {"entities": [], "relationships": []}
+        ),
         physical_mapping={
             "entities": entities,
             "relationships": relationships,
@@ -427,6 +433,61 @@ def turtle_to_mapping(
         ),
     )
     return bundle
+
+
+def conceptual_schema_from_graph(graph: Graph) -> dict[str, list[dict[str, Any]]]:
+    """The conceptual half of a bundle, read from an ontology that declares its terms: each
+    ``owl:Class`` (by local name, one entry per name) with the data properties whose
+    ``rdfs:domain`` it or a class above it is, and each ``owl:ObjectProperty`` with its
+    domain and range. A domain or range may be repeated or an ``owl:unionOf`` (either reads
+    as "any of them"). For an ontology that *is* the schema (one a governance control plane
+    assembles for a project, PRD §8.7), so the NL prompt and the editor list its terms; the
+    analyzer's own OWL does not need it."""
+
+    def name(node: Any) -> str:
+        return local_name(node) if isinstance(node, URIRef) else ""
+
+    def classes(node: Any) -> list[str]:
+        if isinstance(node, URIRef):
+            return [name(node)]
+        members = graph.value(node, OWL.unionOf)
+        return [name(m) for m in Collection(graph, members)] if members is not None else []
+
+    def named(values: Any) -> list[str]:
+        return [c for v in values for c in classes(v) if c]
+
+    own: dict[str, list[str]] = {}
+    for prop in sorted(set(graph.subjects(RDF.type, OWL.DatatypeProperty)), key=str):
+        prop_name = name(prop)
+        for cls in named(graph.objects(prop, RDFS.domain)):
+            if prop_name and prop_name not in own.setdefault(cls, []):
+                own[cls].append(prop_name)
+    parents: dict[str, list[str]] = {}
+    for sub, sup in graph.subject_objects(RDFS.subClassOf):
+        if name(sub) and name(sup):
+            parents.setdefault(name(sub), []).append(name(sup))
+
+    def inherited(cls: str, seen: frozenset[str] = frozenset()) -> list[str]:
+        out = list(own.get(cls, []))
+        for parent in sorted(parents.get(cls, [])):
+            if parent not in seen:
+                out += [p for p in inherited(parent, seen | {cls}) if p not in out]
+        return out
+
+    names = sorted({name(c) for c in graph.subjects(RDF.type, OWL.Class)} - {""})
+    entities = [{"name": n, "labels": [n], "properties": [{"name": p} for p in inherited(n)]} for n in names]
+    relationships = []
+    seen_rel: set[tuple[str, str, str]] = set()
+    for prop in sorted(set(graph.subjects(RDF.type, OWL.ObjectProperty)), key=str):
+        prop_name = name(prop)
+        domains = named(graph.objects(prop, RDFS.domain)) or [""]
+        ranges = named(graph.objects(prop, RDFS.range)) or [""]
+        for source in sorted(set(domains)):
+            for target in sorted(set(ranges)):
+                if prop_name and (prop_name, source, target) not in seen_rel:
+                    seen_rel.add((prop_name, source, target))
+                    relationships.append({"type": prop_name, "fromEntity": source, "toEntity": target})
+    return {"entities": entities, "relationships": relationships}
 
 
 def _entities_from_graph(

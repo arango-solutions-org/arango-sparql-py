@@ -9,6 +9,7 @@ token strings to identities, as r2g's and AOE's tests do.
 
 from __future__ import annotations
 
+import json
 import sys
 import types
 from typing import Any
@@ -47,6 +48,12 @@ class _FakeControlPlane:
         self.tokens = tokens
         self.unavailable = unavailable
         self.verified = 0
+        #: Project → its mapping as the control plane serves it; a project not here has none.
+        self.mappings: dict[str, str] = {}
+        self.mapping_down = False
+        self.mapping_rejects = False
+        self.mapping_reads = 0
+        self.mapping_attempts = 0
 
     def verify(self, token: str) -> control_plane.Identity:
         if self.unavailable:
@@ -56,6 +63,19 @@ class _FakeControlPlane:
             return self.tokens[token]
         except KeyError:
             raise control_plane.ContextRejected("token rejected: signature") from None
+
+    def project_mapping(self, token: str) -> str | None:
+        try:  # the real one verifies through the SDK too; not counted as the gate's verify
+            identity = self.tokens[token]
+        except KeyError:
+            raise control_plane.ContextRejected("token rejected: signature") from None
+        self.mapping_attempts += 1
+        if self.mapping_rejects:
+            raise control_plane.ContextRejected("control plane refused the context")
+        if self.mapping_down:
+            raise control_plane.ContextUnavailable("control plane answered 503")
+        self.mapping_reads += 1
+        return self.mappings.get(identity.project)
 
 
 class _FakeDb:
@@ -325,6 +345,188 @@ def test_the_session_opens_on_the_projects_database_with_the_servers_credential(
     ]
 
 
+LIB = "https://example.org/library#"
+#: Library's mapping as the control plane assembles it (FR-14.7 there): the project's IRIs,
+#: with the collection, field and edge collection that hold each.
+LIBRARY_MAPPING = f"""@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix phys: <http://arangodb.com/schema/physical#> .
+@prefix : <{LIB}> .
+
+<{LIB}Loan> a owl:Class ;
+    phys:collectionName "loans" .
+<{LIB}Member> a owl:Class ;
+    phys:collectionName "members" ;
+    rdfs:subClassOf <{LIB}Agent> .
+<{LIB}fullName> a owl:DatatypeProperty ;
+    rdfs:domain <{LIB}Member> ;
+    phys:attributeName "name" .
+<{LIB}borrowedBy> a owl:ObjectProperty ;
+    rdfs:domain <{LIB}Loan> ;
+    rdfs:range <{LIB}Member> ;
+    phys:edgeCollectionName "borrowed_by" .
+"""
+
+
+def _sparql(text: str) -> dict[str, str]:
+    return {"sparql": f"PREFIX : <{LIB}>\n{text}"}
+
+
+def test_a_projects_mapping_is_the_sessions_schema(governed, client) -> None:
+    """The project's IRIs translate to where the data lives: a class to its collection, a
+    property to its field (not its local name), a relationship to its edge collection."""
+    governed.mappings["library"] = LIBRARY_MAPPING
+    r = client.post(
+        "/translate",
+        json=_sparql("SELECT ?n WHERE { ?l a :Loan ; :borrowedBy ?m . ?m :fullName ?n }"),
+        headers=_bearer("tok-alice"),
+    )
+    assert r.status_code == 200, r.text
+    aql, binds = r.json()["aql"], json.dumps(r.json()["bind_vars"])
+    assert "loans" in binds and "borrowed_by" in binds and "fullName" not in aql + binds
+    assert ".name" in aql or '"name"' in binds
+    body = client.get("/schema/introspect", headers=_bearer("tok-alice")).json()
+    assert body["mapping"]["source"]["kind"] == "imported_owl"
+    names = {e["name"] for e in body["mapping"]["conceptualSchema"]["entities"]}
+    assert names == {"Loan", "Member"}  # for the NL prompt and the editor
+    # positive control: without a mapping, the same IRIs are not the project's
+    governed.mappings.clear()
+    _sessions.clear()
+    r = client.post(
+        "/translate", json=_sparql("SELECT ?l WHERE { ?l a :Loan }"), headers=_bearer("tok-alice")
+    )
+    assert r.status_code == 422 and r.json()["detail"]["code"] == "E_SCHEMA_RESOLVE"
+
+
+def test_a_question_without_an_ontology_is_asked_in_the_projects(governed, client) -> None:
+    """The NL routes too: an API caller that sends only the question gets the project's
+    terms, in the resolver and in the prompt, not an empty ontology."""
+    from arango_sparql.nl2sparql.client import LLMResponse, ScriptedLLMClient
+    from arango_sparql.service.routes.nl import _llm_client_factory
+
+    governed.mappings["library"] = LIBRARY_MAPPING
+    answer = f"PREFIX : <{LIB}>\nSELECT ?n WHERE {{ ?l a :Loan ; :borrowedBy ?m . ?m :fullName ?n }}"
+    llm = ScriptedLLMClient(
+        [LLMResponse(content=answer, prompt_tokens=1, completion_tokens=1, total_tokens=2)], latency_ms=0
+    )
+    app.dependency_overrides[_llm_client_factory] = lambda: llm
+    try:
+        r = client.post("/nl-translate", json={"nl": "who borrowed"}, headers=_bearer("tok-alice"))
+    finally:
+        app.dependency_overrides.pop(_llm_client_factory, None)
+    assert r.status_code == 200, r.text
+    assert "borrowed_by" in json.dumps(r.json()["bind_vars"])
+    prompt = json.dumps(llm.calls[0])
+    assert "phys:edgeCollectionName" in prompt  # the model was shown the project's ontology
+
+
+def test_an_imported_ontology_is_a_base_only_when_imported() -> None:
+    """A request without an ontology is resolved in the session's bundle only when that
+    bundle is an imported ontology (a project's): an analysis's OWL stays enrichment."""
+    import dataclasses
+
+    from arango_sparql.service.mapping import _resolver_from_request
+    from arango_sparql.translate.mapping import MappingSource
+    from arango_sparql.translate.owl import turtle_to_mapping
+
+    imported = turtle_to_mapping(LIBRARY_MAPPING, derive_conceptual=True)
+    analysed = dataclasses.replace(imported, source=MappingSource(kind="analyzer"))
+    req = types.SimpleNamespace(ontology_ttl=None, mapping=None)
+    loan = f"{LIB}Loan"
+    assert _resolver_from_request(req, analyzer_bundle=imported).resolve_class(loan).collection == "loans"
+    with pytest.raises(Exception, match="not declared"):
+        _resolver_from_request(req, analyzer_bundle=analysed).resolve_class(loan)
+
+
+def test_a_refused_context_when_reading_the_mapping_is_401(governed, client) -> None:
+    governed.mappings["library"] = LIBRARY_MAPPING
+    governed.mapping_rejects = True
+    assert client.get("/graphs", headers=_bearer("tok-alice")).status_code == 401
+
+
+def test_an_outage_is_not_retried_on_every_request(governed, client) -> None:
+    governed.mappings["library"] = LIBRARY_MAPPING
+    client.get("/graphs", headers=_bearer("tok-alice"))
+    (session,) = _sessions.values()
+    session.project_mapping_at -= control_plane.MAPPING_REFRESH_SECONDS + 1  # due again
+    governed.mapping_down = True
+    for _ in range(3):
+        assert client.get("/graphs", headers=_bearer("tok-alice")).status_code == 200
+    assert governed.mapping_attempts == 2  # the first read, one retry
+
+
+def test_refresh_and_status_work_on_the_projects_mapping(governed, client) -> None:
+    """Refresh schema reads the project's mapping again; the status reports nothing to
+    rebuild; a forced re-analysis keeps the project's mapping."""
+    governed.mappings["library"] = LIBRARY_MAPPING
+    headers = _bearer("tok-alice")
+    status = client.get("/schema/status", headers=headers).json()
+    assert (status["status"], status["needs_full_rebuild"]) == ("unchanged", False)
+    assert client.post("/schema/invalidate-cache", headers=headers).status_code == 200
+    client.get("/graphs", headers=headers)
+    assert governed.mapping_reads == 2
+    r = client.post("/schema/force-reacquire", headers=headers)
+    assert r.status_code == 200, r.text
+    assert "Loan" in r.text and "loans" in r.text
+
+
+def test_an_empty_mapping_is_no_mapping(governed, client) -> None:
+    governed.mappings["library"] = "@prefix owl: <http://www.w3.org/2002/07/owl#> .\n"
+    assert client.get("/graphs", headers=_bearer("tok-alice")).status_code == 200
+    (session,) = _sessions.values()
+    assert session.project_mapping is None
+    governed.mappings["library"] = "   "
+    _sessions.clear()
+    assert client.get("/graphs", headers=_bearer("tok-alice")).status_code == 200
+
+
+def test_the_conceptual_half_inherits_and_reads_unions() -> None:
+    from arango_sparql.translate.owl import turtle_to_mapping
+
+    ttl = (
+        LIBRARY_MAPPING
+        + f"""
+<{LIB}Agent> a owl:Class ; phys:mappingStyle "UNION" .
+<{LIB}Book> a owl:Class ; phys:collectionName "books" .
+<https://other.example/Book> a owl:Class ; phys:collectionName "other_books" .
+<{LIB}label> a owl:DatatypeProperty ;
+    rdfs:domain [ a owl:Class ; owl:unionOf ( <{LIB}Agent> <{LIB}Book> ) ] ;
+    phys:attributeName "label" .
+"""
+    )
+    cs = turtle_to_mapping(ttl, derive_conceptual=True).conceptual_schema
+    props = {e["name"]: [p["name"] for p in e["properties"]] for e in cs["entities"]}
+    assert [e["name"] for e in cs["entities"]].count("Book") == 1  # one entry per name
+    assert props["Agent"] == ["label"] and props["Book"] == ["label"]  # a union domain
+    assert props["Member"] == ["fullName", "label"]  # and from Agent
+
+
+def test_the_projects_mapping_is_read_again_after_a_while(governed, client, monkeypatch) -> None:
+    governed.mappings["library"] = LIBRARY_MAPPING
+    client.get("/graphs", headers=_bearer("tok-alice"))
+    client.get("/graphs", headers=_bearer("tok-alice"))
+    assert governed.mapping_reads == 1
+    monkeypatch.setattr(control_plane, "MAPPING_REFRESH_SECONDS", 0.0)
+    client.get("/graphs", headers=_bearer("tok-alice"))
+    assert governed.mapping_reads == 2
+
+
+def test_an_unreadable_mapping_is_503_until_one_was_read(governed, client, monkeypatch) -> None:
+    """Never an introspected schema in its place: its terms would not be the project's."""
+    governed.mappings["library"] = LIBRARY_MAPPING
+    governed.mapping_down = True
+    r = client.get("/graphs", headers=_bearer("tok-alice"))
+    assert r.status_code == 503 and "mapping" in r.json()["detail"]
+    governed.mapping_down = False
+    assert client.get("/graphs", headers=_bearer("tok-alice")).status_code == 200
+    # once read, a session keeps it through an outage
+    monkeypatch.setattr(control_plane, "MAPPING_REFRESH_SECONDS", 0.0)
+    governed.mapping_down = True
+    assert client.get("/graphs", headers=_bearer("tok-alice")).status_code == 200
+    (session,) = _sessions.values()
+    assert session.project_mapping is not None
+
+
 def test_the_context_route_says_who_and_where(governed, client) -> None:
     body = client.get("/control-plane/context", headers=_bearer("tok-alice")).json()
     assert body["principal"] == "alice"
@@ -420,7 +622,13 @@ def test_the_mode_needs_a_tenant_a_source_and_the_sdk(monkeypatch) -> None:
     monkeypatch.setenv("ARANGO_USER", "reader")
     monkeypatch.setitem(sys.modules, "control_plane_sdk", None)  # import fails
     assert "SDK" in (control_plane.configuration_problem() or "")
-    monkeypatch.setitem(sys.modules, "control_plane_sdk", types.ModuleType("control_plane_sdk"))
+    old = types.ModuleType("control_plane_sdk")
+    old.ControlPlane = type("ControlPlane", (), {})  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "control_plane_sdk", old)
+    assert "project_mapping" in (control_plane.configuration_problem() or "")
+    new = types.ModuleType("control_plane_sdk")
+    new.ControlPlane = type("ControlPlane", (), {"project_mapping": lambda self, v: None})  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "control_plane_sdk", new)
     assert control_plane.configuration_problem() is None
 
 
@@ -478,3 +686,10 @@ def test_the_sdk_adapter_maps_a_verified_context(monkeypatch) -> None:
         adapter.verify("bad")
     with pytest.raises(control_plane.ContextUnavailable):
         adapter.verify("down")
+    # The project's mapping, through the SDK with the same context; its errors, mapped.
+    ControlPlane.project_mapping = lambda self, verified: f"ttl for {verified.context.project}"  # type: ignore[attr-defined]
+    assert adapter.project_mapping("good") == "ttl for library"
+    with pytest.raises(control_plane.ContextRejected):
+        adapter.project_mapping("bad")
+    with pytest.raises(control_plane.ContextUnavailable):
+        adapter.project_mapping("down")

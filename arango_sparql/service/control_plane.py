@@ -34,6 +34,10 @@ from typing import Any, Protocol
 #: This tool's id, as the control plane registers it for a project.
 TOOL_ID = "query"
 
+#: How long a session keeps the project's mapping before reading it again: a change in the
+#: project's mapping reaches open sessions within this long.
+MAPPING_REFRESH_SECONDS = 60.0
+
 #: Routes served without a context: health checks, and what the page needs before it has
 #: one (whether this mode is on, and where to send a user who arrived without a context).
 OPEN: frozenset[tuple[str, str]] = frozenset(
@@ -125,6 +129,12 @@ class ControlPlane(Protocol):
         """Verify a context token offline. Raises :class:`ContextRejected`, or
         :class:`ContextUnavailable` when the control plane's keys cannot be fetched."""
 
+    def project_mapping(self, token: str) -> str | None:
+        """The project ontology joined to where its data lives, as the control plane
+        assembles it for the context's project: OWL in Turtle with ``phys:*`` annotations,
+        or ``None`` when the project has none. Raises :class:`ContextRejected`, or
+        :class:`ContextUnavailable` when it cannot be read now."""
+
 
 def mode() -> bool:
     """True when the service runs as a control plane's tool."""
@@ -162,10 +172,15 @@ def configuration_problem() -> str | None:
             "source that ARANGO_URL reaches"
         )
     try:
-        importlib.import_module("control_plane_sdk")
+        sdk = importlib.import_module("control_plane_sdk")
     except ImportError:
         return (
             "CONTROL_PLANE_URL is set but the control plane's Python SDK (control_plane_sdk) is not installed"
+        )
+    if not hasattr(getattr(sdk, "ControlPlane", None), "project_mapping"):
+        return (
+            "CONTROL_PLANE_URL is set but the installed control-plane SDK cannot read a project's "
+            "mapping (ControlPlane.project_mapping): install a newer one"
         )
     return None
 
@@ -221,6 +236,15 @@ class _Sdk:
             databases={name: (b.source, b.database) for name, b in ctx.databases.items()},
             expires_at=int(verified.expires_at),
         )
+
+    def project_mapping(self, token: str) -> str | None:
+        try:
+            verified = self._client.verify(token)
+            return self._client.project_mapping(verified)  # type: ignore[no-any-return]
+        except self._sdk.Unavailable as exc:
+            raise ContextUnavailable(str(exc)) from exc
+        except self._sdk.ControlPlaneError as exc:
+            raise ContextRejected(str(exc)) from exc
 
 
 _instance: ControlPlane | None = None

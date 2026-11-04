@@ -183,6 +183,14 @@ def _graph_from_request(req: Any) -> Graph:
     return Graph()
 
 
+def _is_imported_ontology(bundle: MappingBundle | None) -> bool:
+    """Whether *bundle* is an imported ontology with its own Turtle, rather than an analysis
+    of a database. A session holds one only under a governance control plane: the server
+    caches analyses, never imports (``/mapping/import-owl`` hands its bundle back)."""
+    source = getattr(bundle, "source", None)
+    return bool(bundle is not None and bundle.owl_turtle and getattr(source, "kind", None) == "imported_owl")
+
+
 def _resolver_from_request(req: Any, *, analyzer_bundle: MappingBundle | None = None) -> SchemaResolver:
     """Build a :class:`SchemaResolver` from the request envelope.
 
@@ -207,6 +215,11 @@ def _resolver_from_request(req: Any, *, analyzer_bundle: MappingBundle | None = 
     ``_resolver_from_ttl`` helper that this function replaces.
     """
     graph = _graph_from_request(req)
+    if not len(graph) and _is_imported_ontology(analyzer_bundle):
+        # The session's schema *is* an ontology (a project's, under a governance control
+        # plane, PRD §8.7): a request that brings none is asked in that ontology's terms.
+        assert analyzer_bundle is not None and analyzer_bundle.owl_turtle
+        graph.parse(data=analyzer_bundle.owl_turtle, format="turtle")
     if analyzer_bundle is not None:
         _enrich_graph_with_bundle(graph, analyzer_bundle)
     # The live service runs against a real customer database with no
