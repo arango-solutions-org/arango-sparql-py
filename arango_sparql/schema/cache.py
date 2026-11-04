@@ -43,6 +43,7 @@ import dataclasses
 import logging
 import os
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -168,10 +169,11 @@ class SchemaCache:
         *,
         ttl_seconds: int | None = None,
         l2_collection_name: str = L2_COLLECTION_NAME,
+        l2_writes: Callable[[], bool] | None = None,
     ) -> None:
         self._ttl_seconds = ttl_seconds if ttl_seconds is not None else _resolve_ttl_from_env()
         self._l2_collection_name = l2_collection_name
-        self._l2 = ArangoSchemaCache(collection_name=l2_collection_name)
+        self._l2 = ArangoSchemaCache(collection_name=l2_collection_name, writes=l2_writes)
         self._l1: dict[str, CachedEntry] = {}
         self._lock = threading.Lock()
         self._hydration_locks: dict[str, threading.Lock] = {}

@@ -50,6 +50,7 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
+from urllib.parse import unquote_plus
 
 # ---------------------------------------------------------------------------
 # Correlation ID — contextvar + ASGI middleware + logging filter
@@ -232,6 +233,44 @@ def _json_safe(v: Any) -> Any:
 _CONFIGURED = False
 
 
+#: Query parameters that carry a credential: a control plane's context (``ctx``, on a tool's
+#: first link), a session token (``session``, accepted by ``/sparql`` off a control plane),
+#: a ``token``. Their values never reach the access log (PRD §8.6 T1, T18).
+_SECRET_QUERY_KEYS = frozenset({"ctx", "session", "token"})
+
+
+def redact_query(path: str) -> str:
+    """*path* with the values of credential-carrying query parameters replaced. Keys are
+    compared decoded and case-folded, so ``%63tx=`` or ``CTX=`` are caught too."""
+    base, sep, query = path.partition("?")
+    if not sep:
+        return path
+    parts = []
+    for part in query.split("&"):
+        key, eq, _ = part.partition("=")
+        if eq and unquote_plus(key).lower() in _SECRET_QUERY_KEYS:
+            part = f"{key}=[redacted]"
+        parts.append(part)
+    return f"{base}?{'&'.join(parts)}"
+
+
+class AccessLogRedactFilter(logging.Filter):
+    """Redact credentials in uvicorn's access log. Its records carry
+    ``(client, method, path, http_version, status)`` as ``args``."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if isinstance(args, tuple) and len(args) >= 3 and isinstance(args[2], str):
+            record.args = (*args[:2], redact_query(args[2]), *args[3:])
+        return True
+
+
+def _install_access_log_redaction() -> None:
+    access = logging.getLogger("uvicorn.access")
+    if not any(isinstance(f, AccessLogRedactFilter) for f in access.filters):
+        access.addFilter(AccessLogRedactFilter())
+
+
 def configure_observability(*, force: bool = False) -> None:
     """Install :class:`CorrelationIdLogFilter` + the chosen formatter.
 
@@ -250,6 +289,7 @@ def configure_observability(*, force: bool = False) -> None:
       key=value formatter.
     """
     global _CONFIGURED
+    _install_access_log_redaction()
     if _CONFIGURED and not force:
         return
 

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from . import (
     connect,  # noqa: F401
+    control_plane,  # noqa: F401
     examples,  # noqa: F401
     health,  # noqa: F401
     mapping,  # noqa: F401

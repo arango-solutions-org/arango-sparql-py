@@ -1,4 +1,5 @@
 import { useCallback, useReducer } from "react";
+import { projectStore } from "./controlPlane";
 import { appendTurn, type TranscriptTurn } from "../utils/transcript";
 import type { EditorVocab } from "../lang/sparqlEditorCore";
 
@@ -165,12 +166,16 @@ export interface AppState {
 
 const STORAGE_KEY = "sparql-workbench";
 
+
 const MAX_HISTORY = 50;
 const MAX_NL_HISTORY = 50;
 
 function loadSavedState(): Partial<AppState> {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    // Under a control plane the editor, ontology and history belong to a project: they stay
+    // in this tab, under its project (every tab on the origin shares localStorage).
+    const { storage, key } = projectStore(STORAGE_KEY);
+    const raw = storage.getItem(key);
     if (!raw) return {};
     const saved = JSON.parse(raw);
     return {
@@ -189,8 +194,9 @@ function loadSavedState(): Partial<AppState> {
 
 function saveState(state: AppState) {
   try {
-    localStorage.setItem(
-      STORAGE_KEY,
+    const { storage, key } = projectStore(STORAGE_KEY);
+    storage.setItem(
+      key,
       JSON.stringify({
         sparql: state.sparql,
         ontologyTtl: state.ontologyTtl,
@@ -254,7 +260,6 @@ export const initialState: AppState = {
   lastNlQuestion: null,
   nlHistory: [],
   transcript: [],
-  ...loadSavedState(),
 };
 
 export type Action =
@@ -611,9 +616,15 @@ function reducer(state: AppState, action: Action): AppState {
 // Re-exported pure reducer so unit tests can drive state transitions
 // without a React tree. Mirrors the Cypher UI's `__reducerForTest`.
 export { reducer as __reducerForTest };
+export { loadSavedState as __loadSavedStateForTest, saveState as __saveStateForTest };
 
 export function useAppState() {
-  const [state, dispatch] = useReducer(reducer, initialState);
+  // Saved state is read when the workbench mounts, not when this module loads: under a
+  // control plane the page learns that first, and the saved state is then this tab's.
+  const [state, dispatch] = useReducer(reducer, initialState, (s): AppState => ({
+    ...s,
+    ...loadSavedState(),
+  }));
 
   const PERSIST_ACTIONS = new Set([
     "SET_SPARQL",

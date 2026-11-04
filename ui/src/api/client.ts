@@ -14,6 +14,12 @@
 // samples, so the missing route is a swallowed 404 rather than a failure.
 
 import type { MinedExample } from "../utils/minedExamples";
+import {
+  contextHeaders,
+  controlPlane,
+  sessionEnded,
+  type ProjectContext,
+} from "./controlPlane";
 import type { EditorVocab } from "../lang/sparqlEditorCore";
 
 export interface ConnectRequest {
@@ -118,6 +124,8 @@ export interface ProfileResponse {
 }
 
 function authHeaders(token: string): Record<string, string> {
+  // Under a control plane the context is the only credential, on every call.
+  if (controlPlane.on) return contextHeaders();
   return { "X-Arango-Session": token };
 }
 
@@ -160,11 +168,15 @@ async function request<T>(
     headers: {
       "Content-Type": "application/json",
       ...(extraHeaders as Record<string, string>),
+      // Every call carries the context under a control plane, including the ones that
+      // need no session off it (translate, validate, the plain-English routes).
+      ...(controlPlane.on ? contextHeaders() : {}),
     },
   });
   if (!res.ok) {
     if (res.status === 401) {
       await res.text().catch(() => "");
+      if (controlPlane.on) sessionEnded();
       throw new ApiError(401, AUTH_EXPIRED_MESSAGE);
     }
     const body = await res.json().catch(() => ({ detail: res.statusText }));
@@ -207,6 +219,11 @@ export interface HealthResponse {
   version: string;
   /** The installed arangodb-schema-analyzer, or null when absent. */
   analyzer_version: string | null;
+}
+
+/** Under a control plane: who this tab is for, which project, and its database. */
+export async function getControlPlaneContext(): Promise<ProjectContext> {
+  return request("/control-plane/context");
 }
 
 export async function getHealth(): Promise<HealthResponse> {
@@ -684,7 +701,10 @@ export async function exportOwlAsTurtle(
     }),
   });
   if (!res.ok) {
-    if (res.status === 401) throw new ApiError(401, AUTH_EXPIRED_MESSAGE);
+    if (res.status === 401) {
+      if (controlPlane.on) sessionEnded();
+      throw new ApiError(401, AUTH_EXPIRED_MESSAGE);
+    }
     const body = await res.json().catch(() => ({ detail: res.statusText }));
     throw new ApiError(res.status, body.detail ?? body);
   }

@@ -114,6 +114,14 @@ uv run arango-sparql-py translate \
 > run `uv run python scripts/ensure_database.py`; to disable the boot
 > step, set `ARANGO_SPARQL_SKIP_DB_BOOTSTRAP=1`.
 
+> **Under a governance control plane.** Set `CONTROL_PLANE_URL` and the
+> service becomes a project's query tool: the project's signed context is
+> the only credential, a session opens on the project's database with the
+> deployment's own credential, and routes that connect elsewhere or run
+> caller-written AQL are refused. Build the image with
+> `control-plane.Dockerfile` (it needs the control plane's Python SDK as a
+> named build context). See [PRD §8.7](docs/architecture/PRD.md#87-under-a-governance-control-plane).
+
 > Sibling-repo work (porting from the legacy Foxx service or mirroring
 > patterns from `arango-cypher-py`)? Run `./scripts/setup_references.sh`
 > to symlink them under `references/`. Symlinks are gitignored — they
