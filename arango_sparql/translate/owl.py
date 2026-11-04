@@ -440,27 +440,31 @@ def conceptual_schema_from_graph(graph: Graph) -> dict[str, list[dict[str, Any]]
     each ``owl:ObjectProperty`` with its domain and range. For an ontology that *is* the
     schema (one a governance control plane assembles for a project, PRD §8.7), so the NL
     prompt and the editor list its terms; the analyzer's own OWL does not need it."""
+
+    def name(node: Any) -> str:
+        return local_name(node) if isinstance(node, URIRef) else ""
+
     props: dict[str, list[dict[str, str]]] = {}
     for prop in sorted(set(graph.subjects(RDF.type, OWL.DatatypeProperty)), key=str):
-        name = local_name(prop)
+        prop_name = name(prop)
         for domain in graph.objects(prop, RDFS.domain):
-            cls = local_name(domain)
-            if name and cls and all(p["name"] != name for p in props.get(cls, [])):
-                props.setdefault(cls, []).append({"name": name})
+            cls = name(domain)
+            if prop_name and cls and all(p["name"] != prop_name for p in props.get(cls, [])):
+                props.setdefault(cls, []).append({"name": prop_name})
     entities = []
     for cls_iri in sorted(set(graph.subjects(RDF.type, OWL.Class)), key=str):
-        name = local_name(cls_iri) if isinstance(cls_iri, URIRef) else ""
-        if name:
-            entities.append({"name": name, "labels": [name], "properties": props.get(name, [])})
+        cls_name = name(cls_iri)
+        if cls_name:
+            entities.append({"name": cls_name, "labels": [cls_name], "properties": props.get(cls_name, [])})
     relationships = []
     for prop in sorted(set(graph.subjects(RDF.type, OWL.ObjectProperty)), key=str):
-        name = local_name(prop)
-        domains = [local_name(d) for d in graph.objects(prop, RDFS.domain)] or [""]
-        ranges = [local_name(r) for r in graph.objects(prop, RDFS.range)] or [""]
-        for domain in sorted(domains):
-            for range_ in sorted(ranges):
-                if name:
-                    relationships.append({"type": name, "fromEntity": domain, "toEntity": range_})
+        prop_name = name(prop)
+        domains = [name(d) for d in graph.objects(prop, RDFS.domain)] or [""]
+        ranges = [name(r) for r in graph.objects(prop, RDFS.range)] or [""]
+        for source in sorted(domains):
+            for target in sorted(ranges):
+                if prop_name:
+                    relationships.append({"type": prop_name, "fromEntity": source, "toEntity": target})
     return {"entities": entities, "relationships": relationships}
 
 
