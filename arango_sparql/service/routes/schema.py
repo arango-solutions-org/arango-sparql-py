@@ -512,6 +512,33 @@ def _read_or_warm(
     return _scoped(db, entry.bundle, graph_name), cache_hit, warming
 
 
+def _session_schema(
+    session: Any,
+    *,
+    strategy: Strategy,
+    include_owl: bool = False,
+    force: bool = False,
+) -> tuple[MappingBundle | None, bool, bool]:
+    """*session*'s schema, as :func:`_read_or_warm` answers: ``(bundle | None, cache_hit,
+    warming)``.
+
+    Under a governance control plane a session whose project has a mapping uses it (PRD
+    §8.7): the project ontology joined to where its data lives, as the control plane
+    assembles it. It is never replaced by an analysis of the database, whose terms would
+    differ. Otherwise the database's analyzed schema, read or warmed."""
+    pinned = getattr(session, "project_mapping", None)
+    if pinned is not None:
+        return _scoped(session.db, pinned, getattr(session, "graph_name", None)), True, False
+    return _read_or_warm(
+        session.db,
+        background_db=lambda: background_database(session),
+        strategy=strategy,
+        include_owl=include_owl,
+        graph_name=getattr(session, "graph_name", None),
+        force=force,
+    )
+
+
 def _pending_warning(warming: bool) -> dict[str, Any]:
     """The ``info`` note a ``pending`` schema response carries (cypher parity)."""
     return {
@@ -582,13 +609,11 @@ def schema_introspect(
     t0 = time.perf_counter()
 
     try:
-        bundle, cache_hit, warming = _read_or_warm(
-            session.db,
-            background_db=lambda: background_database(session),
+        bundle, cache_hit, warming = _session_schema(
+            session,
             force=force,
             strategy=typed_strategy,
             include_owl=include_owl,
-            graph_name=getattr(session, "graph_name", None),
         )
     except AnalyzerNotInstalledError as exc:
         # Explicit ``strategy=analyzer`` on a deployment without the
@@ -714,13 +739,11 @@ def schema_owl(
     t0 = time.perf_counter()
 
     try:
-        bundle, cache_hit, warming = _read_or_warm(
-            session.db,
-            background_db=lambda: background_database(session),
+        bundle, cache_hit, warming = _session_schema(
+            session,
             force=force,
             strategy=typed_strategy,
             include_owl=True,
-            graph_name=getattr(session, "graph_name", None),
         )
     except AnalyzerNotInstalledError as exc:
         log_endpoint_timing(
@@ -1069,11 +1092,9 @@ def schema_statistics(
 
     t0 = time.perf_counter()
     try:
-        bundle, _hit, warming = _read_or_warm(
-            session.db,
-            background_db=lambda: background_database(session),
+        bundle, _hit, warming = _session_schema(
+            session,
             strategy="auto",
-            graph_name=getattr(session, "graph_name", None),
         )
     except AnalyzerNotInstalledError as exc:
         raise HTTPException(
@@ -1281,11 +1302,16 @@ def schema_force_reacquire(
 
     t0 = time.perf_counter()
     try:
-        bundle, _hit = _get_or_acquire(
-            session.db,
-            force=True,
-            strategy=typed_strategy,
-            graph_name=getattr(session, "graph_name", None),
+        pinned = getattr(session, "project_mapping", None)
+        bundle, _hit = (
+            (_scoped(session.db, pinned, getattr(session, "graph_name", None)), True)
+            if pinned is not None  # the project's mapping is not re-analysed (PRD §8.7)
+            else _get_or_acquire(
+                session.db,
+                force=True,
+                strategy=typed_strategy,
+                graph_name=getattr(session, "graph_name", None),
+            )
         )
     except AnalyzerNotInstalledError as exc:
         raise HTTPException(

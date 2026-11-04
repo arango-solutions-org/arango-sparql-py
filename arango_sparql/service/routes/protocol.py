@@ -101,10 +101,9 @@ from ..security import (
     _Session,
     _sessions,
     _translate_errors,
-    background_database,
 )
 from ..tenant import resolve_tenant_id
-from .schema import _read_or_warm
+from .schema import _session_schema
 
 logger = _log.getLogger("arango_sparql.service.routes.protocol")
 
@@ -474,11 +473,9 @@ def _resolver_for_session(session: _Session) -> tuple[SchemaResolver, list[dict[
     """
 
     try:
-        bundle, _cache_hit, _warming = _read_or_warm(
-            session.db,
-            background_db=lambda: background_database(session),
+        bundle, _cache_hit, _warming = _session_schema(
+            session,
             strategy="auto",
-            graph_name=getattr(session, "graph_name", None),
         )
     except HTTPException:
         # The schema route already maps the
@@ -540,11 +537,9 @@ def _bundle_for_session(session: _Session):
     try:
         # Cache-only (never blocks): a miss starts a background analysis
         # and the Service Description renders with the default graph.
-        bundle, _hit, _warming = _read_or_warm(
-            session.db,
-            background_db=lambda: background_database(session),
+        bundle, _hit, _warming = _session_schema(
+            session,
             strategy="auto",
-            graph_name=getattr(session, "graph_name", None),
         )
         return bundle
     except Exception:

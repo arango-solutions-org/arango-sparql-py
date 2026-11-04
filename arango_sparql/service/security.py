@@ -117,6 +117,8 @@ class _Session:
         "graph_name",
         "platform_token",
         "platform_user",
+        "project_mapping",
+        "project_mapping_at",
     )
 
     def __init__(
@@ -150,6 +152,11 @@ class _Session:
         # slice of a database other programs may share. See ADR — named
         # graph scoping.
         self.graph_name = graph_name
+        # Under a governance control plane: the project's ontology joined to where its
+        # data lives, as the control plane assembles it (PRD §8.7), and when it was read.
+        # ``None``: the project has none, and the schema is introspected as without one.
+        self.project_mapping: Any = None
+        self.project_mapping_at: float | None = None
 
     def touch(self) -> None:
         self.last_used = time.time()
@@ -294,8 +301,46 @@ def _control_plane_session(request: Request) -> _Session:
         _evict_lru()
         session = _Session(token=key, db=db, client=client)
         _sessions[key] = session
+    _refresh_project_mapping(session, request)
     session.touch()
     return session
+
+
+def _refresh_project_mapping(session: _Session, request: Request) -> None:
+    """Read the project's mapping for *session* when it has none yet or it is older than
+    :data:`control_plane.MAPPING_REFRESH_SECONDS`, with this request's context.
+
+    A project without one keeps introspection. When the control plane cannot be read, a
+    session that has a mapping keeps it; one that has none yet gets 503 rather than an
+    introspected schema, whose terms would differ from the project's."""
+    now = time.time()
+    if (
+        session.project_mapping_at is not None
+        and now - session.project_mapping_at < control_plane.MAPPING_REFRESH_SECONDS
+    ):
+        return
+    token = control_plane.token_from(request.headers) or ""
+    try:
+        turtle = control_plane.get().project_mapping(token)
+        bundle = None
+        if turtle is not None:
+            from ..translate.owl import turtle_to_mapping
+
+            bundle = turtle_to_mapping(
+                turtle, source_notes="the project's mapping, from its control plane", derive_conceptual=True
+            )
+    except control_plane.ContextRejected as exc:
+        raise HTTPException(status_code=401, detail=f"Invalid project context: {exc}") from exc
+    except Exception as exc:  # unavailable, or an answer that does not parse
+        if session.project_mapping_at is not None:
+            _svc_logger.warning("control plane: keeping the project's mapping: %s", _sanitize_error(str(exc)))
+            session.project_mapping_at = now
+            return
+        raise HTTPException(
+            status_code=503, detail=f"Cannot read the project's mapping: {_sanitize_error(str(exc))}"
+        ) from exc
+    session.project_mapping = bundle
+    session.project_mapping_at = now
 
 
 def _get_session(request: Request) -> _Session:

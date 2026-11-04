@@ -9,6 +9,7 @@ token strings to identities, as r2g's and AOE's tests do.
 
 from __future__ import annotations
 
+import json
 import sys
 import types
 from typing import Any
@@ -47,6 +48,10 @@ class _FakeControlPlane:
         self.tokens = tokens
         self.unavailable = unavailable
         self.verified = 0
+        #: Project → its mapping as the control plane serves it; a project not here has none.
+        self.mappings: dict[str, str] = {}
+        self.mapping_down = False
+        self.mapping_reads = 0
 
     def verify(self, token: str) -> control_plane.Identity:
         if self.unavailable:
@@ -56,6 +61,16 @@ class _FakeControlPlane:
             return self.tokens[token]
         except KeyError:
             raise control_plane.ContextRejected("token rejected: signature") from None
+
+    def project_mapping(self, token: str) -> str | None:
+        try:  # the real one verifies through the SDK too; not counted as the gate's verify
+            identity = self.tokens[token]
+        except KeyError:
+            raise control_plane.ContextRejected("token rejected: signature") from None
+        if self.mapping_down:
+            raise control_plane.ContextUnavailable("control plane answered 503")
+        self.mapping_reads += 1
+        return self.mappings.get(identity.project)
 
 
 class _FakeDb:
@@ -325,6 +340,85 @@ def test_the_session_opens_on_the_projects_database_with_the_servers_credential(
     ]
 
 
+LIB = "https://example.org/library#"
+#: Library's mapping as the control plane assembles it (FR-14.7 there): the project's IRIs,
+#: with the collection, field and edge collection that hold each.
+LIBRARY_MAPPING = f"""@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix phys: <http://arangodb.com/schema/physical#> .
+@prefix : <{LIB}> .
+
+<{LIB}Loan> a owl:Class ;
+    phys:collectionName "loans" .
+<{LIB}Member> a owl:Class ;
+    phys:collectionName "members" ;
+    rdfs:subClassOf <{LIB}Agent> .
+<{LIB}fullName> a owl:DatatypeProperty ;
+    rdfs:domain <{LIB}Member> ;
+    phys:attributeName "name" .
+<{LIB}borrowedBy> a owl:ObjectProperty ;
+    rdfs:domain <{LIB}Loan> ;
+    rdfs:range <{LIB}Member> ;
+    phys:edgeCollectionName "borrowed_by" .
+"""
+
+
+def _sparql(text: str) -> dict[str, str]:
+    return {"sparql": f"PREFIX : <{LIB}>\n{text}"}
+
+
+def test_a_projects_mapping_is_the_sessions_schema(governed, client) -> None:
+    """The project's IRIs translate to where the data lives: a class to its collection, a
+    property to its field (not its local name), a relationship to its edge collection."""
+    governed.mappings["library"] = LIBRARY_MAPPING
+    r = client.post(
+        "/translate",
+        json=_sparql("SELECT ?n WHERE { ?l a :Loan ; :borrowedBy ?m . ?m :fullName ?n }"),
+        headers=_bearer("tok-alice"),
+    )
+    assert r.status_code == 200, r.text
+    aql, binds = r.json()["aql"], json.dumps(r.json()["bind_vars"])
+    assert "loans" in binds and "borrowed_by" in binds and "fullName" not in aql + binds
+    assert ".name" in aql or '"name"' in binds
+    body = client.get("/schema/introspect", headers=_bearer("tok-alice")).json()
+    assert body["mapping"]["source"]["kind"] == "imported_owl"
+    names = {e["name"] for e in body["mapping"]["conceptualSchema"]["entities"]}
+    assert names == {"Loan", "Member"}  # for the NL prompt and the editor
+    # positive control: without a mapping, the same IRIs are not the project's
+    governed.mappings.clear()
+    _sessions.clear()
+    r = client.post(
+        "/translate", json=_sparql("SELECT ?l WHERE { ?l a :Loan }"), headers=_bearer("tok-alice")
+    )
+    assert "loans" not in json.dumps(r.json().get("bind_vars", {}))
+
+
+def test_the_projects_mapping_is_read_again_after_a_while(governed, client, monkeypatch) -> None:
+    governed.mappings["library"] = LIBRARY_MAPPING
+    client.get("/graphs", headers=_bearer("tok-alice"))
+    client.get("/graphs", headers=_bearer("tok-alice"))
+    assert governed.mapping_reads == 1
+    monkeypatch.setattr(control_plane, "MAPPING_REFRESH_SECONDS", 0.0)
+    client.get("/graphs", headers=_bearer("tok-alice"))
+    assert governed.mapping_reads == 2
+
+
+def test_an_unreadable_mapping_is_503_until_one_was_read(governed, client, monkeypatch) -> None:
+    """Never an introspected schema in its place: its terms would not be the project's."""
+    governed.mappings["library"] = LIBRARY_MAPPING
+    governed.mapping_down = True
+    r = client.get("/graphs", headers=_bearer("tok-alice"))
+    assert r.status_code == 503 and "mapping" in r.json()["detail"]
+    governed.mapping_down = False
+    assert client.get("/graphs", headers=_bearer("tok-alice")).status_code == 200
+    # once read, a session keeps it through an outage
+    monkeypatch.setattr(control_plane, "MAPPING_REFRESH_SECONDS", 0.0)
+    governed.mapping_down = True
+    assert client.get("/graphs", headers=_bearer("tok-alice")).status_code == 200
+    (session,) = _sessions.values()
+    assert session.project_mapping is not None
+
+
 def test_the_context_route_says_who_and_where(governed, client) -> None:
     body = client.get("/control-plane/context", headers=_bearer("tok-alice")).json()
     assert body["principal"] == "alice"
@@ -420,7 +514,13 @@ def test_the_mode_needs_a_tenant_a_source_and_the_sdk(monkeypatch) -> None:
     monkeypatch.setenv("ARANGO_USER", "reader")
     monkeypatch.setitem(sys.modules, "control_plane_sdk", None)  # import fails
     assert "SDK" in (control_plane.configuration_problem() or "")
-    monkeypatch.setitem(sys.modules, "control_plane_sdk", types.ModuleType("control_plane_sdk"))
+    old = types.ModuleType("control_plane_sdk")
+    old.ControlPlane = type("ControlPlane", (), {})  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "control_plane_sdk", old)
+    assert "project_mapping" in (control_plane.configuration_problem() or "")
+    new = types.ModuleType("control_plane_sdk")
+    new.ControlPlane = type("ControlPlane", (), {"project_mapping": lambda self, v: None})  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "control_plane_sdk", new)
     assert control_plane.configuration_problem() is None
 
 
@@ -478,3 +578,10 @@ def test_the_sdk_adapter_maps_a_verified_context(monkeypatch) -> None:
         adapter.verify("bad")
     with pytest.raises(control_plane.ContextUnavailable):
         adapter.verify("down")
+    # The project's mapping, through the SDK with the same context; its errors, mapped.
+    ControlPlane.project_mapping = lambda self, verified: f"ttl for {verified.context.project}"  # type: ignore[attr-defined]
+    assert adapter.project_mapping("good") == "ttl for library"
+    with pytest.raises(control_plane.ContextRejected):
+        adapter.project_mapping("bad")
+    with pytest.raises(control_plane.ContextUnavailable):
+        adapter.project_mapping("down")

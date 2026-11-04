@@ -320,6 +320,7 @@ def turtle_to_mapping(
     max_triples: int | None = None,
     preserve_owl: bool = True,
     source_notes: str | None = None,
+    derive_conceptual: bool = False,
 ) -> MappingBundle:
     """Parse *turtle* and project it into a :class:`MappingBundle`.
 
@@ -414,7 +415,11 @@ def turtle_to_mapping(
         owl_turtle_value = graph.serialize(format="turtle")
 
     bundle = MappingBundle(
-        conceptual_schema={"entities": [], "relationships": []},
+        conceptual_schema=(
+            conceptual_schema_from_graph(graph)
+            if derive_conceptual
+            else {"entities": [], "relationships": []}
+        ),
         physical_mapping={
             "entities": entities,
             "relationships": relationships,
@@ -427,6 +432,36 @@ def turtle_to_mapping(
         ),
     )
     return bundle
+
+
+def conceptual_schema_from_graph(graph: Graph) -> dict[str, list[dict[str, Any]]]:
+    """The conceptual half of a bundle, read from an ontology that declares its terms: each
+    ``owl:Class`` (by local name) with the data properties whose ``rdfs:domain`` it is, and
+    each ``owl:ObjectProperty`` with its domain and range. For an ontology that *is* the
+    schema (one a governance control plane assembles for a project, PRD §8.7), so the NL
+    prompt and the editor list its terms; the analyzer's own OWL does not need it."""
+    props: dict[str, list[dict[str, str]]] = {}
+    for prop in sorted(set(graph.subjects(RDF.type, OWL.DatatypeProperty)), key=str):
+        name = local_name(prop)
+        for domain in graph.objects(prop, RDFS.domain):
+            cls = local_name(domain)
+            if name and cls and all(p["name"] != name for p in props.get(cls, [])):
+                props.setdefault(cls, []).append({"name": name})
+    entities = []
+    for cls_iri in sorted(set(graph.subjects(RDF.type, OWL.Class)), key=str):
+        name = local_name(cls_iri) if isinstance(cls_iri, URIRef) else ""
+        if name:
+            entities.append({"name": name, "labels": [name], "properties": props.get(name, [])})
+    relationships = []
+    for prop in sorted(set(graph.subjects(RDF.type, OWL.ObjectProperty)), key=str):
+        name = local_name(prop)
+        domains = [local_name(d) for d in graph.objects(prop, RDFS.domain)] or [""]
+        ranges = [local_name(r) for r in graph.objects(prop, RDFS.range)] or [""]
+        for domain in sorted(domains):
+            for range_ in sorted(ranges):
+                if name:
+                    relationships.append({"type": name, "fromEntity": domain, "toEntity": range_})
+    return {"entities": entities, "relationships": relationships}
 
 
 def _entities_from_graph(
