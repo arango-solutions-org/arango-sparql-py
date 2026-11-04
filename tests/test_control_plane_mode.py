@@ -371,6 +371,37 @@ def test_the_protocol_endpoint_uses_the_context_not_the_env_default(governed, cl
     assert [o["db"] for o in _FakeClient.opened] == ["library"]
 
 
+# --- logs -------------------------------------------------------------------------------------
+
+
+def test_credentials_in_an_address_never_reach_the_access_log() -> None:
+    """A tool's first link carries ``?ctx=`` and ``/sparql`` takes ``?session=``: uvicorn's
+    access log would otherwise write both in full."""
+    import logging
+
+    from arango_sparql.service.observability import AccessLogRedactFilter, redact_query
+
+    assert redact_query("/?ctx=eyJ.a.b&tab=x") == "/?ctx=[redacted]&tab=x"
+    assert redact_query("/sparql?query=ASK&session=tok&%63tx=t2&TOKEN=t3") == (
+        "/sparql?query=ASK&session=[redacted]&%63tx=[redacted]&TOKEN=[redacted]"
+    )
+    assert redact_query("/graphs") == "/graphs"
+    assert redact_query("/?context=keep") == "/?context=keep"
+    access = logging.getLogger("uvicorn.access")
+    assert any(isinstance(f, AccessLogRedactFilter) for f in access.filters)
+    record = logging.LogRecord(
+        "uvicorn.access",
+        logging.INFO,
+        "",
+        0,
+        '%s - "%s %s HTTP/%s" %d',
+        ("1.2.3.4:5", "GET", "/?ctx=secret", "1.1", 200),
+        None,
+    )
+    assert all(f.filter(record) for f in access.filters)
+    assert "secret" not in record.getMessage()
+
+
 # --- configuration --------------------------------------------------------------------------
 
 

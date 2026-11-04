@@ -1875,7 +1875,7 @@ deferred / accepted (with rationale).
 | T14 | Metrics exposure leaking PII | **I** | 5 | Tenant labels in Prometheus reveal tenant existence to anyone scraping | `METRICS_LABEL_TENANT=false` by default (§9.5); metrics port (`:9090`) is in-cluster only; `arango_sparql_build_info` is the only label-rich gauge |
 | T15 | Log exfiltration via `/explain` / `/profile` echoing query text | **I** | 1 | User triggers `/explain` then reads logs | Query bodies are NOT logged; only sizes (`sparql_len`, `aql_len`) and timing — see §9.1 |
 | T16 | Supply-chain compromise of LLM provider | **I**, **T** | 4 | Adversarial provider returns SPARQL that maliciously selects extra columns | Generated SPARQL is parsed and re-translated; the resolver caps the projection to user-specified `?vars`; no provider-supplied identifier reaches AQL without resolver mediation |
-| T18 | Context-token theft or replay under a control plane | **S** | 1 | A context token copied from an address, a log or another tab | §8.7: the token travels only as `Authorization: Bearer` (never the query string or the session header); the UI keeps it per tab in `sessionStorage`, removes it from the address bar on arrival, and renews it before its short expiry; verified offline on every request against the control plane's keys |
+| T18 | Context-token theft or replay under a control plane | **S** | 1 | A context token copied from an address, a log or another tab | §8.7: the token travels only as `Authorization: Bearer` (never the query string or the session header); its arrival address is redacted in the access log; the UI keeps it per tab in `sessionStorage`, removes it from the address bar on arrival, and renews it before its short expiry; verified offline on every request against the control plane's keys |
 | T19 | A context reaching another tenant's or project's data | **E** | 1, 2 | A valid token for another tenant, or a project binding a database on another deployment | §8.7: the deployment pins one tenant and one source and refuses the rest; a session is keyed by tenant, project, user and database, never by the token |
 | T20 | Writing through the query tool under a control plane | **T**, **E** | 1, 2 | `/execute-aql` with a REMOVE, a schema refresh writing the persistent cache, or a new route that writes | §8.7: every route is classified open, refused or served, and an unclassified route is refused; `/execute-aql` and the connect routes are refused; SPARQL Update is 405 as everywhere; the schema cache writes nothing to the project's database; no default database user |
 | T21 | Spending another user's budget, or an unlimited one, under a control plane | **D** | 1, 4 | Junk first `Authorization` headers, or a renewed token, to escape the rate limits on the LLM and analysis routes | §8.7: one `Authorization` header per request; limits keyed by tenant, project and user |
@@ -1929,6 +1929,9 @@ applies and the service is unchanged.
   route left unclassified is refused. `/execute-aql` is refused: caller-written AQL can change
   the data. SPARQL Update is 405 as everywhere (§5.2). The schema cache stays in memory: its
   persistent copy (§6.4) is neither created, written nor deleted in a project's database.
+- **No credential in the access log.** The values of `ctx`, `session` and `token` query
+  parameters are redacted in uvicorn's access log, in every mode: a tool's first link carries
+  `?ctx=`, and `/sparql` takes `?session=` off a control plane.
 - **One credential per request, limits per user.** A request with more than one
   `Authorization` header is refused (400). Rate limits (§8.3) count the context's tenant,
   project and user, so a renewed token does not get a fresh budget.
