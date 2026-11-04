@@ -38,6 +38,8 @@ from fastapi import HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from .._env import read_arango_password, read_arango_url, read_arango_username
+from . import control_plane
 from .app import _PUBLIC_MODE, _svc_logger, app
 from .platform_auth import (
     PlatformTokenError,
@@ -229,7 +231,74 @@ def _follow_platform_identity(session: _Session, request: Request, *, via_sessio
     return None
 
 
+def _arango_client_class() -> Any:
+    """The service-level ``ArangoClient``, or the override a test patched onto the package
+    (the same lookup the ``/connect`` route makes)."""
+    for pkg in _service_pkg_candidates():
+        client_cls = getattr(pkg, "ArangoClient", None)
+        if client_cls is not None and client_cls is not ArangoClient:
+            return client_cls
+    return ArangoClient
+
+
+def control_plane_identity(request: Request) -> control_plane.Identity:
+    """The verified context a request carries, as ``HTTPException`` when it has none.
+
+    The middleware in :mod:`.routes.control_plane` verifies it first and keeps it on the
+    request; this verifies again only when called outside that middleware."""
+    identity = getattr(request.state, "control_plane_identity", None)
+    if isinstance(identity, control_plane.Identity):
+        return identity
+    try:
+        return control_plane.verify(request.headers)
+    except control_plane.ContextUnavailable as exc:
+        raise HTTPException(status_code=503, detail=f"Cannot verify the project's context: {exc}") from exc
+    except control_plane.ContextRejected as exc:
+        raise HTTPException(status_code=401, detail=f"Invalid project context: {exc}") from exc
+
+
+def _control_plane_session(request: Request) -> _Session:
+    """The session for the user and project a context names, on the project's database.
+
+    Opened with the deployment's own credential on first use and kept, like any session,
+    until idle for the TTL. Keyed by who and where, never by the token: the page renews its
+    token every few minutes and keeps its session. The key is not a credential: in this
+    mode a request's token is always verified as a context, never looked up as a session.
+    """
+    identity = control_plane_identity(request)
+    try:
+        _, database = control_plane.database_for(identity)
+    except control_plane.NoDatabase as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    key = "control-plane:" + "\x1f".join((identity.tenant, identity.project, identity.principal, database))
+    _prune_expired()
+    session = _sessions.get(key)
+    if session is None:
+        url = (read_arango_url(caller="control_plane") or "").rstrip("/")
+        try:
+            client = _arango_client_class()(hosts=url)
+            db = client.db(
+                database,
+                username=read_arango_username(default="root", caller="control_plane") or "root",
+                password=read_arango_password(caller="control_plane") or "",
+            )
+            db.version()  # python-arango's .db() is lazy: check the credential now
+        except Exception as exc:
+            reason = _describe_connect_error(exc)
+            _svc_logger.warning("control plane: cannot open database %r: %s", database, reason)
+            raise HTTPException(
+                status_code=503, detail=f"Cannot open the project's database: {_sanitize_error(reason)}"
+            ) from exc
+        _evict_lru()
+        session = _Session(token=key, db=db, client=client)
+        _sessions[key] = session
+    session.touch()
+    return session
+
+
 def _get_session(request: Request) -> _Session:
+    if control_plane.mode():
+        return _control_plane_session(request)
     _prune_expired()
     # Prefer X-Arango-Session: the ArangoDB platform proxy replaces the standard
     # Authorization header with its own platform JWT before forwarding to the
@@ -265,7 +334,17 @@ def _get_optional_session(request: Request) -> _Session | None:
     discovered schema into the inline ontology. Never raises on a missing
     or expired token; an expired session is pruned exactly as
     :func:`_get_session` would, then ``None`` is returned.
+
+    Under a control plane the context is the session: a project with no database here
+    has none, and an invalid context is refused as by :func:`_get_session`.
     """
+    if control_plane.mode():
+        try:
+            return _control_plane_session(request)
+        except HTTPException as exc:
+            if exc.status_code == 409:
+                return None
+            raise
     _prune_expired()
     token = request.headers.get("X-Arango-Session", "")
     via_session_header = bool(token)

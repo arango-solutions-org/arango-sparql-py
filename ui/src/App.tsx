@@ -25,6 +25,12 @@ import ThemeToggle from "./components/ThemeToggle";
 import { t } from "./i18n";
 import { useAppState } from "./api/store";
 import {
+  controlPlane,
+  onSessionEnded,
+  startControlPlane,
+  type ControlPlaneStart,
+} from "./api/controlPlane";
+import {
   translateSparql,
   executeSparql,
   executeAql,
@@ -36,6 +42,7 @@ import {
   bindGraph,
   getMinedExamples,
   isAuthError,
+  apiBaseFor,
   schemaIntrospectUntilReady,
   SchemaPollSuperseded,
   type GraphInfo,
@@ -76,7 +83,55 @@ function loadBool(key: string, fallback: boolean): boolean {
   }
 }
 
+/** The page: under a control plane it first adopts this tab's context, and shows why it
+ * cannot open (no context, or the session ended) instead of the workbench. */
 export default function App() {
+  const [start, setStart] = useState<ControlPlaneStart | "loading">("loading");
+  const [ended, setEnded] = useState(false);
+  useEffect(() => {
+    let live = true;
+    onSessionEnded(() => live && setEnded(true));
+    void startControlPlane(apiBaseFor(window.location.pathname)).then((s) => live && setStart(s));
+    return () => {
+      live = false;
+      onSessionEnded(null);
+    };
+  }, []);
+  if (start === "loading") {
+    return (
+      <div className="h-screen flex items-center justify-center bg-gray-950 text-gray-400 text-sm">
+        {t("controlPlane.loading")}
+      </div>
+    );
+  }
+  if (start === "no-context") {
+    return <ControlPlaneGate title={t("controlPlane.noContext.title")} text={t("controlPlane.noContext.text")} />;
+  }
+  if (ended) {
+    return <ControlPlaneGate title={t("controlPlane.ended.title")} text={t("controlPlane.ended.text")} />;
+  }
+  return <Workbench />;
+}
+
+function ControlPlaneGate({ title, text }: { title: string; text: string }) {
+  return (
+    <main className="h-screen flex items-center justify-center bg-gray-950 text-gray-100 p-4">
+      <div role="alert" className="max-w-md flex flex-col gap-3">
+        <h1 className="text-lg font-semibold">{title}</h1>
+        <p className="text-sm text-gray-400">{text}</p>
+        <a
+          href={controlPlane.home}
+          target="_top"
+          className="w-fit px-3 py-1.5 text-sm rounded bg-indigo-600 hover:bg-indigo-500 text-white"
+        >
+          {t("controlPlane.home")}
+        </a>
+      </div>
+    </main>
+  );
+}
+
+function Workbench() {
   const [state, dispatch] = useAppState();
   // L2 panels — progressive disclosure: all closed by default so a hard
   // refresh returns to the clean L0 (composer + results) surface.
@@ -1112,6 +1167,7 @@ export default function App() {
           )}
           <ChatComposer
             value={nlInput}
+            {...(controlPlane.on ? { placeholder: t("controlPlane.composerPlaceholder") } : {})}
             onChange={setNlInput}
             onSend={handleSend}
             busy={busy}

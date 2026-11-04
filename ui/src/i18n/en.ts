@@ -57,6 +57,21 @@ export const messages = {
   "panel.samples": "Sample SPARQL Queries",
 
   "empty.noSchema": "No schema loaded",
+
+  // Under a governance control plane (api/controlPlane.ts).
+  "controlPlane.loading": "Loading\u2026",
+  "controlPlane.noContext.title": "Open the query tool from a project",
+  "controlPlane.noContext.text":
+    "This tool runs in a project's context. Open it from your project, so it knows who you are and which database to query.",
+  "controlPlane.ended.title": "Your session ended",
+  "controlPlane.ended.text":
+    "Your project pass for this tool is no longer valid: you signed out, or it expired while this tab was idle. Open the tool again from your project to continue.",
+  "controlPlane.home": "Go to your projects",
+  "controlPlane.project": "Project",
+  "controlPlane.signedInAs": "Signed in as",
+  "controlPlane.noDatabase": "This project has no database this tool can query: {problem}",
+  "controlPlane.composerPlaceholder":
+    "Ask a question about your data\u2026 (sent to this deployment's language model)",
 } as const;
 
 export type MessageKey = keyof typeof messages;

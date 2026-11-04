@@ -1,4 +1,5 @@
 import { useCallback, useReducer } from "react";
+import { controlPlane } from "./controlPlane";
 import { appendTurn, type TranscriptTurn } from "../utils/transcript";
 import type { EditorVocab } from "../lang/sparqlEditorCore";
 
@@ -165,12 +166,19 @@ export interface AppState {
 
 const STORAGE_KEY = "sparql-workbench";
 
+/** Where the workbench keeps its editor, ontology and history. Under a control plane they
+ * belong to a project, so they stay in this tab (sessionStorage): every tab on the origin
+ * shares localStorage, and a tab on another project would read them. */
+function savedStateStorage(): Storage {
+  return controlPlane.on ? sessionStorage : localStorage;
+}
+
 const MAX_HISTORY = 50;
 const MAX_NL_HISTORY = 50;
 
 function loadSavedState(): Partial<AppState> {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = savedStateStorage().getItem(STORAGE_KEY);
     if (!raw) return {};
     const saved = JSON.parse(raw);
     return {
@@ -189,7 +197,7 @@ function loadSavedState(): Partial<AppState> {
 
 function saveState(state: AppState) {
   try {
-    localStorage.setItem(
+    savedStateStorage().setItem(
       STORAGE_KEY,
       JSON.stringify({
         sparql: state.sparql,
@@ -254,7 +262,6 @@ export const initialState: AppState = {
   lastNlQuestion: null,
   nlHistory: [],
   transcript: [],
-  ...loadSavedState(),
 };
 
 export type Action =
@@ -613,7 +620,12 @@ function reducer(state: AppState, action: Action): AppState {
 export { reducer as __reducerForTest };
 
 export function useAppState() {
-  const [state, dispatch] = useReducer(reducer, initialState);
+  // Saved state is read when the workbench mounts, not when this module loads: under a
+  // control plane the page learns that first, and the saved state is then this tab's.
+  const [state, dispatch] = useReducer(reducer, initialState, (s): AppState => ({
+    ...s,
+    ...loadSavedState(),
+  }));
 
   const PERSIST_ACTIONS = new Set([
     "SET_SPARQL",

@@ -326,6 +326,8 @@ that already speak our shape.
 | `POST` | `/schema/force-reacquire` | session + rate-limited | Re-run analyzer (bypass cache); 503 if `SCHEMA_ANALYZER_REQUIRED=false` (no analyzer installed) and `ARANGO_SPARQL_ALLOW_HEURISTIC=false` (heuristic fallback also disabled) — see §6.3.4 |
 | `POST` | `/mapping/import-owl` | session + rate-limited | Replace the active mapping with one parsed from a posted OWL/Turtle ontology |
 | `POST` | `/mapping/export-owl` | session + rate-limited | Render the active mapping as `text/turtle` |
+| `GET`  | `/control-plane/mode` | none | Whether the service runs under a governance control plane, and where a user opens it from — see §8.7 |
+| `GET`  | `/control-plane/context` | control-plane context | Under a control plane: who the tab's context is for, its project, and the database it queries; 404 otherwise — see §8.7 |
 
 Every error response is a 422 with `{"error": "...", "code": "E_..."}`. Error
 codes are stable strings from `arango_sparql.errors`:
@@ -1873,6 +1875,9 @@ deferred / accepted (with rationale).
 | T14 | Metrics exposure leaking PII | **I** | 5 | Tenant labels in Prometheus reveal tenant existence to anyone scraping | `METRICS_LABEL_TENANT=false` by default (§9.5); metrics port (`:9090`) is in-cluster only; `arango_sparql_build_info` is the only label-rich gauge |
 | T15 | Log exfiltration via `/explain` / `/profile` echoing query text | **I** | 1 | User triggers `/explain` then reads logs | Query bodies are NOT logged; only sizes (`sparql_len`, `aql_len`) and timing — see §9.1 |
 | T16 | Supply-chain compromise of LLM provider | **I**, **T** | 4 | Adversarial provider returns SPARQL that maliciously selects extra columns | Generated SPARQL is parsed and re-translated; the resolver caps the projection to user-specified `?vars`; no provider-supplied identifier reaches AQL without resolver mediation |
+| T18 | Context-token theft or replay under a control plane | **S** | 1 | A context token copied from an address, a log or another tab | §8.7: the token travels only as `Authorization: Bearer` (never the query string or the session header); the UI keeps it per tab in `sessionStorage`, removes it from the address bar on arrival, and renews it before its short expiry; verified offline on every request against the control plane's keys |
+| T19 | A context reaching another tenant's or project's data | **E** | 1, 2 | A valid token for another tenant, or a project binding a database on another deployment | §8.7: the deployment pins one tenant and one source and refuses the rest; a session is keyed by tenant, project, user and database, never by the token |
+| T20 | Writing through the query tool under a control plane | **T**, **E** | 1, 2 | `/execute-aql` with a REMOVE, or a new route that writes | §8.7: every route is classified open, refused or served, and an unclassified route is refused; `/execute-aql` and the connect routes are refused; SPARQL Update is 405 as everywhere |
 | T17 | Dependency CVE in `rdflib` / `pyoxigraph` / `python-arango` | **I**, **D** | n/a | Known vuln in transitive | `pip-audit` runs in CI; `dependabot.yml` configured for weekly bumps; security testing row in §13.1 fails the build on `pip-audit` HIGH+ |
 
 **Threats explicitly accepted / deferred:**
@@ -1893,6 +1898,45 @@ deferred / accepted (with rationale).
 **Process commitment.** This matrix is reviewed (and updated) once per
 MINOR release. Any new RPC route added in §5.1 MUST be evaluated against
 each STRIDE category in the same PR — enforced by the PR template.
+
+### 8.7 Under a governance control plane
+
+A governance control plane hosts tools on one address, each under a path prefix, and opens
+them in a project's context: a short-lived signed token naming the user and roles, the tenant,
+the project, its database bindings and its ontology, verified offline with the control plane's
+published keys through its Python SDK (`control_plane_sdk`). Setting `CONTROL_PLANE_URL` puts
+the service in this mode (`arango_sparql/service/control_plane.py`); without it nothing below
+applies and the service is unchanged.
+
+- **The context is the only credential.** Every request that reaches a route carries it as
+  `Authorization: Bearer`. `/connect`, `/connect/platform` (and its diagnostics),
+  `/disconnect`, `/connections` and `/connect/defaults` are refused (403, with the reason), as
+  is a token in the query string (`/sparql?session=`) or the `X-Arango-Session` header.
+- **One tenant, one source.** The deployment names the tenant it serves
+  (`ARANGO_SPARQL_TENANT`) and the control plane's id for the ArangoDB deployment its own
+  credential reaches (`ARANGO_SPARQL_SOURCE`, with `ARANGO_URL`, `ARANGO_USER`,
+  `ARANGO_PASSWORD`; a read-only user is enough). The service refuses to start without them or
+  without the SDK. A context for another tenant is refused; a project binding on another
+  source is never served from this one (409); a project with several bindings here is refused
+  rather than guessed until the UI can choose.
+- **Sessions.** A session opens on the project's database binding on first use, with the
+  deployment's credential, and is kept like any session. It is keyed by tenant, project, user
+  and database, not by the token, so a renewed token keeps it, and two users or two projects
+  never share one.
+- **Querying reads.** Every route is classified (`OPEN`, `REFUSED`, `SERVED` in
+  `control_plane.py`), a test pins the classification against the app's own routes, and a
+  route left unclassified is refused. `/execute-aql` is refused: caller-written AQL can change
+  the data. SPARQL Update is 405 as everywhere (§5.2).
+- **The UI.** It asks `/control-plane/mode` first. In this mode it takes `?ctx=` into
+  `sessionStorage` for the tab, removes it from the address bar, sends it on every call,
+  renews it two minutes before expiry through the control plane's `POST /api/context` on the
+  same address, and keeps the editor, ontology and history in `sessionStorage`. There is no
+  connect dialog: the bar shows the project, the user and the database. Opened without a
+  context it says to open it from a project; a refused context says the session ended.
+- **The language model** is the deployment's (§7); the ask bar says questions go to it.
+- **Not yet:** the project ontology's IRIs joined to the collections that hold each class (the
+  mapping comes from introspection, as without a control plane); choosing among several
+  databases; recording questions in the project's history.
 
 ---
 
