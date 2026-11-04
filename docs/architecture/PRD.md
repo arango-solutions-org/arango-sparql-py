@@ -1383,8 +1383,8 @@ advisories" panel.
 | `W_ANALYZER_ADVISORY` | Carries a free-text advisory the analyzer attached to its own `metadata.warnings` as a bare string (e.g. "LLM provider not configured; using heuristic baseline inference"). `acquire_mapping_bundle` normalizes such strings into this `{code, message}` shape at the bundle boundary so a string advisory cannot fail the `list[dict]` response-model validation (which previously surfaced as an opaque `500` on `/schema/introspect` against a fresh database). Informational only. |
 | `W_SCHEMA_LOW_CONFIDENCE` | `metadata.confidence < 0.5`; the operator should review the mapping before relying on it for a production workload. |
 | `W_SCHEMA_DRIFT_STATS` | `/schema/status` detected a counts-fingerprint change since last refresh. Cardinality-aware planning may be stale. |
-| `W_SCHEMA_URI_INDEX_MISSING` | A union read checks a later member's rows for a copy in an earlier member by `_uri` (§6.1, #124), and the schema analysis shows that member has no persistent, hash or skiplist index whose first field is `_uri`, so the check scans it once per row. Names the collection; add the index, then refresh the analysis. Reported only from a mapping that lists indexes (the service's analysis, or an analyzer-written reverse CSI). |
 | `W_SCHEMA_DRIFT_SHAPE` | `/schema/status` detected a shape-fingerprint change since last refresh. The mapping itself is stale; a re-acquire is recommended. |
+| `W_SCHEMA_URI_INDEX_MISSING` | A union read checks a later member's rows for a copy in an earlier member by `_uri` (§6.1, #124), and the schema analysis shows that member has no persistent, hash or skiplist index whose first field is `_uri`, so the check scans it once per row. Names the collection; add the index, then refresh the analysis. Reported only from a mapping that lists indexes (the service's analysis, or an analyzer-written reverse CSI). |
 
 ### 6.8 ArangoDB named-graph scoping (collection down-select)
 
