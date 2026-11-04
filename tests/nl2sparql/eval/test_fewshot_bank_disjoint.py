@@ -43,6 +43,7 @@ from typing import Any
 import pytest
 import yaml
 
+from arango_sparql.nl2sparql.engine_adapter import _FEWSHOT_BANK_PATH
 from tests.nl2sparql.eval.runner import _canonical, _load_corpus
 
 # Same "off" semantics as test_eval.py: treat "", "0", "false", "no" as off.
@@ -54,7 +55,7 @@ pytestmark = [
 ]
 
 EVAL_DIR = Path(__file__).parent
-BANK_PATH = EVAL_DIR / "fewshot_bank.yml"
+BANK_PATH = _FEWSHOT_BANK_PATH  # shipped in the package, where the engine reads it
 REPORTS_DIR = EVAL_DIR / "reports"
 
 # Cosine similarity ceiling (B2, committed literal): with all-MiniLM-L6-v2,
