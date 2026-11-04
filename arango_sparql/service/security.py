@@ -323,12 +323,14 @@ def _refresh_project_mapping(session: _Session, request: Request) -> None:
     try:
         turtle = control_plane.get().project_mapping(token)
         bundle = None
-        if turtle is not None:
+        if turtle is not None and turtle.strip():  # an empty answer maps nothing
             from ..translate.owl import turtle_to_mapping
 
             bundle = turtle_to_mapping(
                 turtle, source_notes="the project's mapping, from its control plane", derive_conceptual=True
             )
+            if not bundle.conceptual_schema.get("entities"):
+                bundle = None  # maps no class: nothing to ask in, so introspect as without one
     except control_plane.ContextRejected as exc:
         raise HTTPException(status_code=401, detail=f"Invalid project context: {exc}") from exc
     except Exception as exc:  # unavailable, or an answer that does not parse

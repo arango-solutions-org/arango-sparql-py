@@ -51,7 +51,9 @@ class _FakeControlPlane:
         #: Project → its mapping as the control plane serves it; a project not here has none.
         self.mappings: dict[str, str] = {}
         self.mapping_down = False
+        self.mapping_rejects = False
         self.mapping_reads = 0
+        self.mapping_attempts = 0
 
     def verify(self, token: str) -> control_plane.Identity:
         if self.unavailable:
@@ -67,6 +69,9 @@ class _FakeControlPlane:
             identity = self.tokens[token]
         except KeyError:
             raise control_plane.ContextRejected("token rejected: signature") from None
+        self.mapping_attempts += 1
+        if self.mapping_rejects:
+            raise control_plane.ContextRejected("control plane refused the context")
         if self.mapping_down:
             raise control_plane.ContextUnavailable("control plane answered 503")
         self.mapping_reads += 1
@@ -390,7 +395,110 @@ def test_a_projects_mapping_is_the_sessions_schema(governed, client) -> None:
     r = client.post(
         "/translate", json=_sparql("SELECT ?l WHERE { ?l a :Loan }"), headers=_bearer("tok-alice")
     )
-    assert "loans" not in json.dumps(r.json().get("bind_vars", {}))
+    assert r.status_code == 422 and r.json()["detail"]["code"] == "E_SCHEMA_RESOLVE"
+
+
+def test_a_question_without_an_ontology_is_asked_in_the_projects(governed, client) -> None:
+    """The NL routes too: an API caller that sends only the question gets the project's
+    terms, in the resolver and in the prompt, not an empty ontology."""
+    from arango_sparql.nl2sparql.client import LLMResponse, ScriptedLLMClient
+    from arango_sparql.service.routes.nl import _llm_client_factory
+
+    governed.mappings["library"] = LIBRARY_MAPPING
+    answer = f"PREFIX : <{LIB}>\nSELECT ?n WHERE {{ ?l a :Loan ; :borrowedBy ?m . ?m :fullName ?n }}"
+    llm = ScriptedLLMClient(
+        [LLMResponse(content=answer, prompt_tokens=1, completion_tokens=1, total_tokens=2)], latency_ms=0
+    )
+    app.dependency_overrides[_llm_client_factory] = lambda: llm
+    try:
+        r = client.post("/nl-translate", json={"nl": "who borrowed"}, headers=_bearer("tok-alice"))
+    finally:
+        app.dependency_overrides.pop(_llm_client_factory, None)
+    assert r.status_code == 200, r.text
+    assert "borrowed_by" in json.dumps(r.json()["bind_vars"])
+    prompt = json.dumps(llm.calls[0])
+    assert "phys:edgeCollectionName" in prompt  # the model was shown the project's ontology
+
+
+def test_an_imported_ontology_is_a_base_only_when_imported() -> None:
+    """A request without an ontology is resolved in the session's bundle only when that
+    bundle is an imported ontology (a project's): an analysis's OWL stays enrichment."""
+    import dataclasses
+
+    from arango_sparql.service.mapping import _resolver_from_request
+    from arango_sparql.translate.mapping import MappingSource
+    from arango_sparql.translate.owl import turtle_to_mapping
+
+    imported = turtle_to_mapping(LIBRARY_MAPPING, derive_conceptual=True)
+    analysed = dataclasses.replace(imported, source=MappingSource(kind="analyzer"))
+    req = types.SimpleNamespace(ontology_ttl=None, mapping=None)
+    loan = f"{LIB}Loan"
+    assert _resolver_from_request(req, analyzer_bundle=imported).resolve_class(loan).collection == "loans"
+    with pytest.raises(Exception, match="not declared"):
+        _resolver_from_request(req, analyzer_bundle=analysed).resolve_class(loan)
+
+
+def test_a_refused_context_when_reading_the_mapping_is_401(governed, client) -> None:
+    governed.mappings["library"] = LIBRARY_MAPPING
+    governed.mapping_rejects = True
+    assert client.get("/graphs", headers=_bearer("tok-alice")).status_code == 401
+
+
+def test_an_outage_is_not_retried_on_every_request(governed, client) -> None:
+    governed.mappings["library"] = LIBRARY_MAPPING
+    client.get("/graphs", headers=_bearer("tok-alice"))
+    (session,) = _sessions.values()
+    session.project_mapping_at -= control_plane.MAPPING_REFRESH_SECONDS + 1  # due again
+    governed.mapping_down = True
+    for _ in range(3):
+        assert client.get("/graphs", headers=_bearer("tok-alice")).status_code == 200
+    assert governed.mapping_attempts == 2  # the first read, one retry
+
+
+def test_refresh_and_status_work_on_the_projects_mapping(governed, client) -> None:
+    """Refresh schema reads the project's mapping again; the status reports nothing to
+    rebuild; a forced re-analysis keeps the project's mapping."""
+    governed.mappings["library"] = LIBRARY_MAPPING
+    headers = _bearer("tok-alice")
+    status = client.get("/schema/status", headers=headers).json()
+    assert (status["status"], status["needs_full_rebuild"]) == ("unchanged", False)
+    assert client.post("/schema/invalidate-cache", headers=headers).status_code == 200
+    client.get("/graphs", headers=headers)
+    assert governed.mapping_reads == 2
+    r = client.post("/schema/force-reacquire", headers=headers)
+    assert r.status_code == 200, r.text
+    assert "Loan" in r.text and "loans" in r.text
+
+
+def test_an_empty_mapping_is_no_mapping(governed, client) -> None:
+    governed.mappings["library"] = "@prefix owl: <http://www.w3.org/2002/07/owl#> .\n"
+    assert client.get("/graphs", headers=_bearer("tok-alice")).status_code == 200
+    (session,) = _sessions.values()
+    assert session.project_mapping is None
+    governed.mappings["library"] = "   "
+    _sessions.clear()
+    assert client.get("/graphs", headers=_bearer("tok-alice")).status_code == 200
+
+
+def test_the_conceptual_half_inherits_and_reads_unions() -> None:
+    from arango_sparql.translate.owl import turtle_to_mapping
+
+    ttl = (
+        LIBRARY_MAPPING
+        + f"""
+<{LIB}Agent> a owl:Class ; phys:mappingStyle "UNION" .
+<{LIB}Book> a owl:Class ; phys:collectionName "books" .
+<https://other.example/Book> a owl:Class ; phys:collectionName "other_books" .
+<{LIB}label> a owl:DatatypeProperty ;
+    rdfs:domain [ a owl:Class ; owl:unionOf ( <{LIB}Agent> <{LIB}Book> ) ] ;
+    phys:attributeName "label" .
+"""
+    )
+    cs = turtle_to_mapping(ttl, derive_conceptual=True).conceptual_schema
+    props = {e["name"]: [p["name"] for p in e["properties"]] for e in cs["entities"]}
+    assert [e["name"] for e in cs["entities"]].count("Book") == 1  # one entry per name
+    assert props["Agent"] == ["label"] and props["Book"] == ["label"]  # a union domain
+    assert props["Member"] == ["fullName", "label"]  # and from Agent
 
 
 def test_the_projects_mapping_is_read_again_after_a_while(governed, client, monkeypatch) -> None:

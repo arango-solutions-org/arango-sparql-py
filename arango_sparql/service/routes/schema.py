@@ -1157,6 +1157,17 @@ def schema_status(
     t0 = time.perf_counter()
     cache = _resolve_schema_cache()
     db_name = getattr(session.db, "name", "") or ""
+    if getattr(session, "project_mapping", None) is not None:
+        # The project's mapping (PRD §8.7) is the schema, not an analysis: nothing to rebuild.
+        return SchemaStatusResponse(
+            status="unchanged",
+            unchanged=True,
+            needs_full_rebuild=False,
+            current=SchemaFingerprintBlock(),
+            cached=SchemaFingerprintBlock(),
+            last_acquired_at=None,
+            db_name=db_name or None,
+        )
 
     # peek, not get: an entry past its TTL is still the cached schema.
     cached_entry = cache.peek(db_name, db=session.db)[0] if db_name else None
@@ -1237,6 +1248,10 @@ def schema_invalidate_cache(
     t0 = time.perf_counter()
     cache = _resolve_schema_cache()
     db_name = getattr(session.db, "name", "") or ""
+    if getattr(session, "project_mapping_at", None) is not None:
+        # "Refresh schema" under a control plane: read the project's mapping again on the
+        # session's next request (PRD §8.7), rather than drop an analysis it does not use.
+        session.project_mapping_at = None
     dropped_l1 = bool(db_name) and cache.invalidate(db_name)
     persistent_dropped = bool(db_name) and cache.invalidate_persistent(session.db)
     invalidated = dropped_l1 or persistent_dropped
