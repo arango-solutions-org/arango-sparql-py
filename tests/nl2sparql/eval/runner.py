@@ -37,6 +37,7 @@ from arango_sparql.nl2sparql import (
     OpenAICompatibleClient,
     ScriptedLLMClient,
 )
+from arango_sparql.nl2sparql.engine_adapter import _FEWSHOT_BANK_PATH
 from arango_sparql.translate.parser import parse_sparql
 from arango_sparql.translate.resolver import SchemaResolver
 
@@ -47,7 +48,7 @@ REPORTS_DIR = EVAL_DIR / "reports"
 # Curated few-shot bank (07-02) — same path SparqlAdapter's production default
 # resolves to (engine_adapter.py::_FEWSHOT_BANK_PATH), shared here so the
 # dense/bm25 sweep arms build against the identical bank file.
-BANK_PATH = EVAL_DIR / "fewshot_bank.yml"
+BANK_PATH = _FEWSHOT_BANK_PATH
 
 
 @dataclass

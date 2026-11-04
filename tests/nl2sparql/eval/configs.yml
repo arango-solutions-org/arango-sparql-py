@@ -14,7 +14,7 @@
 # trusted repo data; it holds no credentials. The optional `few_shot:` block
 # (added Phase 7 07-04) is likewise config-only data (mode + k) — it never
 # carries a bank path override or any credential; the bank file itself lives
-# at tests/nl2sparql/eval/fewshot_bank.yml (07-02), trusted repo data.
+# at arango_sparql/nl2sparql/fewshot_bank.yml (07-02), trusted repo data.
 #
 # The optional `grounding:` block (added Phase 07.3-05) is the entity/instance
 # grounding seam's config-only data (k + label_predicates) — runner.py builds
