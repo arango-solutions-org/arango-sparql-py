@@ -636,7 +636,22 @@ routes the subject (`translate/visitor.py`):
   The probe is an indexed `_uri` lookup: a member collection
   whose documents carry `_uri` needs a persistent index on it, as the copy
   and constant-subject lookups above already do; without one each union
-  row scans the earlier member. Even with the index, a union read with
+  row scans the earlier member. The probe also filters `_uri != null`
+  inside the lookup (implied by the guard, which the optimizer cannot see
+  there), so a sparse `_uri` index serves it too. The translation reports
+  `W_SCHEMA_URI_INDEX_MISSING` naming an earlier member when the schema
+  analysis describes it, lists no persistent, hash or skiplist index on it
+  whose first field is `_uri` (sparse or not; an inverted index does not
+  serve the lookup), and a later member's documents carry `_uri` (an entity
+  maps a property to it), since only those rows start the lookup
+  (`analyze_uri_indexes`, `UriIndexes.scanned`). Only a mapping that lists
+  every index counts: the service's own analysis (`source.kind ==
+  "analyzer"`) or a CSI the schema analyzer wrote in reverse. A hand-written
+  ontology or mapping, or a forward-produced CSI, records no indexes, so
+  nothing is reported. The message says to refresh the cached analysis
+  (`/schema/introspect?force=true`) after adding the index. The NL routes
+  build their resolver without the analysis and the SPARQL Protocol route
+  counts warnings before translating, so neither reports it yet. Even with the index, a union read with
   nothing else to narrow it pays a check per later-member row (2 × 100k:
   0.16 s against 0.03 s without the check; 0.09 s on `_id`-only data,
   where the guard alone runs). Known limit: an OPTIONAL attribute held by
@@ -1369,6 +1384,7 @@ advisories" panel.
 | `W_SCHEMA_LOW_CONFIDENCE` | `metadata.confidence < 0.5`; the operator should review the mapping before relying on it for a production workload. |
 | `W_SCHEMA_DRIFT_STATS` | `/schema/status` detected a counts-fingerprint change since last refresh. Cardinality-aware planning may be stale. |
 | `W_SCHEMA_DRIFT_SHAPE` | `/schema/status` detected a shape-fingerprint change since last refresh. The mapping itself is stale; a re-acquire is recommended. |
+| `W_SCHEMA_URI_INDEX_MISSING` | A union read checks a later member's rows for a copy in an earlier member by `_uri` (§6.1, #124), and the schema analysis shows that member has no persistent, hash or skiplist index whose first field is `_uri`, so the check scans it once per row. Names the collection; add the index, then refresh the analysis. Reported only from a mapping that lists indexes (the service's analysis, or an analyzer-written reverse CSI). |
 
 ### 6.8 ArangoDB named-graph scoping (collection down-select)
 

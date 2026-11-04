@@ -51,6 +51,7 @@ from ..translate.resolver import (
     _PHYS_NAMESPACES,
     _SYNTHETIC_PHYS_NS,
     SchemaResolver,
+    analyze_uri_indexes,
     local_name,
 )
 
@@ -227,4 +228,6 @@ def _resolver_from_request(req: Any, *, analyzer_bundle: MappingBundle | None = 
     # at translate time with a typed E_SCHEMA_RESOLVE rather than emit
     # ``FOR doc IN @@…_Document`` that dies later on ``ERR 1203`` (AGENTS.md
     # hard-rule #5). The translation-only / W3C harness leave this off.
-    return SchemaResolver(ontology=graph, strict_subject_resolution=True)
+    return SchemaResolver(
+        ontology=graph, strict_subject_resolution=True, uri_indexes=analyze_uri_indexes(analyzer_bundle)
+    )

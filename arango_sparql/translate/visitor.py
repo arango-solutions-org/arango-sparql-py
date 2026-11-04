@@ -3488,6 +3488,9 @@ class AlgebraVisitor:
         for alias, by_collection, fields, what in checks:
             order = sorted(by_collection)
             for j, earlier in enumerate(order[:-1]):
+                indexes = self.resolver.uri_indexes
+                if indexes is not None and indexes.scanned(earlier, order[j + 1 :]):
+                    self.resolver.warn_unindexed_uri(earlier)
                 probe = self.builder.create_child()
                 other = probe.fresh_alias()
                 probe.for_(other, earlier)
@@ -3500,6 +3503,9 @@ class AlgebraVisitor:
                 # FILTER inside it: ArangoDB skips a subquery in the branch
                 # a ternary does not take, so such a row starts no lookup.
                 guard = f"({later}) && {alias}._uri != null"
+                # Implied by the guard, but the optimizer cannot see it inside
+                # the subquery: without it a sparse ``_uri`` index is not used.
+                probe.filter_raw(f"{other}._uri != null")
                 probe.filter_raw(f"{other}._uri == {alias}._uri")
                 # A copy in another named graph is another quad (lax default
                 # graph, as pyoxigraph's union default graph reads it).

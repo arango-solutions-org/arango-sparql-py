@@ -264,7 +264,7 @@ def test_only_an_iri_is_probed_for_another_copy() -> None:
     # subquery, not a FILTER inside it, so such a row starts no subquery.
     aql = _aql(UNION_TTL, "SELECT ?m WHERE { ?m a :Message }")
     assert (
-        "doc3)) && doc3._uri != null) ? LENGTH((\n  FOR doc4 IN @@c3_Comment\n  FILTER doc4._uri == doc3._uri\n"
+        "doc3)) && doc3._uri != null) ? LENGTH((\n  FOR doc4 IN @@c3_Comment\n  FILTER doc4._uri != null\n  FILTER doc4._uri == doc3._uri\n"
         in aql
     )
     assert ")) : 0\nFILTER repeated5 == 0\n" in aql
