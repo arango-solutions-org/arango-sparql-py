@@ -113,9 +113,10 @@ _USAGE_KEYS = ("prompt_tokens", "completion_tokens", "total_tokens", "cached_tok
 # (250) retrieves — both real fixtures already in this repo (RESEARCH Pattern 4).
 PREDICATE_DUMP_THRESHOLD = 40
 
-# Curated few-shot bank (07-02) — disjoint from tests/nl2sparql/eval/corpus.yml.
-# parents[2] = repo root: engine_adapter.py -> nl2sparql -> arango_sparql -> repo.
-_FEWSHOT_BANK_PATH = Path(__file__).resolve().parents[2] / "tests" / "nl2sparql" / "eval" / "fewshot_bank.yml"
+# Curated few-shot bank (07-02) — disjoint from tests/nl2sparql/eval/corpus.yml. Shipped in
+# the package: it lived under tests/, which an installed wheel does not contain, so every
+# installed deployment (the Docker images, BYOC, pip) ran the NL pipeline with no examples.
+_FEWSHOT_BANK_PATH = Path(__file__).resolve().parent / "fewshot_bank.yml"
 
 
 class EngineProviderBridge:
