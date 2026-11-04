@@ -79,6 +79,7 @@ from ...errors import (
 )
 from ...translate.parser import parse_sparql
 from ...translate.resolver import SchemaResolver
+from .. import control_plane
 from ..app import _PUBLIC_MODE, app
 from ..models import _MAX_RESULT_DOCS
 from ..observability import log_endpoint_timing
@@ -93,6 +94,7 @@ from ..protocol.service_description import render_service_description
 from ..protocol.update_detect import is_sparql_update
 from ..security import (
     _check_compute_rate_limit,
+    _control_plane_session,
     _follow_platform_identity,
     _sanitize_error,
     _service_pkg_candidates,
@@ -381,6 +383,9 @@ def _resolve_protocol_session(request: Request) -> _Session:
     PRD §5.2's ``E_AUTH_REQUIRED`` row.
     """
 
+    if control_plane.mode():
+        # The context is the only credential: no ``?session=``, and no env default.
+        return _control_plane_session(request)
     bearer = _bearer_token(request.headers.get("Authorization", ""))
     token = request.headers.get("X-Arango-Session") or bearer or request.query_params.get("session", "")
     # The Authorization header is free to carry the platform login unless it

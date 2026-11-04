@@ -5,6 +5,7 @@ import {
   connectPlatform,
   disconnect,
   getConnectDefaults,
+  getControlPlaneContext,
   getPlatformStatus,
   schemaIntrospectUntilReady,
   SchemaPollSuperseded,
@@ -13,6 +14,7 @@ import {
   type SchemaIntrospectResponse,
 } from "../api/client";
 import type { Action, ConnectionState, SchemaWarning } from "../api/store";
+import { contextToken, controlPlane, type ProjectContext } from "../api/controlPlane";
 import { t } from "../i18n";
 
 // `ConnectionDialog` for the SPARQL UI. After a successful
@@ -105,6 +107,8 @@ export default function ConnectionDialog({
   // null until GET /connect/platform answers (or fails on an older backend).
   const [platform, setPlatform] = useState<PlatformStatus | null>(null);
   const autoConnectAttempted = useRef(false);
+  // Under a control plane: the project, user and database this tab's context names.
+  const [project, setProject] = useState<ProjectContext | null>(null);
 
   useEffect(() => {
     if (connection.status === "disconnected") {
@@ -122,6 +126,14 @@ export default function ConnectionDialog({
   // dev, or a backend without /connect/platform) fall back to the .env
   // defaults and their optional password auto-connect.
   useEffect(() => {
+    if (controlPlane.on) {
+      // The context is the session: open the project's database, no dialog.
+      if (!autoConnectAttempted.current) {
+        autoConnectAttempted.current = true;
+        void doControlPlaneConnect();
+      }
+      return;
+    }
     getPlatformStatus()
       .then((status) => {
         setPlatform(status);
@@ -247,6 +259,36 @@ export default function ConnectionDialog({
     }
   }
 
+  // Under a control plane the server opens the project's database with its own
+  // credential. The token in the state only marks the session as open: every call sends
+  // the tab's current context (it is renewed every few minutes), see api/client.ts.
+  async function doControlPlaneConnect() {
+    dispatch({ type: "CONNECT_START", url: "", database: "", username: "" });
+    try {
+      const ctx = await getControlPlaneContext();
+      setProject(ctx);
+      if (!ctx.database) {
+        throw new Error(t("controlPlane.noDatabase", { problem: ctx.problem ?? "" }));
+      }
+      const token = contextToken() ?? "control-plane";
+      dispatch({
+        type: "CONNECT_SUCCESS",
+        token,
+        databases: [ctx.database],
+        url: "",
+        database: ctx.database,
+        username: ctx.principal,
+        password: "",
+      });
+      void doAutoIntrospect(token, ctx.database);
+    } catch (err) {
+      dispatch({
+        type: "CONNECT_ERROR",
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   async function doAutoIntrospect(token: string, database: string) {
     dispatch({ type: "SCHEMA_REFRESH_START" });
     try {
@@ -349,6 +391,66 @@ export default function ConnectionDialog({
       }
     }
     dispatch({ type: "DISCONNECT" });
+  }
+
+  if (controlPlane.on) {
+    // The project's context decides the database: no cluster, picker or disconnect.
+    return (
+      <div className="flex items-center gap-3 text-sm">
+        {project && (
+          <>
+            <span className="flex items-center gap-1.5">
+              <span className="text-[10px] text-gray-500 uppercase tracking-wide">
+                {t("controlPlane.project")}
+              </span>
+              <span className="text-gray-300">{project.project}</span>
+            </span>
+            <span className="flex items-center gap-1.5">
+              <span className="text-[10px] text-gray-500 uppercase tracking-wide">
+                {t("controlPlane.signedInAs")}
+              </span>
+              <span className="text-gray-300">{project.principal}</span>
+            </span>
+          </>
+        )}
+        {connection.status === "connected" && (
+          <span className="flex items-center gap-1.5">
+            <span className="inline-block w-2 h-2 rounded-full bg-emerald-400" />
+            <span className="text-[10px] text-gray-500 uppercase tracking-wide">Database</span>
+            <span className="text-gray-300">{connection.database}</span>
+          </span>
+        )}
+        {connection.status === "connecting" && <span className="text-gray-400">Connecting...</span>}
+        {connection.status === "disconnected" && connection.error && (
+          <>
+            <span role="alert" className="text-xs text-red-400 max-w-[360px] truncate" title={connection.error}>
+              {connection.error}
+            </span>
+            <button
+              onClick={() => void doControlPlaneConnect()}
+              className="px-2.5 py-1 text-xs rounded bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors"
+            >
+              Try again
+            </button>
+          </>
+        )}
+        {connection.status === "connected" && introspecting && (
+          <span className="flex items-center gap-1.5 text-xs text-amber-400 animate-pulse">
+            {analyzing ? t("schema.analyzing") : t("schema.loading")}
+          </span>
+        )}
+        {connection.status === "connected" && onRefreshSchema && (
+          <button
+            onClick={onRefreshSchema}
+            disabled={introspecting}
+            title="Bypass the schema cache and re-introspect the database"
+            className="px-2.5 py-1 text-xs rounded bg-gray-800 hover:bg-gray-700 text-gray-300 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            Refresh schema
+          </button>
+        )}
+      </div>
+    );
   }
 
   if (connection.status === "connected") {

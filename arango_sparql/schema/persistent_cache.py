@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import lru_cache
@@ -141,9 +142,18 @@ class ArangoSchemaCache:
     call, so one instance serves every database and session (cypher parity).
     """
 
-    def __init__(self, *, collection_name: str, cache_key: str = DEFAULT_CACHE_KEY) -> None:
+    def __init__(
+        self,
+        *,
+        collection_name: str,
+        cache_key: str = DEFAULT_CACHE_KEY,
+        writes: Callable[[], bool] | None = None,
+    ) -> None:
         self.collection_name = collection_name
         self.cache_key = cache_key
+        # Asked before every write: ``False`` keeps the cache read-only, so nothing is created,
+        # stored or deleted in the database (e.g. a database the service may only read).
+        self._writes = writes or (lambda: True)
 
     def _ensure_collection(self, db: Any) -> Any:
         """The cache collection, created on first write; ``None`` if impossible."""
@@ -224,6 +234,8 @@ class ArangoSchemaCache:
     ) -> bool:
         """Store *bundle* and its fingerprints. ``True`` on success."""
 
+        if not self._writes():
+            return False
         col = self._ensure_collection(db)
         if col is None:
             return False
@@ -284,6 +296,8 @@ class ArangoSchemaCache:
     def invalidate(self, db: Any) -> bool:
         """Delete the cached document. ``True`` iff one was deleted."""
 
+        if not self._writes():
+            return False
         try:
             if not db.has_collection(self.collection_name):
                 return False

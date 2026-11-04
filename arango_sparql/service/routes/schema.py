@@ -56,7 +56,7 @@ from ...translate.owl import (
     mapping_to_turtle,
     owl_graph_view,
 )
-from .. import schema_warm
+from .. import control_plane, schema_warm
 from ..app import app
 from ..models import (
     OwlSchemaResponse,
@@ -92,7 +92,9 @@ logger = _log.getLogger("arango_sparql.service.routes.schema")
 # :class:`threading.Lock` so concurrent uvicorn worker threads do not
 # need a route-side lock.
 
-_schema_cache: SchemaCache = SchemaCache()
+# Under a governance control plane the database is the project's and the service only reads
+# it (PRD §8.7): the analyzed schema stays in memory, never written into that database.
+_schema_cache: SchemaCache = SchemaCache(l2_writes=lambda: not control_plane.mode())
 
 
 def _reset_cache() -> None:

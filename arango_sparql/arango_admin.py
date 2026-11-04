@@ -176,7 +176,9 @@ def maybe_bootstrap_configured_database(
       those explicitly (matching the public-mode posture in
       ``service/app.py``), or
     * ``ARANGO_SPARQL_SKIP_DB_BOOTSTRAP`` is truthy — an explicit opt-out
-      for operators who manage provisioning out-of-band.
+      for operators who manage provisioning out-of-band, or
+    * ``CONTROL_PLANE_URL`` is set — under a governance control plane the
+      databases are the projects', named by their contexts (PRD §8.7).
 
     Returns the :func:`ensure_configured_database` status
     (``"created"`` / ``"exists"`` / ``None``), or ``None`` when gated off.
@@ -188,5 +190,8 @@ def maybe_bootstrap_configured_database(
         return None
     if _is_truthy(os.getenv("ARANGO_SPARQL_SKIP_DB_BOOTSTRAP")):
         log.info("DB bootstrap skipped: ARANGO_SPARQL_SKIP_DB_BOOTSTRAP is set.")
+        return None
+    if os.getenv("CONTROL_PLANE_URL", "").strip():
+        log.info("DB bootstrap skipped: running under a control plane.")
         return None
     return ensure_configured_database(client_factory=client_factory, logger=log)

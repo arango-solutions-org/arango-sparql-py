@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import type { Action, SchemaWarning } from "../api/store";
+import { projectStore } from "../api/controlPlane";
 
 // Schema-warning banner. The Cypher UI surfaces backend-reported
 // schema introspection warnings (e.g. ANALYZER_NOT_INSTALLED) here.
@@ -26,7 +27,8 @@ const DISMISSED_KEY = "schema_warning_dismissed";
 
 function loadDismissed(): Record<string, number> {
   try {
-    const raw = localStorage.getItem(DISMISSED_KEY);
+    const { storage, key } = projectStore(DISMISSED_KEY);
+    const raw = storage.getItem(key);
     return raw ? (JSON.parse(raw) as Record<string, number>) : {};
   } catch {
     return {};
@@ -35,7 +37,8 @@ function loadDismissed(): Record<string, number> {
 
 function saveDismissed(map: Record<string, number>) {
   try {
-    localStorage.setItem(DISMISSED_KEY, JSON.stringify(map));
+    const { storage, key } = projectStore(DISMISSED_KEY);
+    storage.setItem(key, JSON.stringify(map));
   } catch {
     /* localStorage may be unavailable */
   }

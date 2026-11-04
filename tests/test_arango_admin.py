@@ -162,6 +162,21 @@ def test_maybe_bootstrap_skips_in_public_mode(monkeypatch: pytest.MonkeyPatch) -
     assert maybe_bootstrap_configured_database(client_factory=_factory) is None
 
 
+def test_maybe_bootstrap_skips_under_a_control_plane(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_env(
+        monkeypatch,
+        ARANGO_DB="sparql-to-aql",
+        ARANGO_SPARQL_PUBLIC_MODE=None,
+        ARANGO_SPARQL_SKIP_DB_BOOTSTRAP=None,
+        CONTROL_PLANE_URL="http://control-plane:8000/api",
+    )
+
+    def _factory(hosts: str) -> Any:  # pragma: no cover - must not be called
+        raise AssertionError("under a control plane the databases are the projects'")
+
+    assert maybe_bootstrap_configured_database(client_factory=_factory) is None
+
+
 def test_maybe_bootstrap_skips_when_opted_out(monkeypatch: pytest.MonkeyPatch) -> None:
     _set_env(
         monkeypatch,
