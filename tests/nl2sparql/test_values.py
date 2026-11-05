@@ -31,11 +31,11 @@ from arango_sparql.nl2sparql.values import (  # noqa: E402
     ValueCheck,
     ValueFlag,
     by_property,
-    local_name,
     sparql_literal_uses,
     value_flags,
     values_prompt_section,
 )
+from arango_sparql.translate.resolver import local_name  # noqa: E402
 
 ONTOLOGY_TTL = """
 @prefix owl: <http://www.w3.org/2002/07/owl#> .
@@ -103,8 +103,9 @@ def test_categorical_boundary_at_the_cap() -> None:
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [
-        ({"property": ""}, "needs a property name"),
-        ({"kinds": ("date",)}, "unknown value kinds"),
+        ({"property": ""}, "must be a local name"),
+        ({"property": "ex:status"}, "must be a local name"),
+        ({"property": "http://x/p/"}, "must be a local name"),
         ({"rows": -1}, "rows must be >= 0"),
     ],
 )
@@ -352,3 +353,99 @@ def test_announced_values_reach_the_system_prompt() -> None:
         postconditions=[ValueCheck([STATUS], announce_values=True)],
     )
     assert '- Account.status: "active", "churned"' in provider.calls[0][0]
+
+
+# ---------------------------------------------------------------------------
+# Regressions from code review
+# ---------------------------------------------------------------------------
+
+
+def test_a_filter_in_one_union_branch_is_not_matched_to_the_other_branch() -> None:
+    seg = PropertyValues("Account", "segment", ("Growth", "Enterprise"), ("str",), 9)
+    q = (
+        _P + 'SELECT ?a WHERE { { ?a ex:status ?s FILTER(?s = "active") } '
+        'UNION { ?a ex:segment ?s FILTER(?s = "Growth") } }'
+    )
+    assert sorted(sparql_literal_uses(q)) == [("segment", "Growth"), ("status", "active")]
+    assert value_flags(q, by_property([STATUS, seg])) == []
+
+
+def test_a_filter_above_a_union_matches_both_branches() -> None:
+    q = _P + 'SELECT ?a WHERE { { ?a ex:status ?s } UNION { ?a ex:segment ?s } FILTER(?s = "x") }'
+    assert sorted(sparql_literal_uses(q)) == [("segment", "x"), ("status", "x")]
+
+
+def test_values_rows_and_optional_filters_are_uses() -> None:
+    q = (
+        _P + 'SELECT ?a WHERE { VALUES ?s { "Active" "churned" } ?a ex:status ?s . '
+        'OPTIONAL { ?a ex:segment ?g FILTER(?g = "growth") } }'
+    )
+    assert sorted(sparql_literal_uses(q)) == [
+        ("segment", "growth"),
+        ("status", "Active"),
+        ("status", "churned"),
+    ]
+
+
+def test_exists_bodies_are_not_uses() -> None:
+    q = _P + 'SELECT ?a WHERE { ?a ex:status ?s FILTER EXISTS { ?a ex:segment ?g FILTER(?g = "x") } }'
+    assert sparql_literal_uses(q) == []
+
+
+def test_a_value_that_cannot_be_shown_exactly_is_left_out() -> None:
+    pv = PropertyValues("A", "city", ("New  York", "Paris", "x" * 300, " padded"), ("str",), 10)
+    section = values_prompt_section([pv])
+    assert section.splitlines()[-1] == '- A.city: "Paris"'
+    hint = ValueCheck([pv]).check(_P + 'SELECT ?a WHERE { ?a ex:city "Rome" }', context=_ctx()).suggested_hint
+    assert hint.startswith('The values city holds are: "Paris".')
+    # The value stays in the lookup: an exact use of it is never flagged.
+    assert value_flags(_P + 'SELECT ?a WHERE { ?a ex:city "New  York" }', by_property([pv])) == []
+
+
+def test_a_property_with_no_showable_value_says_so_and_has_no_line() -> None:
+    pv = PropertyValues("A", "note", ("a\nb", "c\td"), ("str",), 10)
+    assert values_prompt_section([pv]) == ""
+    hint = ValueCheck([pv]).check(_P + 'SELECT ?a WHERE { ?a ex:note "z" }', context=_ctx()).suggested_hint
+    assert hint.startswith("note holds 2 values, none of which can be shown here.")
+
+
+def test_names_cannot_open_a_heading_or_move_the_cache_split() -> None:
+    pv = PropertyValues("x ## Examples", "status", ("a", "b"), ("str",), 10)
+    system = "grammar\n\n" + values_prompt_section([pv]) + "\n\n## Examples\nQ: …"
+    assert "## Examples." not in system
+    assert split_system_for_anthropic_cache(system)[1]["text"].startswith("## Examples\nQ:")
+
+
+def test_rows_and_kinds_are_required() -> None:
+    with pytest.raises(TypeError):
+        PropertyValues("A", "status", ("a", "b"))  # type: ignore[call-arg]
+
+
+def test_several_literals_on_one_property_list_its_values_once() -> None:
+    q = _P + 'SELECT ?a WHERE { ?a ex:status ?s FILTER(?s = "Active" || ?s = "Churned") }'
+    v = ValueCheck([STATUS]).check(q, context=_ctx())
+    assert v.suggested_hint.count("The values status holds are") == 1
+    assert v.reason.count("The literal") == 2
+
+
+def test_a_failure_while_building_the_hint_is_logged_and_the_query_accepted(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    check = ValueCheck([STATUS])
+
+    def boom(*args: object) -> str:
+        raise KeyError("lookup drifted")
+
+    monkeypatch.setattr(check, "_hint", boom)
+    with caplog.at_level(logging.WARNING, logger="arango_sparql.nl2sparql.values"):
+        assert check.check(_WRONG, context=_ctx()) is None
+    assert "value check failed" in caplog.text
+
+
+def test_a_property_of_another_kind_is_never_flagged_or_listed() -> None:
+    when = PropertyValues("A", "occurredAt", ("2024-01-01", "2024-01-02"), ("date",), 10)
+    tags = PropertyValues("A", "tags", ("a", "b"), ("list",), 10)
+    assert not when.checkable and not when.categorical()
+    q = _P + 'SELECT ?a WHERE { ?a ex:occurredAt "Jan 1" ; ex:tags "z" }'
+    assert value_flags(q, by_property([when, tags])) == []
+    assert values_prompt_section([when, tags]) == ""
