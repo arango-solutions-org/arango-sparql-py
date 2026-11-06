@@ -1377,8 +1377,12 @@ advisories" panel. A result carries the advisories of its own
 translation, once each, whether the resolver is new or reused
 (`SchemaResolver.collecting_warnings`): a resolution served from the
 resolver's cache reports its advisories again, and an earlier
-translation's do not carry over (#157). `SchemaResolver.warnings` still
-accumulates for callers that read it directly. The SPARQL Protocol
+translation's do not carry over (#157). A survey of the whole ontology (`triple_store_class`) reports
+nothing: its advisories concern classes the query may not name, and a class
+the query names reports its own. `SchemaResolver.warnings` still
+accumulates for callers that read it directly. A resolver is not
+thread-safe (`translate/advisories.py`): the service, the NL pipeline and
+the eval harness build one per request or per pipeline. The SPARQL Protocol
 route's `X-Schema-Warnings-Count` is the count of the translation's
 `W_SCHEMA_*` advisories.
 

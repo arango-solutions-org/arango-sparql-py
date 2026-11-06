@@ -124,6 +124,24 @@ def test_schema_warnings_count_the_translations_own(client: TestClient, session_
     assert resp.headers["X-Schema-Warnings-Count"] == "1"
 
 
+def test_schema_warnings_are_logged_for_the_operator(
+    client: TestClient, session_token: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A protocol client gets only the count: the advisories go to the log.
+    set_aql_rows(session_token, [])
+    with caplog.at_level("INFO", logger="arango_sparql.service"):
+        client.get(
+            "/sparql",
+            params={
+                "query": "SELECT ?x ?n WHERE { ?x a <http://ex.org/Person> ; <http://ex.org/nickname> ?n }"
+            },
+            headers={"X-Arango-Session": session_token},
+        )
+    logged = [r.getMessage() for r in caplog.records if "protocol query schema warnings" in r.getMessage()]
+    assert len(logged) == 1
+    assert "W_SCHEMA_UNMAPPED_IRI http://ex.org/nickname" in logged[0]
+
+
 def test_select_observability_headers_are_stamped(client: TestClient, session_token: str) -> None:
     set_aql_rows(session_token, [{"x": "http://ex.org/A"}])
     resp = client.get(

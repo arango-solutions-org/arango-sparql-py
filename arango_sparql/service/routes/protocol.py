@@ -836,7 +836,8 @@ def _execute_protocol_query(request: Request, query: str) -> Response:
         if transpiled.schema_warnings:
             # A protocol client gets only the count header: log what they were.
             logger.info(
-                "protocol query schema warnings: %s",
+                "protocol query schema warnings (db=%s): %s",
+                getattr(getattr(session, "db", None), "name", "?"),
                 ", ".join(f"{w.get('code')} {w.get('iri')}" for w in transpiled.schema_warnings),
             )
     except CrossTenantJoinError as exc:

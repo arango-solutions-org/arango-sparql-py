@@ -34,8 +34,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterable, Iterator, Mapping
-from contextlib import contextmanager
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
@@ -44,6 +43,7 @@ from rdflib import OWL, RDF, RDFS, Graph, Literal, Namespace, URIRef
 from rdflib.collection import Collection
 
 from ..errors import SchemaResolutionError
+from .advisories import AdvisoryLog
 from .builder import parse_flag
 from .mapping import MappingError, property_field_path
 from .predicates import PredicateHandler
@@ -241,7 +241,7 @@ TRIPLE_STORE_IRI = "urn:arango-sparql:triple-store"
 
 
 @dataclass
-class SchemaResolver:
+class SchemaResolver(AdvisoryLog):
     """Resolve SPARQL IRIs against the loaded OWL ontology.
 
     The ontology is treated as immutable after load; if the schema can
@@ -1041,7 +1041,10 @@ class SchemaResolver:
         classes = sorted(
             (c for c in self.ontology.subjects(RDF.type, OWL.Class) if isinstance(c, URIRef)), key=str
         )
-        resolved = [self.resolve_class(c) for c in classes]
+        # A survey of every class, named by the query or not: its advisories
+        # are not this translation's (review of #161).
+        with self._quietly():
+            resolved = [self.resolve_class(c) for c in classes]
         if not resolved or any(r.style != "RPT" for r in resolved):
             return None
 
@@ -1133,68 +1136,6 @@ class SchemaResolver:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
-    def _warn_schema(self, *, code: str, message: str, iri: str, **extra: Any) -> None:
-        """Append a schema-mapping advisory, deduplicated by ``(code, iri)``.
-
-        Visitors call into the resolver once per triple, so a query like
-        ``?a :unknown ?b . ?c :unknown ?d`` would otherwise produce two
-        identical warnings. The ``_warned_keys`` guard collapses them
-        into one without losing information — operators see the
-        unmapped IRI exactly once per translate.
-        """
-        entry = {"code": code, "message": message, "iri": iri, **extra}
-        for captured in self._captures:
-            captured.append(entry)
-        self._record(entry)
-
-    def _record(self, entry: dict[str, Any]) -> None:
-        key = (entry["code"], entry["iri"])
-        if key in self._warned_keys:
-            return
-        self._warned_keys.add(key)
-        self.warnings.append(entry)
-
-    @contextmanager
-    def _capture(self, kind: str, key: str) -> Iterator[None]:
-        """Remember the advisories a resolution raises with its cache entry."""
-        captured: list[dict[str, Any]] = []
-        self._captures.append(captured)
-        try:
-            yield
-        finally:
-            # Captures nest (a class resolving its properties): last in, first out.
-            self._captures.pop()
-            self._entry_warnings[(kind, key)] = captured
-
-    def _replay(self, kind: str, key: str) -> None:
-        """Report again the advisories a cached resolution raised."""
-        for entry in self._entry_warnings.get((kind, key), ()):
-            for captured in self._captures:
-                captured.append(entry)
-            self._record(entry)
-
-    @contextmanager
-    def collecting_warnings(self) -> Iterator[list[dict[str, Any]]]:
-        """Collect the advisories of one translation (#157).
-
-        Yields the list the translation's advisories go to, deduplicated
-        within it: those its own resolutions raise, cached ones included
-        (:meth:`_replay`). Before, a resolver reused across translations (a
-        library caller, the NL repair loop) reported every earlier
-        translation's advisories with each result, and none of a cached
-        IRI's. On exit they are merged into :attr:`warnings`, which still
-        accumulates for callers that read it directly.
-        """
-        outer, outer_keys = self.warnings, self._warned_keys
-        self.warnings, self._warned_keys = [], set()
-        try:
-            yield self.warnings
-        finally:
-            collected = self.warnings
-            self.warnings, self._warned_keys = outer, outer_keys
-            for entry in collected:
-                self._record(entry)
-
     def _physical_string(self, subject: URIRef, predicate_local: str) -> str | None:
         """Return the literal value of ``phys:<predicate_local>`` on
         ``subject``, regardless of which physical-IRI spelling the
