@@ -674,9 +674,10 @@ routes the subject (`translate/visitor.py`):
   tenant as a document a walk reaches is; a triples table a tenant-scoped
   RPT class uses is refused (§6.5.1). A collection without a `_uri` index
   is scanned per DESCRIBE, reported as `W_SCHEMA_URI_INDEX_MISSING` when the
-  analysis says so. Every collection a class names must exist: one that
-  does not fails the DESCRIBE (ERR 1203), as a type pattern on that class
-  does. The legacy service read the default collection only, which a
+  analysis says so. Every collection a class resolves to must exist (its
+  `phys:collectionName`, or a fallback such as its local name or
+  `_triples`): one that does not fails the DESCRIBE (ERR 1203), as a type
+  pattern on that class does. The legacy service read the default collection only, which a
   mapping without one (the service's) cannot: ArangoDB refused the query.
   A bare DESCRIBE returns one row per triple, so the row count and the
   result-row cap count triples. Beside a WHERE the description is a
@@ -1406,7 +1407,7 @@ advisories" panel.
 | `W_SCHEMA_LOW_CONFIDENCE` | `metadata.confidence < 0.5`; the operator should review the mapping before relying on it for a production workload. |
 | `W_SCHEMA_DRIFT_STATS` | `/schema/status` detected a counts-fingerprint change since last refresh. Cardinality-aware planning may be stale. |
 | `W_SCHEMA_DRIFT_SHAPE` | `/schema/status` detected a shape-fingerprint change since last refresh. The mapping itself is stale; a re-acquire is recommended. |
-| `W_SCHEMA_URI_INDEX_MISSING` | A union read checks a later member's rows for a copy in an earlier member by `_uri` (§6.1, #124), and the schema analysis shows that member has no persistent, hash or skiplist index whose first field is `_uri`, so the check scans it once per row. Names the collection; add the index, then refresh the analysis. Reported only from a mapping that lists indexes (the service's analysis, or an analyzer-written reverse CSI). |
+| `W_SCHEMA_URI_INDEX_MISSING` | A union read checks a later member's rows for a copy in an earlier member by `_uri` (§6.1, #124), or a `DESCRIBE <iri>` looks the IRI up in a collection (§6.1, #150), and the schema analysis shows that collection has no persistent, hash or skiplist index whose first field is `_uri`, so it is scanned once per row or per DESCRIBE. Names the collection; add the index, then refresh the analysis. Reported only from a mapping that lists indexes (the service's analysis, or an analyzer-written reverse CSI). |
 
 ### 6.8 ArangoDB named-graph scoping (collection down-select)
 
