@@ -936,3 +936,20 @@ def test_the_sdk_adapter_records_a_question(monkeypatch) -> None:
     del sdk.Asked  # an SDK from before questions were recorded
     with pytest.raises(control_plane.QuestionNotRecorded, match="upgrade"):
         adapter.record_question("good", question=None, query="SELECT * {}", database="library")
+
+
+def test_the_image_build_checks_every_sdk_name_the_adapter_uses() -> None:
+    """An image built against an SDK that lacks a name the adapter uses (``Asked``, before
+    questions were recorded) would start and then refuse every question; its build fails
+    instead (``control-plane.Dockerfile``)."""
+    import inspect
+    import re
+    from pathlib import Path
+
+    used = set(re.findall(r"\b(?:self\._sdk|sdk)\.([A-Z]\w*)", inspect.getsource(control_plane._Sdk)))
+    assert {"ControlPlane", "Asked"} <= used  # the scan sees the adapter's names
+    dockerfile = (Path(__file__).resolve().parents[1] / "control-plane.Dockerfile").read_text()
+    checks = re.findall(r'python -c "from control_plane_sdk import ([^"]+)"', dockerfile)
+    assert checks, "the build imports the SDK's names, not only the module"
+    imported = {name.strip() for name in checks[0].split(",")}
+    assert used <= imported, f"the build does not check {sorted(used - imported)}"
