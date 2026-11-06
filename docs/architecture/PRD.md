@@ -2048,7 +2048,8 @@ applies and the service is unchanged.
   recorded as written. It is recorded after the query runs and before the answer is returned,
   and a question that cannot be recorded is not answered (503 `E_QUESTION_NOT_RECORDED`, no rows). The graph view's run (`graph: true`) of
   a question the session recorded in the last ten minutes is the same question and is not
-  recorded again; any other graph run is (`service/recording.py`). Translating and explaining
+  recorded again; any other graph run is, and its event carries the widened SPARQL that
+  produced its rows (`service/recording.py`). Translating and explaining
   run nothing and record nothing.
 - **Not yet:** choosing among several databases.
 

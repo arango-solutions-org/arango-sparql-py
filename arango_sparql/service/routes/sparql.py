@@ -310,9 +310,16 @@ def execute_endpoint(
             }
         )
 
-    # The graph view's run is the question just asked again (recording.py).
+    # The graph view's run is the question just asked again (recording.py); when it is
+    # recorded, the event carries the widened SPARQL that produced the rows.
     record_question(
-        request, session, query=req.sparql, question=req.question, again=req.graph, client_words=True
+        request,
+        session,
+        query=req.sparql,
+        question=req.question,
+        again=req.graph,
+        client_words=True,
+        ran=sparql,
     )
     log_endpoint_timing(
         "/execute",

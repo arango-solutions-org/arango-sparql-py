@@ -830,6 +830,22 @@ def test_the_graph_run_of_a_question_just_asked_is_not_recorded_twice(governed, 
     assert len(governed.recorded) == 3
 
 
+def test_a_recorded_graph_run_carries_the_sparql_that_ran(governed, client) -> None:
+    """The graph view widens the projection before running it; when that run is recorded,
+    the history holds the widened query that produced the rows, not the narrower one asked."""
+    from arango_sparql.translate.graph_shape import widen_projection
+
+    governed.mappings["library"] = LIBRARY_MAPPING
+    asked = _sparql(ASK)["sparql"]
+    widened = widen_projection(asked)
+    assert widened is not None and widened != asked  # the fixture's query is one that widens
+    assert _ask(client, graph=True).status_code == 200
+    assert governed.recorded[-1]["query"] == widened
+    # A plain run of the same query records it as written.
+    assert _ask(client).status_code == 200
+    assert governed.recorded[-1]["query"] == asked
+
+
 def test_a_graph_run_is_recorded_again_after_a_while(governed, client, monkeypatch) -> None:
     from arango_sparql.service import recording
 

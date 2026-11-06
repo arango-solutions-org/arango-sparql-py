@@ -72,11 +72,15 @@ def record_question(
     question: str | None = None,
     again: bool = False,
     client_words: bool = False,
+    ran: str | None = None,
 ) -> None:
     """Record *query* (asked as *question*, or written) for the request's context. With
     *again*, a re-run of a question this session recorded recently is not recorded twice.
     With *client_words*, *question* came from the caller and is kept only when this session
-    generated *query* from it. Raises :class:`HTTPException` 503 when it cannot be recorded."""
+    generated *query* from it. *ran* is the SPARQL that actually ran when it differs from
+    *query* (the graph view's widened projection): the event carries it, while vouching and
+    the re-run check stay keyed on *query*, the question as asked. Raises
+    :class:`HTTPException` 503 when it cannot be recorded."""
     if not control_plane.mode():
         return
     if client_words and question is not None:
@@ -95,7 +99,7 @@ def record_question(
         if now - at < AGAIN_SECONDS:
             return
     try:
-        control_plane.record_question(request.headers, question=question, query=query)
+        control_plane.record_question(request.headers, question=question, query=ran or query)
     except control_plane.QuestionNotRecorded as exc:
         raise HTTPException(
             status_code=503,
