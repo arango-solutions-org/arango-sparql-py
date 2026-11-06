@@ -1658,6 +1658,34 @@ ceiling) and `ForbidUnboundProjection` (every explicitly projected variable
 must be bound in the `WHERE` body). Both inspect the rdflib algebra (never a
 hand-rolled parser) and are scoped to `SELECT`. See **REQ-nl-postconditions**.
 
+A third, **soft** check ships in `arango_sparql/nl2sparql/values.py`:
+`ValueCheck`. Its job is a filter value the data never holds, such as
+`"Active"` for a stored `active`, `"Q3"` for `2022-Q3`, or a quoted string
+compared with an integer column. That query runs and returns nothing, or a
+confident `0`.
+- **What the caller supplies:** each property's complete distinct values
+  (`PropertyValues`), keyed by the IRI local name.
+- **What it checks:** each plain string literal the query compares a property
+  with: a triple object, a `FILTER` `=` in the same or an enclosing group, or
+  a `VALUES` row. A `!=` (or negated `=`), `IN`, `CONTAINS`, an `EXISTS` body,
+  and a filter outside a `MINUS` on a variable bound only inside it are not
+  checked. It flags a literal that is `absent`, matches only in another
+  `case`, or is the wrong `type`.
+- **On a flag:** it asks for one repair, with the values in the hint. It is
+  soft because a value can be absent by the question's own premise.
+- **The prompt section:** `values_prompt_section` lists categorical
+  properties up front (strings, at most 20 values, repeated). Place it after
+  the grammar section; `announce_values=True` renders it instead at the end of
+  the prompt, as postcondition sections are.
+- **Values must be the asker's.** The section, the hint and the flag itself
+  all reveal values. A caller with row-level access control builds them per
+  call from rows the asker may read, or omits those properties.
+- **Values go to the LLM provider.** This is the one library path that
+  sends tenant data to the provider, which §17.4 otherwise rules out. It is
+  the caller's opt-in, and the service's own routes never enable it (see
+  §17.4).
+- **Off by default:** without it, nothing changes.
+
 #### 7.3.2 Built-in validation rule: mis-prefixed names
 
 Besides parse and translate, the validate step rejects a generated query
@@ -4323,6 +4351,20 @@ provider (OpenAI / Anthropic / OpenRouter). The data sent:
   names, cardinality hints).
 * **NEVER**: tenant data, query results, JWTs, ArangoDB credentials,
   raw OWL turtle (only the conceptual half of the `MappingBundle`).
+
+**One opt-in library exception: property values (§7.3.1).** A library
+caller that passes `ValueCheck` from `arango_sparql/nl2sparql/values.py`
+to `nl_to_sparql` sends the provider the property values it supplies. They
+appear in the values section, in the repair hint, and implicitly in whether
+a literal is flagged.
+* **The service's own `/nl-*` routes never construct it**, so the list above
+  holds for the HTTP API.
+* **The caller who opts in takes on the obligations above for that data:**
+  * a provider whose data handling fits the data;
+  * values built from rows the asker may read;
+  * no values from properties that must stay in-tenancy.
+* **Exposing it through the service** would need its own operator setting,
+  off by default. Until that setting exists, the routes do not expose it.
 
 Operator obligations when enabling NL:
 * Choose a provider whose data-handling policy matches the operator's
