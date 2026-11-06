@@ -56,6 +56,7 @@ import {
   isBusy as pipelineBusy,
 } from "./utils/pipeline";
 import { resultAffordances, type AffordanceId } from "./utils/affordances";
+import { questionFor, type AskedQuestion } from "./utils/askedQuestion";
 import { examplesForGraph, mergeSuggestions, type MinedExample } from "./utils/minedExamples";
 
 // App.tsx implements the chat-first "Query Workbench Shell" (PRD §10.0),
@@ -213,7 +214,7 @@ function Workbench() {
   ontologyRef.current = state.ontologyTtl;
   // The last plain-English question and the SPARQL generated from it: a run of that SPARQL,
   // unedited, carries the question's words (recorded with it under a control plane).
-  const askedRef = useRef<{ question: string; sparql: string } | null>(null);
+  const askedRef = useRef<AskedQuestion | null>(null);
 
   // Schema-derived "Ask" suggestions (POST /nl-samples). Re-fetched only
   // when the schema source actually changes — keyed on (url, db,
@@ -317,12 +318,11 @@ function Workbench() {
 
   const buildRequest = useCallback(() => {
     const p = paramsRef.current;
-    const asked = askedRef.current;
     return {
       sparql: sparqlRef.current,
       ontology_ttl: ontologyRef.current || undefined,
       params: Object.keys(p).length > 0 ? p : undefined,
-      question: asked !== null && asked.sparql === sparqlRef.current ? asked.question : undefined,
+      question: questionFor(askedRef.current, sparqlRef.current),
     };
   }, []);
 
