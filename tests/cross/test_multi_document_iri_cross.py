@@ -528,6 +528,30 @@ UNION_COPIES = Store(
     resolver_kwargs={"default_graph_includes_named": False},
 )
 
+#: As UNION_COPIES' :s, with edges into the Person copy only: ``:knows``
+#: declares the range Person, ``:likes`` the supertype Agent (#149).
+UNION_EDGE_COPIES = Store(
+    ontology=PREFIXES
+    + """
+:Person a owl:Class ; phys:collectionName "Person" ; rdfs:subClassOf :Agent .
+:Org a owl:Class ; phys:collectionName "Org" ; rdfs:subClassOf :Agent .
+:Agent a owl:Class ; phys:mappingStyle "UNION" .
+:name a owl:DatatypeProperty ; rdfs:domain [ owl:unionOf ( :Person :Org ) ] .
+:knows a owl:ObjectProperty ; phys:edgeCollectionName "knows" ; rdfs:range :Person .
+:likes a owl:ObjectProperty ; phys:edgeCollectionName "likes" ; rdfs:range :Agent .
+""",
+    docs={
+        "Person": [
+            {"_id": "Person/s", "_uri": EX + "s", "name": "S"},
+            {"_id": "Person/a", "_uri": EX + "a", "name": "A"},
+        ],
+        "Org": [{"_id": "Org/s", "_uri": EX + "s", "name": "S"}],
+        "knows": [{"_id": "knows/1", "_from": "Person/a", "_to": "Person/s"}],
+        "likes": [{"_id": "likes/1", "_from": "Person/a", "_to": "Person/s"}],
+    },
+    data=':s a :Person, :Org, :Agent ; :name "S" . :a a :Person, :Agent ; :name "A" ; :knows :s ; :likes :s .',
+)
+
 #: Copies of ``:s`` in two named graphs, read through the lax default graph
 #: (the union of every graph): two quads, so ``:s`` comes back once per
 #: graph, as pyoxigraph and main read it (review of #146).
@@ -761,6 +785,34 @@ _CASES: list[tuple[str, Store, str, str | None]] = [
             ("incoming_path", "SELECT ?x ?s WHERE { ?s a :Agent . ?x :knows+ ?s }"),
             ("inverse_path", "SELECT ?s ?x WHERE { ?s a :Agent . ?s ^:knows ?x }"),
             ("attribute_from_another_copy", "SELECT ?s ?y WHERE { ?s a :Agent ; :salary ?y }"),
+        ]
+    ],
+    *[
+        (f"union_copies_{name}", UNION_COPIES, query, issue)
+        for name, query, issue in [
+            # #147: the value is on one copy, or on a third (Employee).
+            ("optional_attribute", "SELECT ?s ?n WHERE { ?s a :Agent OPTIONAL { ?s :name ?n } }", "#147"),
+            (
+                "optional_attribute_elsewhere",
+                "SELECT ?s ?y WHERE { ?s a :Agent OPTIONAL { ?s :salary ?y } }",
+                "#147",
+            ),
+            # #148: a sub-select joined to the union's subject.
+            (
+                "subselect",
+                "SELECT ?s ?n WHERE { ?s a :Agent { SELECT ?s ?n WHERE { ?s :name ?n } } }",
+                "#148",
+            ),
+        ]
+    ],
+    *[
+        (f"union_edge_copies_{name}", UNION_EDGE_COPIES, query, "#149")
+        for name, query in [
+            # #149: the edge points at the Person copy only.
+            ("constant_source", "SELECT ?s WHERE { ?s a :Agent . :a :knows ?s }"),
+            ("range_person", "SELECT ?x ?s WHERE { ?s a :Agent . ?x :knows ?s }"),
+            ("range_supertype", "SELECT ?x ?s WHERE { ?s a :Agent . ?x :likes ?s }"),
+            ("forward", "SELECT ?s ?x WHERE { ?s a :Agent . ?s ^:likes ?x }"),
         ]
     ],
     *[
@@ -1286,6 +1338,7 @@ _CASES: list[tuple[str, Store, str, str | None]] = [
 #: sub-query, a sub-SELECT, ``DOCUMENT()``, ``ATTRIBUTES()``); ``tests/integration/test_multi_document_iri_live.py``
 #: runs them.
 _LIVE_ONLY = {
+    "union_copies_subselect",
     "ng_strict_optional",
     "ng_strict_optional_class_walk",
     "graph_outside_optional",
