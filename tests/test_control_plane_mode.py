@@ -726,8 +726,29 @@ def _ask(client: TestClient, path: str = "/execute", token: str = "tok-alice", *
     return client.post(path, json={**_sparql(ASK), **extra}, headers=_bearer(token))
 
 
+def _generate(client: TestClient, words: str, token: str = "tok-alice") -> str:
+    """Ask *words* in plain English (``/nl-translate``, the page's generate step); the
+    SPARQL generated for them, which is :data:`ASK`."""
+    from arango_sparql.nl2sparql.client import LLMResponse, ScriptedLLMClient
+    from arango_sparql.service.routes.nl import _llm_client_factory
+
+    llm = ScriptedLLMClient(
+        [LLMResponse(content=_sparql(ASK)["sparql"], prompt_tokens=1, completion_tokens=1, total_tokens=2)],
+        latency_ms=0,
+    )
+    app.dependency_overrides[_llm_client_factory] = lambda: llm
+    try:
+        r = client.post("/nl-translate", json={"nl": words}, headers=_bearer(token))
+    finally:
+        app.dependency_overrides.pop(_llm_client_factory, None)
+    assert r.status_code == 200, r.text
+    assert r.json()["sparql"] == _sparql(ASK)["sparql"]
+    return str(r.json()["sparql"])
+
+
 def test_a_question_is_recorded_before_it_is_answered(governed, client) -> None:
     governed.mappings["library"] = LIBRARY_MAPPING
+    _generate(client, "Who borrowed a book?")
     r = _ask(client, question="Who borrowed a book?")
     assert r.status_code == 200, r.text
     assert r.json()["bindings"] == [{"n": "Ada Lovelace"}]
@@ -760,6 +781,7 @@ def test_a_question_that_cannot_be_recorded_is_not_answered(governed, client) ->
 
 def test_every_route_that_runs_a_query_records_it(governed, client) -> None:
     governed.mappings["library"] = LIBRARY_MAPPING
+    _generate(client, "Who?")
     assert _ask(client, "/profile", question="Who?").status_code == 200
     r = client.post(
         "/sparql",
@@ -795,6 +817,8 @@ def test_every_route_that_runs_a_query_records_it(governed, client) -> None:
 
 def test_the_graph_run_of_a_question_just_asked_is_not_recorded_twice(governed, client) -> None:
     governed.mappings["library"] = LIBRARY_MAPPING
+    _generate(client, "Who?")
+    _generate(client, "Who else?")
     assert _ask(client, question="Who?").status_code == 200
     assert _ask(client, question="Who?", graph=True).status_code == 200
     assert len(governed.recorded) == 1
@@ -812,6 +836,7 @@ def test_a_graph_run_is_recorded_again_after_a_while(governed, client, monkeypat
     governed.mappings["library"] = LIBRARY_MAPPING
     now = [1000.0]
     monkeypatch.setattr(recording.time, "monotonic", lambda: now[0])
+    _generate(client, "Who?")
     _ask(client, question="Who?")
     now[0] += recording.AGAIN_SECONDS - 1
     _ask(client, question="Who?", graph=True)
@@ -819,6 +844,42 @@ def test_a_graph_run_is_recorded_again_after_a_while(governed, client, monkeypat
     now[0] += 2
     _ask(client, question="Who?", graph=True)
     assert len(governed.recorded) == 2
+
+
+def test_words_the_session_did_not_generate_are_not_recorded(governed, client) -> None:
+    """The words are recorded only for a query this session generated from them, run
+    unedited: a caller cannot label a query with words it was not asked in."""
+    governed.mappings["library"] = LIBRARY_MAPPING
+    for path in ("/execute", "/profile"):
+        assert _ask(client, path, question="How many books are on loan?").status_code == 200
+        assert governed.recorded[-1]["question"] is None
+    sparql = _generate(client, "Who borrowed a book?")
+    edited = sparql.replace("?n }", "?n } LIMIT 1")
+    r = client.post(
+        "/execute", json={"sparql": edited, "question": "Who borrowed a book?"}, headers=_bearer("tok-alice")
+    )
+    assert r.status_code == 200 and governed.recorded[-1]["question"] is None
+    # Another user's generated words are not this session's.
+    assert _ask(client, token="tok-bob", question="Who borrowed a book?").status_code == 200
+    assert governed.recorded[-1]["question"] is None
+    # Positive control: the generated query, unedited, with its words.
+    assert _ask(client, question="Who borrowed a book?").status_code == 200
+    assert governed.recorded[-1]["question"] == "Who borrowed a book?"
+
+
+def test_a_session_remembers_only_its_latest_generated_questions(governed, client) -> None:
+    from arango_sparql.service import recording
+
+    governed.mappings["library"] = LIBRARY_MAPPING
+    sparql = _generate(client, "first")
+    session = next(s for s in _sessions.values() if s.token.startswith("control-plane:"))
+    for i in range(recording.GENERATED_KEPT):  # directly: the NL rate limit bounds the route
+        recording.remember_generated(session, question=f"later {i}", query=sparql)
+    assert len(session.generated_questions) == recording.GENERATED_KEPT
+    assert _ask(client, question="first").status_code == 200
+    assert governed.recorded[-1]["question"] is None
+    assert _ask(client, question=f"later {recording.GENERATED_KEPT - 1}").status_code == 200
+    assert governed.recorded[-1]["question"] == f"later {recording.GENERATED_KEPT - 1}"
 
 
 def test_outside_a_control_plane_nothing_is_recorded(monkeypatch) -> None:

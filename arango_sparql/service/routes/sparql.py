@@ -311,7 +311,9 @@ def execute_endpoint(
         )
 
     # The graph view's run is the question just asked again (recording.py).
-    record_question(request, session, query=req.sparql, question=req.question, again=req.graph)
+    record_question(
+        request, session, query=req.sparql, question=req.question, again=req.graph, client_words=True
+    )
     log_endpoint_timing(
         "/execute",
         elapsed_ms,
@@ -543,7 +545,7 @@ def profile_endpoint(
             profile_data = getter
         exec_ms = round((time.perf_counter() - t_exec) * 1000, 1)
 
-    record_question(request, session, query=req.sparql, question=req.question)
+    record_question(request, session, query=req.sparql, question=req.question, client_words=True)
     profile_dict: dict[str, Any] = (
         dict(profile_data)
         if profile_data is not None and not isinstance(profile_data, dict)

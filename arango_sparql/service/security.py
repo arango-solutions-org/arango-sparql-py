@@ -120,6 +120,7 @@ class _Session:
         "project_mapping",
         "project_mapping_at",
         "recorded_questions",
+        "generated_questions",
     )
 
     def __init__(
@@ -161,6 +162,9 @@ class _Session:
         # Under a control plane: when each question (its words and query) was last recorded,
         # so the page's graph run of a question just asked is not recorded twice.
         self.recorded_questions: dict[str, float] = {}
+        # Under a control plane: the questions ``/nl-translate`` generated a query from, newest
+        # last, so a run of that query unedited may carry the words (recording.py).
+        self.generated_questions: dict[str, None] = {}
 
     def touch(self) -> None:
         self.last_used = time.time()

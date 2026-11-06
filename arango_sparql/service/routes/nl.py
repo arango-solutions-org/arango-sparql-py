@@ -42,7 +42,7 @@ from ..observability import (
     log_endpoint_timing,
     log_llm_call,
 )
-from ..recording import record_question
+from ..recording import record_question, remember_generated
 from ..security import (
     _check_compute_rate_limit,
     _check_nl_rate_limit,
@@ -303,6 +303,8 @@ def nl_translate_endpoint(
         _log_outcome("/nl-translate", outcome)
         raise _http_422_from_outcome(outcome)
     _log_outcome("/nl-translate", outcome)
+    # Under a control plane, a run of this query unedited carries these words (recording.py).
+    remember_generated(session, question=req.nl, query=outcome.sparql)
     return NlTranslateResponse(
         nl=outcome.nl,
         sparql=outcome.sparql,
