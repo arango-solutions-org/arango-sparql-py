@@ -1383,3 +1383,25 @@ def test_a_graph_run_of_an_aggregate_runs_it_as_written(
     )
     assert resp.status_code == 200, resp.text
     assert resp.json()["graph"]["widened"] is False
+
+
+def test_a_graph_run_says_which_patterns_are_relationships(
+    client: TestClient,
+    fake_client_factory: type[_FakeArangoClient],
+) -> None:
+    """An object property is an edge between entities (``relationship``), a data property a
+    value on its subject (``property``): the view draws them differently, so the route says."""
+    token = _connect_session(client)
+    ontology = ONTOLOGY_TTL + (
+        ":knows a owl:ObjectProperty ;\n    rdfs:domain :Person ;\n    rdfs:range :Person ;\n"
+        '    phys:edgeCollectionName "knows" .\n'
+    )
+    query = "PREFIX : <http://ex.org/>\nSELECT ?n WHERE { ?s :knows ?o . ?o :name ?n }"
+    resp = client.post(
+        "/execute",
+        json={"sparql": query, "ontology_ttl": ontology, "graph": True},
+        headers={"X-Arango-Session": token},
+    )
+    assert resp.status_code == 200, resp.text
+    kinds = {p["predicate"]["iri"]: p.get("kind") for p in resp.json()["graph"]["patterns"]}
+    assert kinds == {"http://ex.org/knows": "relationship", "http://ex.org/name": "property"}

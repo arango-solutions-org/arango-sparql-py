@@ -19,8 +19,35 @@ NAMES = P + (
 def test_a_plain_select_is_widened_to_every_variable() -> None:
     widened = widen_projection(NAMES)
     assert widened is not None
-    assert "SELECT DISTINCT * WHERE {" in widened and widened.endswith("} LIMIT 10")
-    assert widened.startswith(P)  # prologue, pattern and modifiers kept as written
+    # Without the limit: the graph is of the solutions behind the rows the client has, which
+    # a limit on the wider rows would cut differently (the client keeps the matching ones).
+    assert "SELECT DISTINCT * WHERE {" in widened and widened.endswith("}")
+    assert widened.startswith(P)  # prologue and pattern kept as written
+
+
+def test_dataset_clauses_stay_and_solution_modifiers_go() -> None:
+    q = (
+        P
+        + "SELECT ?m FROM <http://g/1> FROM NAMED <http://g/2> WHERE { ?l :borrowedBy ?m } ORDER BY DESC(?m) LIMIT 3 OFFSET 2"
+    )
+    assert widen_projection(q) == (
+        P + "SELECT DISTINCT * FROM <http://g/1> FROM NAMED <http://g/2> WHERE { ?l :borrowedBy ?m }"
+    )
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "SELECT ?values WHERE { ?values :p ?o }",
+        "SELECT ?x WHERE { ?x :having ?y }",
+        "PREFIX select: <http://s/>\nSELECT ?x WHERE { ?x select:p ?y }",
+        "SELECT ?from WHERE { ?from :p ?y }",
+    ],
+    ids=["values-variable", "having-name", "select-prefix", "from-variable"],
+)
+def test_a_keyword_inside_a_name_is_not_one(query: str) -> None:
+    widened = widen_projection(P + query)
+    assert widened is not None and "SELECT DISTINCT * " in widened
 
 
 @pytest.mark.parametrize(
@@ -76,12 +103,41 @@ def test_the_patterns_say_how_the_variables_connect() -> None:
     assert len(patterns) == 5
 
 
-def test_patterns_in_optional_and_union_count_and_paths_do_not() -> None:
+def test_a_pattern_in_optional_or_union_says_which_rows_it_holds_for() -> None:
     q = P + (
         "SELECT * WHERE { ?l :borrowedBy ?m . OPTIONAL { ?m :city ?c } "
         '{ ?l :ofBook ?b } UNION { ?l :ofBook/:title ?t } ?m :name "Ada" }'
     )
-    preds = [(p["predicate"]["iri"], p["object"]) for p in query_patterns(q)]
-    assert (LIB + "city", {"var": "c"}) in preds and (LIB + "ofBook", {"var": "b"}) in preds
-    assert (LIB + "name", {"literal": "Ada"}) in preds
-    assert all("title" not in iri for iri, _ in preds)  # a property path is not one triple
+    found = {(p["predicate"]["iri"], str(p["object"])): p.get("when") for p in query_patterns(q)}
+    assert found[(LIB + "borrowedBy", str({"var": "m"}))] is None  # every row
+    assert found[(LIB + "city", str({"var": "c"}))] == [["c"]]  # rows where the OPTIONAL matched
+    assert found[(LIB + "ofBook", str({"var": "b"}))] == [["b"]]  # rows from its UNION branch
+    assert found[(LIB + "name", str({"literal": "Ada"}))] is None
+    assert all("title" not in iri for iri, _ in found)  # a property path is not one triple
+
+
+def test_a_group_no_row_can_be_traced_to_is_left_out() -> None:
+    # Both branches bind only ?l and ?b: a row does not say which matched, so neither is drawn.
+    union = P + "SELECT * WHERE { { ?l :ofBook ?b } UNION { ?l :about ?b } }"
+    assert query_patterns(union) == []
+    # Every variable of the OPTIONAL is bound outside it: a row does not say whether it matched.
+    optional = P + "SELECT * WHERE { ?s a :Member . ?o a :Book OPTIONAL { ?o :by ?s } }"
+    assert [p["predicate"]["iri"] for p in query_patterns(optional)] == [
+        "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+    ] * 2
+
+
+def test_a_nested_group_needs_each_group_around_it() -> None:
+    q = P + "SELECT * WHERE { ?l :borrowedBy ?m OPTIONAL { ?m :city ?c OPTIONAL { ?c :in ?country } } }"
+    found = {p["predicate"]["iri"]: p.get("when") for p in query_patterns(q)}
+    assert found[LIB + "city"] == [["c", "country"]]
+    assert found[LIB + "in"] == [["c", "country"], ["country"]]
+
+
+def test_what_must_not_match_is_never_drawn() -> None:
+    q = P + (
+        "SELECT * WHERE { ?m a :Member MINUS { ?m a :Banned } MINUS { ?m :knows :alice } "
+        "FILTER NOT EXISTS { ?m :owes ?x } }"
+    )
+    patterns = query_patterns(q)
+    assert [p["object"] for p in patterns] == [{"iri": LIB + "Member"}]

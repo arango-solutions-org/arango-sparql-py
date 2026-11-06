@@ -3,7 +3,7 @@ import { CATEGORICAL } from "../theme/graphPalette";
 import type { Action, ResultTab } from "../api/store";
 import CytoscapeGraph from "./CytoscapeGraph";
 import type { SparqlExecuteResponse } from "../api/client";
-import { shapeGraph, type ShapedGraph } from "../utils/graphShape";
+import { graphFromRun } from "../utils/graphShape";
 import type { CyNode } from "./CytoscapeGraph";
 
 // SPARQL results panel. Mirrors `references/arango-cypher-py/ui/src/
@@ -212,31 +212,6 @@ function GraphView({
   loadGraph?: () => Promise<SparqlExecuteResponse>;
 }) {
   const [selected, setSelected] = useState<CyNode | null>(null);
-  // The entities behind the rows and how they connect, from a graph run of the same query.
-  // Kept with the run it belongs to, so a new run never shows the previous one's graph.
-  type Drawn = { run: typeof loadGraph; rows: unknown[]; shape: ShapedGraph | null };
-  const [settled, setSettled] = useState<Drawn | null>(null);
-  useEffect(() => {
-    if (!loadGraph) return;
-    let live = true;
-    loadGraph()
-      .then((resp) => {
-        const patterns = resp.graph?.patterns ?? [];
-        const rows = resp.bindings ?? [];
-        if (live) setSettled({ run: loadGraph, rows, shape: patterns.length ? shapeGraph(rows, patterns) : null });
-      })
-      .catch(() => {
-        // the rows as they are: the graph run is an enrichment
-        if (live) setSettled({ run: loadGraph, rows: [], shape: null });
-      });
-    return () => {
-      live = false;
-    };
-  }, [loadGraph]);
-  const current = settled?.run === loadGraph ? settled : null;
-  const drawn = current?.shape ? { rows: current.rows, shape: current.shape } : null;
-  const loading = loadGraph !== undefined && current === null;
-
   // Pass `bindings` directly. CytoscapeGraph's deriveGraph() handles
   // both s/p/o triple shapes and generic projection shapes, plus the
   // collapse / expand toggle for literals.
@@ -248,6 +223,32 @@ function GraphView({
       ) as Array<Record<string, never>>,
     [data],
   );
+
+  // The entities behind the rows and how they connect, from a graph run of the same query.
+  // Kept with the run it belongs to, so a new run never shows the previous one's graph.
+  type Settled = { run: typeof loadGraph; resp: SparqlExecuteResponse | null };
+  const [settled, setSettled] = useState<Settled | null>(null);
+  useEffect(() => {
+    if (!loadGraph) return;
+    let live = true;
+    loadGraph()
+      .then((resp) => {
+        if (live) setSettled({ run: loadGraph, resp });
+      })
+      .catch(() => {
+        // the rows as they are: the graph run is an enrichment
+        if (live) setSettled({ run: loadGraph, resp: null });
+      });
+    return () => {
+      live = false;
+    };
+  }, [loadGraph]);
+  const current = settled?.run === loadGraph ? settled : null;
+  const drawn = useMemo(
+    () => (current?.resp ? graphFromRun(bindings, current.resp) : null),
+    [current, bindings],
+  );
+  const loading = loadGraph !== undefined && current === null;
 
   if (bindings.length === 0) {
     return (
@@ -266,7 +267,8 @@ function GraphView({
       <div className="flex items-center gap-4 px-3 py-1 shrink-0">
         <span className="text-xs text-gray-400">
           {drawn
-            ? `${drawn.shape.nodes.size} entit${drawn.shape.nodes.size === 1 ? "y" : "ies"} behind ${bindings.length} row${bindings.length === 1 ? "" : "s"}`
+            ? `${drawn.shape.nodes.size} entit${drawn.shape.nodes.size === 1 ? "y" : "ies"} behind ${bindings.length} row${bindings.length === 1 ? "" : "s"}` +
+              (drawn.truncated ? ` · from the first ${drawn.rows.length} solutions only` : "")
             : `${bindings.length} binding${bindings.length === 1 ? "" : "s"}`}
           {loading ? " · drawing the entities…" : ""}
         </span>

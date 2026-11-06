@@ -248,15 +248,17 @@ interface BuildOptions {
   labels?: Map<string, string>;
   /** A node's class: it colours the node, in place of its namespace. */
   classes?: Map<string, string>;
+  /** Nodes drawn even with no triple of their own (an entity the rows give only a class). */
+  nodes?: Iterable<string>;
 }
 
 function buildElements(
   triples: Triple[],
   collapseLiterals: boolean,
-  { isNode = isIri, labels, classes }: BuildOptions = {},
+  { isNode = isIri, labels, classes, nodes }: BuildOptions = {},
 ): BuildResult {
   // Subject IRIs and any IRI that appears as object should be a node.
-  const subjectIris = new Set<string>();
+  const subjectIris = new Set<string>(nodes ?? []);
   const literalNodes = new Map<string, { predicate: string; value: unknown }>();
   const literalProps = new Map<string, Array<{ predicate: string; value: unknown }>>();
   const collColors = new Map<string, string>();
@@ -397,6 +399,7 @@ export default function CytoscapeGraph({
               isNode: (value: unknown): value is string => typeof value === "string" && shape.nodes.has(value),
               labels: shape.labels,
               classes: shape.classes,
+              nodes: shape.nodes,
             }
           : {},
       ),

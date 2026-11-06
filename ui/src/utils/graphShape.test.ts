@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isEntity, shapeGraph, type Pattern } from "./graphShape";
+import { graphFromRun, isEntity, shapeGraph, type Pattern } from "./graphShape";
 
 // The graph a result draws from the query's own patterns: the demo library's question
 // "which members borrowed a book", run with every variable projected.
@@ -81,5 +81,78 @@ describe("isEntity", () => {
     expect(isEntity("Ada Lovelace")).toBe(false);
     expect(isEntity("2024-01-03")).toBe(false);
     expect(isEntity(42)).toBe(false);
+  });
+});
+
+describe("which rows a pattern holds for", () => {
+  it("draws a UNION branch's or an OPTIONAL's pattern only for the rows it matched", () => {
+    // { ?l :ofBook ?b } UNION { ?l :about ?t } — each branch binds a variable of its own.
+    const patterns: Pattern[] = [
+      { subject: v("l"), predicate: iri(L + "ofBook"), object: v("b"), kind: "relationship", when: [["b"]] },
+      { subject: v("l"), predicate: iri(L + "about"), object: v("t"), kind: "relationship", when: [["t"]] },
+    ];
+    const g = shapeGraph([{ l: "loans/1", b: "books/1", t: null }, { l: "loans/2", b: null, t: "topics/9" }], patterns);
+    expect(g.triples).toEqual([
+      { s: "loans/1", p: L + "ofBook", o: "books/1" },
+      { s: "loans/2", p: L + "about", o: "topics/9" },
+    ]);
+  });
+
+  it("needs every group around a nested pattern", () => {
+    const pat: Pattern = { subject: v("c"), predicate: iri(L + "in"), object: v("k"), kind: "relationship", when: [["c", "k"], ["x"]] };
+    expect(shapeGraph([{ c: "cities/1", k: "countries/1", x: null }], [pat]).triples).toHaveLength(0);
+    expect(shapeGraph([{ c: "cities/1", k: "countries/1", x: 1 }], [pat]).triples).toHaveLength(1);
+  });
+
+  it("takes one bound variable of a group as its match: a nested OPTIONAL may leave the rest unbound", () => {
+    // OPTIONAL { ?m :city ?c OPTIONAL { ?c :in ?k } }: the outer group's own variables are c and k.
+    const city: Pattern = { subject: v("m"), predicate: iri(L + "city"), object: v("c"), kind: "relationship", when: [["c", "k"]] };
+    expect(shapeGraph([{ m: "members/1", c: "cities/1", k: null }], [city]).triples).toHaveLength(1);
+  });
+});
+
+describe("terms the query fixes or leaves open", () => {
+  it("draws ?s ?p ?o, reading the predicate from the row", () => {
+    const pattern: Pattern = { subject: v("s"), predicate: v("p"), object: v("o") };
+    const g = shapeGraph([{ s: "http://ex.org/a", p: "http://ex.org/knows", o: "http://ex.org/b" }], [pattern]);
+    expect(g.triples).toEqual([{ s: "http://ex.org/a", p: "http://ex.org/knows", o: "http://ex.org/b" }]);
+    expect(g.nodes.has("http://ex.org/b")).toBe(true);
+  });
+
+  it("draws an edge from a constant subject, and to a relationship's entity with no patterns of its own", () => {
+    const pattern: Pattern = { subject: iri(L + "alice"), predicate: iri(L + "knows"), object: v("o"), kind: "relationship" };
+    const g = shapeGraph([{ o: "members/7" }, { o: "members/7" }], [pattern]);
+    expect(g.triples).toEqual([{ s: L + "alice", p: L + "knows", o: "members/7" }]); // once, though in two rows
+    expect(g.nodes.has("members/7")).toBe(true);
+  });
+});
+
+describe("graphFromRun", () => {
+  const widened = (bindings: Array<Record<string, unknown>>, truncated = false) => ({
+    bindings,
+    truncated,
+    graph: { patterns: PATTERNS, widened: true },
+  });
+
+  it("draws nothing from a run that could not be widened, so the rows are drawn instead", () => {
+    const table = [{ m: "members/100", n: 3 }];
+    expect(graphFromRun(table, { bindings: table, graph: { patterns: PATTERNS, widened: false } })).toBeNull();
+    expect(graphFromRun(table, { bindings: table, graph: null })).toBeNull();
+    expect(graphFromRun(ROWS, widened(ROWS))).not.toBeNull(); // positive control
+  });
+
+  it("draws nothing when the patterns find no entity in the rows", () => {
+    const run = { bindings: [{ n: 3 }], graph: { patterns: PATTERNS, widened: true } };
+    expect(graphFromRun([{ n: 3 }], run)).toBeNull();
+  });
+
+  it("keeps only the solutions behind the table's rows", () => {
+    // The table is limited to Ada's first loan; the graph run (no limit) has both.
+    const table = [{ memberName: "Ada Lovelace", bookTitle: "The Left Hand of Darkness" }];
+    const drawn = graphFromRun(table, widened(ROWS));
+    expect(drawn?.rows).toEqual([ROWS[0]]);
+    expect(drawn?.shape.nodes.has("books/17")).toBe(false);
+    expect(drawn?.truncated).toBe(false);
+    expect(graphFromRun(table, widened(ROWS, true))?.truncated).toBe(true);
   });
 });

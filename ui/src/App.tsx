@@ -47,6 +47,7 @@ import {
   SchemaPollSuperseded,
   type GraphInfo,
   type SparqlExecuteRequest,
+  type SparqlExecuteResponse,
 } from "./api/client";
 import {
   planSend,
@@ -306,7 +307,9 @@ function Workbench() {
   const loadGraph = useMemo(() => {
     const token = state.connection.token;
     if (lastRun === null || !token) return undefined;
-    return () => executeSparql({ ...lastRun, graph: true }, token);
+    // One graph run per query run, however often the Graph tab is opened.
+    let pending: Promise<SparqlExecuteResponse> | null = null;
+    return () => (pending ??= executeSparql({ ...lastRun, graph: true }, token));
   }, [lastRun, state.connection.token]);
 
   const buildRequest = useCallback(() => {
@@ -447,6 +450,7 @@ function Workbench() {
     if (!state.connection.token) return;
     if (!sparqlRef.current.trim()) return;
     dispatch({ type: "EXECUTE_START" });
+    setLastRun(null); // until this run answers, there is no run to draw
     const req = buildRequest();
     try {
       const resp = await executeSparql(req, state.connection.token);
@@ -578,8 +582,10 @@ function Workbench() {
     if (!state.connection.token) return;
     if (!sparqlRef.current.trim()) return;
     dispatch({ type: "PROFILE_START" });
+    setLastRun(null);
+    const req = buildRequest();
     try {
-      const resp = await profileSparql(buildRequest(), state.connection.token);
+      const resp = await profileSparql(req, state.connection.token);
       dispatch({
         type: "PROFILE_SUCCESS",
         profile: resp.profile ?? {},
@@ -590,6 +596,7 @@ function Workbench() {
         translateMs: resp.translate_ms ?? null,
         execMs: resp.exec_ms ?? null,
       });
+      setLastRun(req); // its rows fill the Table and Graph tabs too
       addToHistory(resp.aql);
     } catch (err) {
       dispatch({

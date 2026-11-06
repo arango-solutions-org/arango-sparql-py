@@ -2358,18 +2358,28 @@ conditional tabs (**Explain** when `explainPlan` is present,
   explanation, CSV / JSON export.
 - **JSON view**: pretty-printed `JSON.stringify` with copy button.
 - **Graph view**: drawn from the query's own patterns. The view runs
-  the last query again with `graph: true` (`/execute`): a plain SELECT
-  is widened to `SELECT DISTINCT *`, and the response carries the
-  query's triple patterns, each with its kind from the schema (`type`,
-  `relationship`, `property`; `translate/graph_shape.py`). Each entity
-  in the rows is a node, labelled by its name or title and coloured by
-  its class; each relationship pattern is an edge; each property pattern
-  a value on its node (`ui/src/utils/graphShape.ts`). So a question that
-  projects only names still draws the entities behind them and how they
-  connect. A query that cannot be widened safely (an aggregate,
-  `GROUP BY`, an expression in the projection, a subquery), and a raw
-  AQL run, fall back to drawing the rows: nodes/edges extracted from
-  `_id` / `_from` / `_to` in result rows. Node inspector side panel
+  the last query again with `graph: true` (`/execute`), once per run: a
+  plain SELECT is widened to `SELECT DISTINCT *` without `ORDER BY`,
+  `LIMIT` or `OFFSET`, and the response carries the query's triple
+  patterns, each with its kind from the schema (`type`, `relationship`,
+  `property`; `translate/graph_shape.py`). Of the widened rows, the view
+  keeps those behind the table's rows, so a limited table draws the
+  entities behind its own rows, not another cut of the solutions; when
+  the widened run reaches the result cap, the header says so. Each
+  entity in the rows is a node, labelled by its name or title and
+  coloured by its class; each relationship pattern is an edge; each
+  property pattern a value on its node; a variable predicate
+  (`?s ?p ?o`) is read from the row (`ui/src/utils/graphShape.ts`). A
+  pattern inside `OPTIONAL` or a `UNION` branch carries `when`: the
+  variables only its group binds, and it is drawn for a row only when
+  the row binds one of them. A group that binds no variable of its own
+  cannot be traced to its rows and is left out, as are `MINUS` and
+  `FILTER [NOT] EXISTS`, which are conditions, not facts. So a question
+  that projects only names still draws the entities behind them and how
+  they connect. A query that cannot be widened safely (an aggregate,
+  `GROUP BY`, `VALUES`, an expression in the projection, a subquery),
+  and a raw AQL run, fall back to drawing the rows: nodes/edges
+  extracted from `_id` / `_from` / `_to` in result rows. Node inspector side panel
   on click; **literal-collapse toggle** (SPARQL-specific addition):
   when SELECT bindings include both IRI nodes and literal nodes, the
   toggle hides literal nodes and re-anchors them as labels on the
