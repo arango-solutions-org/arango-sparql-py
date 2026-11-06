@@ -18,11 +18,13 @@ from fastapi import Depends, HTTPException, Request
 
 from ...api import translate as _translate
 from ...errors import CrossTenantJoinError, SparqlError
+from ...translate.graph_shape import query_patterns, widen_projection
 from ...translate.parser import parse_sparql
 from ..app import app
 from ..mapping import _resolver_from_request
 from ..models import (
     _MAX_RESULT_DOCS,
+    GraphShape,
     RawAqlRequest,
     RawAqlResponse,
     SparqlExecuteRequest,
@@ -203,6 +205,26 @@ def translate_endpoint(
     )
 
 
+_RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+
+
+def _with_kind(pattern: dict[str, Any], resolver: Any) -> dict[str, Any]:
+    """*pattern* with ``kind``, so the graph view need not guess from values: ``type`` (an
+    ``a :Class``), ``relationship`` (an object property: an edge between entities) or
+    ``property`` (a data property: a value on its subject). Left out when the schema does not
+    say."""
+    iri = pattern["predicate"].get("iri")
+    if iri is None:
+        return pattern
+    if iri == _RDF_TYPE:
+        return {**pattern, "kind": "type"}
+    try:
+        resolved = resolver.resolve_property(iri)
+    except Exception:  # noqa: BLE001 — an unknown property leaves the view to its default
+        return pattern
+    return {**pattern, "kind": "relationship" if resolved.is_object_property else "property"}
+
+
 @app.post("/execute", response_model=SparqlExecuteResponse)
 def execute_endpoint(
     req: SparqlExecuteRequest,
@@ -223,10 +245,19 @@ def execute_endpoint(
     """
     resolver = _resolver_or_422(req, analyzer_bundle=_analyzer_bundle_for_session(session))
     tenant_id = resolve_tenant_id(request)
+    sparql, graph = req.sparql, None
+    if req.graph:
+        widened = widen_projection(req.sparql)
+        sparql = widened or req.sparql
+        try:
+            patterns = [_with_kind(p, resolver) for p in query_patterns(req.sparql)]
+        except SparqlError:
+            patterns = []  # the translation below reports the query's own error
+        graph = GraphShape(patterns=patterns, widened=widened is not None)
     t_translate = time.perf_counter()
     try:
         transpiled = _translate(
-            req.sparql,
+            sparql,
             resolver=resolver,
             params=req.params,
             tenant_id=tenant_id,
@@ -297,6 +328,7 @@ def execute_endpoint(
         translate_ms=translate_ms,
         exec_ms=exec_ms,
         truncated=truncated,
+        graph=graph,
     )
 
 

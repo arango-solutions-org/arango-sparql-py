@@ -308,7 +308,7 @@ that already speak our shape.
 | `POST` | `/session/graph` | session | Bind (or clear) the active ArangoDB named-graph scope for this session — see §6.8 |
 | `POST` | `/translate` | rate-limited | SPARQL → AQL only (no DB access) |
 | `POST` | `/validate` | rate-limited | SPARQL parse-only validation |
-| `POST` | `/execute` | session + rate-limited | SPARQL → AQL → ArangoDB → bindings |
+| `POST` | `/execute` | session + rate-limited | SPARQL → AQL → ArangoDB → bindings; with `graph: true`, a plain SELECT run with every variable, plus the query's triple patterns for the graph view (§10) |
 | `POST` | `/execute-aql` | session + rate-limited | Pass-through AQL (the UI's "rerun without re-translating") |
 | `POST` | `/explain` | session + rate-limited | SPARQL → AQL → `db.aql.explain` |
 | `POST` | `/profile` | session + rate-limited | SPARQL → AQL → `db.aql.execute(profile=2)` |
@@ -2393,8 +2393,29 @@ conditional tabs (**Explain** when `explainPlan` is present,
   sentinel-string rendering (`NULL`, `N/A`, etc.) with hover
   explanation, CSV / JSON export.
 - **JSON view**: pretty-printed `JSON.stringify` with copy button.
-- **Graph view**: Cytoscape-rendered nodes/edges extracted from
-  `_id` / `_from` / `_to` in result rows; node inspector side panel
+- **Graph view**: drawn from the query's own patterns. The view runs
+  the last query again with `graph: true` (`/execute`), once per run: a
+  plain SELECT is widened to `SELECT DISTINCT *` without `ORDER BY`,
+  `LIMIT` or `OFFSET`, and the response carries the query's triple
+  patterns, each with its kind from the schema (`type`, `relationship`,
+  `property`; `translate/graph_shape.py`). Of the widened rows, the view
+  keeps those behind the table's rows, so a limited table draws the
+  entities behind its own rows, not another cut of the solutions; when
+  the widened run reaches the result cap, the header says so. Each
+  entity in the rows is a node, labelled by its name or title and
+  coloured by its class; each relationship pattern is an edge; each
+  property pattern a value on its node; a variable predicate
+  (`?s ?p ?o`) is read from the row (`ui/src/utils/graphShape.ts`). A
+  pattern inside `OPTIONAL` or a `UNION` branch carries `when`: the
+  variables only its group binds, and it is drawn for a row only when
+  the row binds one of them. A group that binds no variable of its own
+  cannot be traced to its rows and is left out, as are `MINUS` and
+  `FILTER [NOT] EXISTS`, which are conditions, not facts. So a question
+  that projects only names still draws the entities behind them and how
+  they connect. A query that cannot be widened safely (an aggregate,
+  `GROUP BY`, `VALUES`, an expression in the projection, a subquery),
+  and a raw AQL run, fall back to drawing the rows: nodes/edges
+  extracted from `_id` / `_from` / `_to` in result rows. Node inspector side panel
   on click; **literal-collapse toggle** (SPARQL-specific addition):
   when SELECT bindings include both IRI nodes and literal nodes, the
   toggle hides literal nodes and re-anchors them as labels on the

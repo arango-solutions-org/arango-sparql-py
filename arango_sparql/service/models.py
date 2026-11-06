@@ -149,6 +149,19 @@ class SparqlExecuteRequest(BaseModel):
     mapping: dict[str, Any] | None = None
     params: dict[str, Any] | None = None
     database: str = Field(default="_system", max_length=_MAX_FIELD_LENGTH)
+    # Run for the graph view: a plain SELECT is widened to every variable in its patterns,
+    # and the response carries the patterns (``graph``), so the entities behind the rows and
+    # how they connect can be drawn (``translate/graph_shape.py``).
+    graph: bool = False
+
+
+class GraphShape(BaseModel):
+    """What the graph view draws a result with: the query's triple patterns (each term
+    ``{"var"|"iri"|"literal": …}``, and a ``kind`` — ``type``, ``relationship`` or
+    ``property`` — when the schema says), and whether the run projected every variable."""
+
+    patterns: list[dict[str, Any]] = Field(default_factory=list)
+    widened: bool = False
 
 
 class SparqlExecuteResponse(BaseModel):
@@ -169,6 +182,9 @@ class SparqlExecuteResponse(BaseModel):
     # banner so the operator knows to refine the query rather than
     # assume they saw the full set.
     truncated: bool = False
+
+    # Set on a ``graph`` run: the patterns the graph view draws the rows with.
+    graph: GraphShape | None = None
 
 
 class RawAqlRequest(BaseModel):
