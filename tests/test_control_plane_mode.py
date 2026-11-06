@@ -231,7 +231,9 @@ def test_a_refused_route_is_refused_under_a_path_prefix(governed) -> None:
 def test_open_routes_need_no_context(governed, client) -> None:
     assert client.get("/health").status_code == 200
     body = client.get("/control-plane/mode").json()
-    assert body == {"control_plane": True, "home": "/"}
+    # `tool` is the id the SDK verifies contexts for: the page renews for exactly that tool.
+    assert body == {"control_plane": True, "home": "/", "tool": control_plane.TOOL_ID}
+    assert body["tool"] == "query"
 
 
 def test_a_served_route_needs_a_context(governed, client) -> None:
@@ -634,7 +636,11 @@ def test_the_mode_needs_a_tenant_a_source_and_the_sdk(monkeypatch) -> None:
 
 def test_without_a_control_plane_nothing_changes(monkeypatch, client) -> None:
     monkeypatch.delenv("CONTROL_PLANE_URL", raising=False)
-    assert client.get("/control-plane/mode").json() == {"control_plane": False, "home": None}
+    assert client.get("/control-plane/mode").json() == {
+        "control_plane": False,
+        "home": None,
+        "tool": None,
+    }
     assert client.get("/connect/defaults").status_code == 200
     assert client.get("/graphs").status_code == 401  # the tool's own session rule, as before
     assert client.get("/control-plane/context").status_code == 404

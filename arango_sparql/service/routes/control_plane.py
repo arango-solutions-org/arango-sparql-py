@@ -95,10 +95,15 @@ app.add_middleware(ControlPlaneGate)
 
 @app.get("/control-plane/mode")
 def control_plane_mode() -> dict[str, Any]:
-    """Whether the service runs as a control plane's tool, and where a user opens it from.
-    The page asks this first, before it has a context."""
+    """Whether the service runs as a control plane's tool, where a user opens it from, and
+    the tool id it verifies contexts for. The page asks this first, before it has a context,
+    and renews its context for that tool, so the id is written only on the server."""
     on = control_plane.mode()
-    return {"control_plane": on, "home": control_plane.home() if on else None}
+    return {
+        "control_plane": on,
+        "home": control_plane.home() if on else None,
+        "tool": control_plane.TOOL_ID if on else None,
+    }
 
 
 @app.get("/control-plane/context")
