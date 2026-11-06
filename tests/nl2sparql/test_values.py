@@ -470,3 +470,20 @@ def test_a_property_of_another_kind_is_never_flagged_or_listed() -> None:
     q = _P + 'SELECT ?a WHERE { ?a ex:occurredAt "Jan 1" ; ex:tags "z" }'
     assert value_flags(q, by_property([when, tags])) == []
     assert values_prompt_section([when, tags]) == ""
+
+
+def test_the_service_never_sends_values_to_the_provider() -> None:
+    # PRD §17.4: the check is a library caller's opt-in. A service route that
+    # constructed it would send tenant data to the LLM provider without the
+    # operator setting §17.4 requires, so no service module may reference it.
+    import pathlib
+
+    import arango_sparql.service as service
+
+    root = pathlib.Path(service.__file__).parent
+    offenders = [
+        str(path.relative_to(root))
+        for path in sorted(root.rglob("*.py"))
+        if any(name in path.read_text(encoding="utf-8") for name in ("nl2sparql.values", "ValueCheck"))
+    ]
+    assert offenders == []
