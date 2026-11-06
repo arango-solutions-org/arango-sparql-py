@@ -16,11 +16,12 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .translate.builder import AqlQueryBuilder
-from .translate.parser import parse_sparql
+from .translate.parser import InlineValues, parse_sparql
 from .translate.resolver import SchemaResolver
 from .translate.visitor import AlgebraVisitor, collect_query_triples
 
 __all__ = [
+    "InlineValues",
     "TranslateResult",
     "translate",
     # Federation entry point (CDF M5 WP-C2) — implemented in
@@ -60,6 +61,7 @@ def translate(
     resolver: SchemaResolver,
     params: dict[str, Any] | None = None,
     tenant_id: str | None = None,
+    values: InlineValues | None = None,
 ) -> TranslateResult:
     """Translate a SPARQL 1.1 query string into AQL.
 
@@ -85,13 +87,18 @@ def translate(
         single-tenant deployments (no class declares ``phys:tenantField``);
         a tenant-scoped class with ``tenant_id=None`` raises
         :class:`~arango_sparql.errors.CrossTenantJoinError`.
+    values:
+        Rows for a trailing ``VALUES`` clause, as data: the same translation
+        as the rows written into *sparql*, without parsing them
+        (:class:`~arango_sparql.translate.parser.InlineValues`). A bind join's
+        seed is the case this is for (arango-solutions-org/arango-sparql-py#160).
 
     Returns
     -------
     TranslateResult
         Generated AQL plus bind variables and any non-fatal warnings.
     """
-    parsed = parse_sparql(sparql)
+    parsed = parse_sparql(sparql, values)
     builder = AqlQueryBuilder(seed_params=params or {})
     visitor = AlgebraVisitor(
         builder=builder,
