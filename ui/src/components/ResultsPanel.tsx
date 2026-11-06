@@ -1,7 +1,9 @@
-import { useCallback, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { CATEGORICAL } from "../theme/graphPalette";
 import type { Action, ResultTab } from "../api/store";
 import CytoscapeGraph from "./CytoscapeGraph";
+import type { SparqlExecuteResponse } from "../api/client";
+import { graphFromRun } from "../utils/graphShape";
 import type { CyNode } from "./CytoscapeGraph";
 
 // SPARQL results panel. Mirrors `references/arango-cypher-py/ui/src/
@@ -20,6 +22,9 @@ interface Props {
   explainPlan?: Record<string, unknown> | null;
   /** Raw ArangoDB profile blob (WP-UI-EXPLAIN). Tab shows when non-null. */
   profileData?: Record<string, unknown> | null;
+  /** Runs the last query again for the graph view: every variable, and the query's
+   * patterns. Absent (raw AQL, nothing run yet): the graph draws the rows as they are. */
+  loadGraph?: () => Promise<SparqlExecuteResponse>;
 }
 
 const ALWAYS_TABS: { id: ResultTab; label: string }[] = [
@@ -199,9 +204,14 @@ function NodeInspector({
   );
 }
 
-function GraphView({ data }: { data: unknown[] }) {
+function GraphView({
+  data,
+  loadGraph,
+}: {
+  data: unknown[];
+  loadGraph?: () => Promise<SparqlExecuteResponse>;
+}) {
   const [selected, setSelected] = useState<CyNode | null>(null);
-
   // Pass `bindings` directly. CytoscapeGraph's deriveGraph() handles
   // both s/p/o triple shapes and generic projection shapes, plus the
   // collapse / expand toggle for literals.
@@ -213,6 +223,32 @@ function GraphView({ data }: { data: unknown[] }) {
       ) as Array<Record<string, never>>,
     [data],
   );
+
+  // The entities behind the rows and how they connect, from a graph run of the same query.
+  // Kept with the run it belongs to, so a new run never shows the previous one's graph.
+  type Settled = { run: typeof loadGraph; resp: SparqlExecuteResponse | null };
+  const [settled, setSettled] = useState<Settled | null>(null);
+  useEffect(() => {
+    if (!loadGraph) return;
+    let live = true;
+    loadGraph()
+      .then((resp) => {
+        if (live) setSettled({ run: loadGraph, resp });
+      })
+      .catch(() => {
+        // the rows as they are: the graph run is an enrichment
+        if (live) setSettled({ run: loadGraph, resp: null });
+      });
+    return () => {
+      live = false;
+    };
+  }, [loadGraph]);
+  const current = settled?.run === loadGraph ? settled : null;
+  const drawn = useMemo(
+    () => (current?.resp ? graphFromRun(bindings, current.resp) : null),
+    [current, bindings],
+  );
+  const loading = loadGraph !== undefined && current === null;
 
   if (bindings.length === 0) {
     return (
@@ -230,7 +266,11 @@ function GraphView({ data }: { data: unknown[] }) {
     <div className="h-full flex flex-col">
       <div className="flex items-center gap-4 px-3 py-1 shrink-0">
         <span className="text-xs text-gray-400">
-          {bindings.length} binding{bindings.length === 1 ? "" : "s"}
+          {drawn
+            ? `${drawn.shape.nodes.size} entit${drawn.shape.nodes.size === 1 ? "y" : "ies"} behind ${bindings.length} row${bindings.length === 1 ? "" : "s"}` +
+              (drawn.truncated ? ` · from the first ${drawn.rows.length} solutions only` : "")
+            : `${bindings.length} binding${bindings.length === 1 ? "" : "s"}`}
+          {loading ? " · drawing the entities…" : ""}
         </span>
         {selected && (
           <button
@@ -244,7 +284,8 @@ function GraphView({ data }: { data: unknown[] }) {
       <div className="flex-1 min-h-0 flex">
         <div className={selected ? "flex-1 min-w-0" : "w-full"}>
           <CytoscapeGraph
-            bindings={bindings}
+            bindings={drawn ? (drawn.rows as Array<Record<string, never>>) : bindings}
+            shape={drawn?.shape}
             onNodeClick={setSelected}
             onBackgroundClick={() => setSelected(null)}
           />
@@ -521,6 +562,7 @@ export default function ResultsPanel({
   execMs,
   explainPlan,
   profileData,
+  loadGraph,
 }: Props) {
   const handleExportJson = useCallback(() => {
     if (!results) return;
@@ -606,7 +648,7 @@ export default function ResultsPanel({
         ) : activeTab === "json" ? (
           <JsonView data={results} />
         ) : activeTab === "graph" ? (
-          <GraphView data={results} />
+          <GraphView data={results} loadGraph={loadGraph} />
         ) : (
           <div className="flex items-center justify-center h-full">
             <p className="text-gray-600 text-sm">No data for this view yet.</p>

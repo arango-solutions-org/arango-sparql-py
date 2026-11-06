@@ -308,7 +308,7 @@ that already speak our shape.
 | `POST` | `/session/graph` | session | Bind (or clear) the active ArangoDB named-graph scope for this session — see §6.8 |
 | `POST` | `/translate` | rate-limited | SPARQL → AQL only (no DB access) |
 | `POST` | `/validate` | rate-limited | SPARQL parse-only validation |
-| `POST` | `/execute` | session + rate-limited | SPARQL → AQL → ArangoDB → bindings |
+| `POST` | `/execute` | session + rate-limited | SPARQL → AQL → ArangoDB → bindings; with `graph: true`, a plain SELECT run with every variable, plus the query's triple patterns for the graph view (§10) |
 | `POST` | `/execute-aql` | session + rate-limited | Pass-through AQL (the UI's "rerun without re-translating") |
 | `POST` | `/explain` | session + rate-limited | SPARQL → AQL → `db.aql.explain` |
 | `POST` | `/profile` | session + rate-limited | SPARQL → AQL → `db.aql.execute(profile=2)` |
@@ -649,9 +649,11 @@ routes the subject (`translate/visitor.py`):
   "analyzer"`) or a CSI the schema analyzer wrote in reverse. A hand-written
   ontology or mapping, or a forward-produced CSI, records no indexes, so
   nothing is reported. The message says to refresh the cached analysis
-  (`/schema/introspect?force=true`) after adding the index. The NL routes
-  build their resolver without the analysis and the SPARQL Protocol route
-  counts warnings before translating, so neither reports it yet. Even with the index, a union read with
+  (`/schema/introspect?force=true`) after adding the index. Every route that
+  translates reports it: `/translate`, `/execute`, `/explain`, `/profile`,
+  the NL routes (which merge the session's analysis, as `/translate` does,
+  #157) and the SPARQL Protocol route (its `X-Schema-Warnings-Count` counts
+  the translation's schema advisories, which it also logs). Even with the index, a union read with
   nothing else to narrow it pays a check per later-member row (2 × 100k:
   0.16 s against 0.03 s without the check; 0.09 s on `_id`-only data,
   where the guard alone runs). Known limit: an OPTIONAL attribute held by
@@ -661,6 +663,29 @@ routes the subject (`translate/visitor.py`):
   `owl_export` write for a shared property) means any of the classes, like
   an `owl:unionOf`: routing, lookups and walks read all of them
   (`SchemaResolver.class_list`, issue #122).
+- **A described constant** (`DESCRIBE <iri>`, alone or beside a WHERE) is
+  read wherever the mapping can store it (#150,
+  `SchemaResolver.described_sources`): every class's collection, resolved
+  as a type pattern resolves it (a class with no `phys:collectionName` its
+  local-name collection, an RPT class its `phys:triplesCollection`; a
+  sharded one's whole family), in one `UNION` matched on the IRI, plus the
+  default collection unless strict subject resolution is on (the non-strict
+  contract keeps an IRI no class places there; a triple store has none),
+  and every triples table on its subject column. Each read takes the active
+  named-graph scope, as a type pattern does. A document is held to the
+  tenant as a document a walk reaches is; a triples table a tenant-scoped
+  RPT class uses is refused (§6.5.1). A collection without a `_uri` index
+  is scanned per DESCRIBE, reported as `W_SCHEMA_URI_INDEX_MISSING` when the
+  analysis says so. Every collection a class resolves to must exist (its
+  `phys:collectionName`, or a fallback such as its local name or
+  `_triples`): one that does not fails the DESCRIBE (ERR 1203), as a type
+  pattern on that class does. The legacy service read the default collection only, which a
+  mapping without one (the service's) cannot: ArangoDB refused the query.
+  A bare DESCRIBE returns one row per triple, so the row count and the
+  result-row cap count triples. Beside a WHERE the description is a
+  sub-query, so it does not multiply the WHERE's rows; several described
+  terms are flattened into one list (`APPEND(a, b, c)` had read `c` as its
+  *unique* flag and dropped it).
 
 The union refuses, with `E_SPARQL_UNSUPPORTED`, classes that disagree on
 tenant scoping (one tenant filter cannot serve them) and sharded classes.
@@ -1200,7 +1225,7 @@ FOR doc1 IN @@coll_Person
 
 **Documents a walk reaches are scoped too** (issue #118). An edge's far
 vertex, the source of a backward walk, a document read from the default
-collection (a subject no class places, DESCRIBE), and the endpoints of a
+collection (a subject no class places), a described constant (§6.1), and the endpoints of a
 relationship node read on its own (D8, `DOCUMENT(k._from)` /
 `DOCUMENT(k._to)`) are not opened by their class, so no class applies its
 filter there. Each such document gets one test per tenant field, keyed by
@@ -1371,7 +1396,18 @@ When the resolver can do the right thing but the operator probably wants
 to know, it emits a `W_SCHEMA_*` advisory rather than throwing. Surfaced
 via `TranslateResponse.schema_warnings` (separate from operational
 `warnings`) so the UI can render them in a dedicated "schema-mapping
-advisories" panel.
+advisories" panel. A result carries the advisories of its own
+translation, once each, whether the resolver is new or reused
+(`SchemaResolver.collecting_warnings`): a resolution served from the
+resolver's cache reports its advisories again, and an earlier
+translation's do not carry over (#157). A survey of the whole ontology (`triple_store_class`) reports
+nothing: its advisories concern classes the query may not name, and a class
+the query names reports its own. `SchemaResolver.warnings` still
+accumulates for callers that read it directly. A resolver is not
+thread-safe (`translate/advisories.py`): the service, the NL pipeline and
+the eval harness build one per request or per pipeline. The SPARQL Protocol
+route's `X-Schema-Warnings-Count` is the count of the translation's
+`W_SCHEMA_*` advisories.
 
 | Code | Trigger |
 | --- | --- |
@@ -1384,7 +1420,7 @@ advisories" panel.
 | `W_SCHEMA_LOW_CONFIDENCE` | `metadata.confidence < 0.5`; the operator should review the mapping before relying on it for a production workload. |
 | `W_SCHEMA_DRIFT_STATS` | `/schema/status` detected a counts-fingerprint change since last refresh. Cardinality-aware planning may be stale. |
 | `W_SCHEMA_DRIFT_SHAPE` | `/schema/status` detected a shape-fingerprint change since last refresh. The mapping itself is stale; a re-acquire is recommended. |
-| `W_SCHEMA_URI_INDEX_MISSING` | A union read checks a later member's rows for a copy in an earlier member by `_uri` (§6.1, #124), and the schema analysis shows that member has no persistent, hash or skiplist index whose first field is `_uri`, so the check scans it once per row. Names the collection; add the index, then refresh the analysis. Reported only from a mapping that lists indexes (the service's analysis, or an analyzer-written reverse CSI). |
+| `W_SCHEMA_URI_INDEX_MISSING` | A union read checks a later member's rows for a copy in an earlier member by `_uri` (§6.1, #124), or a `DESCRIBE <iri>` looks the IRI up in a collection (§6.1, #150), and the schema analysis shows that collection has no persistent, hash or skiplist index whose first field is `_uri`, so it is scanned once per row or per DESCRIBE. Names the collection; add the index, then refresh the analysis. Reported only from a mapping that lists indexes (the service's analysis, or an analyzer-written reverse CSI). |
 
 ### 6.8 ArangoDB named-graph scoping (collection down-select)
 
@@ -2357,8 +2393,29 @@ conditional tabs (**Explain** when `explainPlan` is present,
   sentinel-string rendering (`NULL`, `N/A`, etc.) with hover
   explanation, CSV / JSON export.
 - **JSON view**: pretty-printed `JSON.stringify` with copy button.
-- **Graph view**: Cytoscape-rendered nodes/edges extracted from
-  `_id` / `_from` / `_to` in result rows; node inspector side panel
+- **Graph view**: drawn from the query's own patterns. The view runs
+  the last query again with `graph: true` (`/execute`), once per run: a
+  plain SELECT is widened to `SELECT DISTINCT *` without `ORDER BY`,
+  `LIMIT` or `OFFSET`, and the response carries the query's triple
+  patterns, each with its kind from the schema (`type`, `relationship`,
+  `property`; `translate/graph_shape.py`). Of the widened rows, the view
+  keeps those behind the table's rows, so a limited table draws the
+  entities behind its own rows, not another cut of the solutions; when
+  the widened run reaches the result cap, the header says so. Each
+  entity in the rows is a node, labelled by its name or title and
+  coloured by its class; each relationship pattern is an edge; each
+  property pattern a value on its node; a variable predicate
+  (`?s ?p ?o`) is read from the row (`ui/src/utils/graphShape.ts`). A
+  pattern inside `OPTIONAL` or a `UNION` branch carries `when`: the
+  variables only its group binds, and it is drawn for a row only when
+  the row binds one of them. A group that binds no variable of its own
+  cannot be traced to its rows and is left out, as are `MINUS` and
+  `FILTER [NOT] EXISTS`, which are conditions, not facts. So a question
+  that projects only names still draws the entities behind them and how
+  they connect. A query that cannot be widened safely (an aggregate,
+  `GROUP BY`, `VALUES`, an expression in the projection, a subquery),
+  and a raw AQL run, fall back to drawing the rows: nodes/edges
+  extracted from `_id` / `_from` / `_to` in result rows. Node inspector side panel
   on click; **literal-collapse toggle** (SPARQL-specific addition):
   when SELECT bindings include both IRI nodes and literal nodes, the
   toggle hides literal nodes and re-anchors them as labels on the

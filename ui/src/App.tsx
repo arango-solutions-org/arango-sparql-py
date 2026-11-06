@@ -46,6 +46,8 @@ import {
   schemaIntrospectUntilReady,
   SchemaPollSuperseded,
   type GraphInfo,
+  type SparqlExecuteRequest,
+  type SparqlExecuteResponse,
 } from "./api/client";
 import {
   planSend,
@@ -299,6 +301,17 @@ function Workbench() {
   const paramsRef = useRef(state.params);
   paramsRef.current = state.params;
 
+  // The request of the last SPARQL run, which the graph view runs again with every variable
+  // and the query's patterns (`graph: true`, utils/graphShape.ts).
+  const [lastRun, setLastRun] = useState<SparqlExecuteRequest | null>(null);
+  const loadGraph = useMemo(() => {
+    const token = state.connection.token;
+    if (lastRun === null || !token) return undefined;
+    // One graph run per query run, however often the Graph tab is opened.
+    let pending: Promise<SparqlExecuteResponse> | null = null;
+    return () => (pending ??= executeSparql({ ...lastRun, graph: true }, token));
+  }, [lastRun, state.connection.token]);
+
   const buildRequest = useCallback(() => {
     const p = paramsRef.current;
     return {
@@ -437,8 +450,10 @@ function Workbench() {
     if (!state.connection.token) return;
     if (!sparqlRef.current.trim()) return;
     dispatch({ type: "EXECUTE_START" });
+    setLastRun(null); // until this run answers, there is no run to draw
+    const req = buildRequest();
     try {
-      const resp = await executeSparql(buildRequest(), state.connection.token);
+      const resp = await executeSparql(req, state.connection.token);
       if (resp.aql) {
         dispatch({
           type: "TRANSLATE_SUCCESS",
@@ -454,6 +469,7 @@ function Workbench() {
         warnings: resp.warnings,
         execMs: resp.elapsed_ms ?? null,
       });
+      setLastRun(req); // the graph view draws this run, not whatever the editor holds now
       if (resp.aql) addToHistory(resp.aql);
     } catch (err) {
       dispatch({
@@ -481,6 +497,7 @@ function Workbench() {
       dispatch({ type: "EXECUTE_START" });
       try {
         const resp = await executeAql(aql, state.bindVars, state.connection.token);
+        setLastRun(null); // raw AQL has no patterns: the graph view draws the rows
         dispatch({
           type: "EXECUTE_SUCCESS",
           results: resp.results,
@@ -565,8 +582,10 @@ function Workbench() {
     if (!state.connection.token) return;
     if (!sparqlRef.current.trim()) return;
     dispatch({ type: "PROFILE_START" });
+    setLastRun(null);
+    const req = buildRequest();
     try {
-      const resp = await profileSparql(buildRequest(), state.connection.token);
+      const resp = await profileSparql(req, state.connection.token);
       dispatch({
         type: "PROFILE_SUCCESS",
         profile: resp.profile ?? {},
@@ -577,6 +596,7 @@ function Workbench() {
         translateMs: resp.translate_ms ?? null,
         execMs: resp.exec_ms ?? null,
       });
+      setLastRun(req); // its rows fill the Table and Graph tabs too
       addToHistory(resp.aql);
     } catch (err) {
       dispatch({
@@ -1258,6 +1278,7 @@ function Workbench() {
               execMs={state.execMs}
               explainPlan={state.explainPlan}
               profileData={state.profileData}
+              loadGraph={loadGraph}
             />
           </div>
         </div>

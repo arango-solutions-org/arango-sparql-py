@@ -43,6 +43,7 @@ from rdflib import OWL, RDF, RDFS, Graph, Literal, Namespace, URIRef
 from rdflib.collection import Collection
 
 from ..errors import SchemaResolutionError
+from .advisories import AdvisoryLog
 from .builder import parse_flag
 from .mapping import MappingError, property_field_path
 from .predicates import PredicateHandler
@@ -240,7 +241,7 @@ TRIPLE_STORE_IRI = "urn:arango-sparql:triple-store"
 
 
 @dataclass
-class SchemaResolver:
+class SchemaResolver(AdvisoryLog):
     """Resolve SPARQL IRIs against the loaded OWL ontology.
 
     The ontology is treated as immutable after load; if the schema can
@@ -417,6 +418,12 @@ class SchemaResolver:
     unmapped predicate ten times emits one advisory rather than ten.
     """
     _warned_keys: set[tuple[str, str]] = field(default_factory=set)
+    _entry_warnings: dict[tuple[str, str], list[dict[str, Any]]] = field(default_factory=dict)
+    """The advisories each cached resolution raised, by ``(kind, key)``, so a
+    cache hit reports them again (:meth:`_replay`): a translation reports
+    the advisories of every IRI it resolves, not only of the first one to
+    resolve it (#157)."""
+    _captures: list[list[dict[str, Any]]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         # Build the collection → family reverse index once. A
@@ -576,7 +583,13 @@ class SchemaResolver:
         key = str(iri)
         cached = self._class_cache.get(key)
         if cached is not None:
+            self._replay("class", key)
             return cached
+        with self._capture("class", key):
+            return self._resolve_class(iri)
+
+    def _resolve_class(self, iri: URIRef | str) -> ResolvedClass:
+        key = str(iri)
         ref = URIRef(key)
         if (ref, RDF.type, OWL.Class) not in self.ontology:
             if not self.permissive_class_resolution:
@@ -711,7 +724,13 @@ class SchemaResolver:
         key = str(iri)
         cached = self._property_cache.get(key)
         if cached is not None:
+            self._replay("property", key)
             return cached
+        with self._capture("property", key):
+            return self._resolve_property(iri)
+
+    def _resolve_property(self, iri: URIRef | str) -> ResolvedProperty:
+        key = str(iri)
         ref = URIRef(key)
         is_object = (ref, RDF.type, OWL.ObjectProperty) in self.ontology
         is_datatype = (ref, RDF.type, OWL.DatatypeProperty) in self.ontology
@@ -873,7 +892,13 @@ class SchemaResolver:
         row out).
         """
         if self._attribute_uri_map is not None:
+            self._replay("attribute_uri_map", "")
             return self._attribute_uri_map
+        with self._capture("attribute_uri_map", ""):
+            self._attribute_uri_map = self._build_attribute_uri_map()
+        return self._attribute_uri_map
+
+    def _build_attribute_uri_map(self) -> dict[str, str]:
         mapping: dict[str, str] = {}
         # ``key=str`` both satisfies the rdflib ``Node`` sort typing and
         # makes the collision rule explicit: lexically-smallest IRI wins.
@@ -900,7 +925,6 @@ class SchemaResolver:
                 )
                 continue
             mapping[attribute] = str(subject)
-        self._attribute_uri_map = mapping
         return mapping
 
     def domain_classes(self, property_iri: str) -> tuple[str, ...]:
@@ -1017,7 +1041,10 @@ class SchemaResolver:
         classes = sorted(
             (c for c in self.ontology.subjects(RDF.type, OWL.Class) if isinstance(c, URIRef)), key=str
         )
-        resolved = [self.resolve_class(c) for c in classes]
+        # A survey of every class, named by the query or not: its advisories
+        # are not this translation's (review of #161).
+        with self._quietly():
+            resolved = [self.resolve_class(c) for c in classes]
         if not resolved or any(r.style != "RPT" for r in resolved):
             return None
 
@@ -1082,6 +1109,58 @@ class SchemaResolver:
             self._tenant_scoped_classes = tuple(found)
         return tuple(c for c in self._tenant_scoped_classes if (c.style == "RPT") == rpt)
 
+    def described_sources(self) -> tuple[tuple[str, ...], tuple[ResolvedClass, ...]]:
+        """Where a constant IRI's triples can be, for ``DESCRIBE <iri>`` (#150):
+        the document collections and the triples-table (RPT) classes.
+
+        Every ``owl:Class`` is resolved as a type pattern resolves it, with
+        its fallbacks (a class with no ``phys:collectionName`` reads its
+        local-name collection; an RPT class its ``phys:triplesCollection``),
+        but quietly: its advisories and cache entries are not this
+        translation's, as in :meth:`tenant_scoped_classes`. Document
+        collections are each class's (a sharded one's whole family), plus
+        the default collection unless :attr:`strict_subject_resolution` is
+        on: the non-strict contract keeps an IRI no class places there, as an
+        untyped read assumes (not in a triple store, whose tables hold every
+        triple). Supertypes (``UNION``) have no collection of their own; a
+        class that does not resolve is read by nothing. Triples tables are
+        listed once per collection and column layout.
+        """
+        collections: set[str] = set()
+        tables: dict[tuple[str, ...], ResolvedClass] = {}
+        warnings, warned, cache = list(self.warnings), set(self._warned_keys), dict(self._class_cache)
+        try:
+            for cls in sorted(self.ontology.subjects(RDF.type, OWL.Class), key=str):
+                if not isinstance(cls, URIRef):
+                    continue
+                try:
+                    resolved = self.resolve_class(cls)
+                except SchemaResolutionError:
+                    continue
+                if resolved.style == "UNION" or not resolved.collection:
+                    continue
+                if resolved.style == "RPT":
+                    key = (
+                        resolved.collection,
+                        resolved.subject_column,
+                        resolved.predicate_column,
+                        resolved.object_uri_column,
+                        resolved.object_value_column,
+                    )
+                    tables.setdefault(key, resolved)
+                    continue
+                collections.update(resolved.shard_family or (resolved.collection,))
+        finally:
+            self.warnings[:] = warnings
+            self._warned_keys.clear()
+            self._warned_keys.update(warned)
+            self._class_cache.clear()
+            self._class_cache.update(cache)
+        # A triple store (only RPT classes) keeps every triple in its tables.
+        if not self.strict_subject_resolution and (collections or not tables):
+            collections.add(self.default_collection)
+        return tuple(sorted(collections)), tuple(tables[k] for k in sorted(tables))
+
     def edge_properties(self) -> tuple[ResolvedProperty, ...]:
         """Return edge-backed object properties in deterministic IRI order.
 
@@ -1109,21 +1188,6 @@ class SchemaResolver:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
-    def _warn_schema(self, *, code: str, message: str, iri: str, **extra: Any) -> None:
-        """Append a schema-mapping advisory, deduplicated by ``(code, iri)``.
-
-        Visitors call into the resolver once per triple, so a query like
-        ``?a :unknown ?b . ?c :unknown ?d`` would otherwise produce two
-        identical warnings. The ``_warned_keys`` guard collapses them
-        into one without losing information — operators see the
-        unmapped IRI exactly once per translate.
-        """
-        key = (code, iri)
-        if key in self._warned_keys:
-            return
-        self._warned_keys.add(key)
-        self.warnings.append({"code": code, "message": message, "iri": iri, **extra})
-
     def _physical_string(self, subject: URIRef, predicate_local: str) -> str | None:
         """Return the literal value of ``phys:<predicate_local>`` on
         ``subject``, regardless of which physical-IRI spelling the

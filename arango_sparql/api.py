@@ -100,21 +100,24 @@ def translate(
     """
     parsed = parse_sparql(sparql, values)
     builder = AqlQueryBuilder(seed_params=params or {})
-    visitor = AlgebraVisitor(
-        builder=builder,
-        resolver=resolver,
-        explicit_projection=parsed.explicit_projection,
-        describe_resources=parsed.describe_resources,
-        base_iri=parsed.base_iri,
-        tenant_id=tenant_id,
-        query_triples=collect_query_triples(parsed.algebra),
-    )
-    visitor.visit(parsed.algebra)
-    aql, bind_vars = builder.finalize()
+    # This translation's advisories only, even on a resolver reused across
+    # translations (#157).
+    with resolver.collecting_warnings() as resolver_warnings:
+        visitor = AlgebraVisitor(
+            builder=builder,
+            resolver=resolver,
+            explicit_projection=parsed.explicit_projection,
+            describe_resources=parsed.describe_resources,
+            base_iri=parsed.base_iri,
+            tenant_id=tenant_id,
+            query_triples=collect_query_triples(parsed.algebra),
+        )
+        visitor.visit(parsed.algebra)
+        aql, bind_vars = builder.finalize()
     # Merge resolver advisories ahead of builder advisories so the UI
     # renders schema-mapping issues first (operator usually fixes the
     # mapping, then the AQL warnings often disappear on their own).
-    combined_warnings: list[dict[str, Any]] = list(resolver.warnings) + list(builder.warnings)
+    combined_warnings: list[dict[str, Any]] = list(resolver_warnings) + list(builder.warnings)
     schema_warnings = [
         w for w in combined_warnings if str(w.get("code", "")).startswith(_SCHEMA_WARNING_CODE_PREFIX)
     ]
