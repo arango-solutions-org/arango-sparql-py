@@ -142,7 +142,12 @@ def _pipeline_for(
     # Under a governance control plane the session's schema is the project's ontology (PRD
     # §8.7): a question that brings no ontology of its own is asked in it.
     pinned = getattr(session, "project_mapping", None) if session is not None else None
-    resolver = _resolver_or_422(req, analyzer_bundle=pinned)
+    # Otherwise the database's analyzed schema, as /translate merges it: its
+    # physical mapping and the indexes behind W_SCHEMA_URI_INDEX_MISSING (#157).
+    from .sparql import _analyzer_bundle_for_session
+
+    bundle = pinned if pinned is not None else _analyzer_bundle_for_session(session)
+    resolver = _resolver_or_422(req, analyzer_bundle=bundle)
     return NlPipeline(
         client=client,
         resolver=resolver,

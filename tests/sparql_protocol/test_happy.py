@@ -110,6 +110,20 @@ def test_get_sparql_select_default_returns_results_json(client: TestClient, sess
     assert payload["results"]["bindings"][0]["x"]["type"] == "uri"
 
 
+def test_schema_warnings_count_the_translations_own(client: TestClient, session_token: str) -> None:
+    # ``ex:nickname`` is not in the mapping: resolving it while translating
+    # raises W_SCHEMA_UNMAPPED_IRI. The header counted the resolver's
+    # advisories before translation, so it said 0 (#157).
+    set_aql_rows(session_token, [])
+    resp = client.get(
+        "/sparql",
+        params={"query": "SELECT ?x ?n WHERE { ?x a <http://ex.org/Person> ; <http://ex.org/nickname> ?n }"},
+        headers={"X-Arango-Session": session_token},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.headers["X-Schema-Warnings-Count"] == "1"
+
+
 def test_select_observability_headers_are_stamped(client: TestClient, session_token: str) -> None:
     set_aql_rows(session_token, [{"x": "http://ex.org/A"}])
     resp = client.get(

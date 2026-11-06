@@ -34,7 +34,8 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
@@ -417,6 +418,12 @@ class SchemaResolver:
     unmapped predicate ten times emits one advisory rather than ten.
     """
     _warned_keys: set[tuple[str, str]] = field(default_factory=set)
+    _entry_warnings: dict[tuple[str, str], list[dict[str, Any]]] = field(default_factory=dict)
+    """The advisories each cached resolution raised, by ``(kind, key)``, so a
+    cache hit reports them again (:meth:`_replay`): a translation reports
+    the advisories of every IRI it resolves, not only of the first one to
+    resolve it (#157)."""
+    _captures: list[list[dict[str, Any]]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         # Build the collection → family reverse index once. A
@@ -576,7 +583,13 @@ class SchemaResolver:
         key = str(iri)
         cached = self._class_cache.get(key)
         if cached is not None:
+            self._replay("class", key)
             return cached
+        with self._capture("class", key):
+            return self._resolve_class(iri)
+
+    def _resolve_class(self, iri: URIRef | str) -> ResolvedClass:
+        key = str(iri)
         ref = URIRef(key)
         if (ref, RDF.type, OWL.Class) not in self.ontology:
             if not self.permissive_class_resolution:
@@ -711,7 +724,13 @@ class SchemaResolver:
         key = str(iri)
         cached = self._property_cache.get(key)
         if cached is not None:
+            self._replay("property", key)
             return cached
+        with self._capture("property", key):
+            return self._resolve_property(iri)
+
+    def _resolve_property(self, iri: URIRef | str) -> ResolvedProperty:
+        key = str(iri)
         ref = URIRef(key)
         is_object = (ref, RDF.type, OWL.ObjectProperty) in self.ontology
         is_datatype = (ref, RDF.type, OWL.DatatypeProperty) in self.ontology
@@ -873,7 +892,13 @@ class SchemaResolver:
         row out).
         """
         if self._attribute_uri_map is not None:
+            self._replay("attribute_uri_map", "")
             return self._attribute_uri_map
+        with self._capture("attribute_uri_map", ""):
+            self._attribute_uri_map = self._build_attribute_uri_map()
+        return self._attribute_uri_map
+
+    def _build_attribute_uri_map(self) -> dict[str, str]:
         mapping: dict[str, str] = {}
         # ``key=str`` both satisfies the rdflib ``Node`` sort typing and
         # makes the collision rule explicit: lexically-smallest IRI wins.
@@ -900,7 +925,6 @@ class SchemaResolver:
                 )
                 continue
             mapping[attribute] = str(subject)
-        self._attribute_uri_map = mapping
         return mapping
 
     def domain_classes(self, property_iri: str) -> tuple[str, ...]:
@@ -1118,11 +1142,58 @@ class SchemaResolver:
         into one without losing information — operators see the
         unmapped IRI exactly once per translate.
         """
-        key = (code, iri)
+        entry = {"code": code, "message": message, "iri": iri, **extra}
+        for captured in self._captures:
+            captured.append(entry)
+        self._record(entry)
+
+    def _record(self, entry: dict[str, Any]) -> None:
+        key = (entry["code"], entry["iri"])
         if key in self._warned_keys:
             return
         self._warned_keys.add(key)
-        self.warnings.append({"code": code, "message": message, "iri": iri, **extra})
+        self.warnings.append(entry)
+
+    @contextmanager
+    def _capture(self, kind: str, key: str) -> Iterator[None]:
+        """Remember the advisories a resolution raises with its cache entry."""
+        captured: list[dict[str, Any]] = []
+        self._captures.append(captured)
+        try:
+            yield
+        finally:
+            # Captures nest (a class resolving its properties): last in, first out.
+            self._captures.pop()
+            self._entry_warnings[(kind, key)] = captured
+
+    def _replay(self, kind: str, key: str) -> None:
+        """Report again the advisories a cached resolution raised."""
+        for entry in self._entry_warnings.get((kind, key), ()):
+            for captured in self._captures:
+                captured.append(entry)
+            self._record(entry)
+
+    @contextmanager
+    def collecting_warnings(self) -> Iterator[list[dict[str, Any]]]:
+        """Collect the advisories of one translation (#157).
+
+        Yields the list the translation's advisories go to, deduplicated
+        within it: those its own resolutions raise, cached ones included
+        (:meth:`_replay`). Before, a resolver reused across translations (a
+        library caller, the NL repair loop) reported every earlier
+        translation's advisories with each result, and none of a cached
+        IRI's. On exit they are merged into :attr:`warnings`, which still
+        accumulates for callers that read it directly.
+        """
+        outer, outer_keys = self.warnings, self._warned_keys
+        self.warnings, self._warned_keys = [], set()
+        try:
+            yield self.warnings
+        finally:
+            collected = self.warnings
+            self.warnings, self._warned_keys = outer, outer_keys
+            for entry in collected:
+                self._record(entry)
 
     def _physical_string(self, subject: URIRef, predicate_local: str) -> str | None:
         """Return the literal value of ``phys:<predicate_local>`` on

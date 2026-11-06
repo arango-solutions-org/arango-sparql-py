@@ -463,11 +463,12 @@ def _bearer_token(header_value: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _resolver_for_session(session: _Session) -> tuple[SchemaResolver, list[dict[str, Any]]]:
+def _resolver_for_session(session: _Session) -> SchemaResolver:
     """Acquire (or pull from cache) the :class:`MappingBundle` for
     *session*'s database and wrap it in a :class:`SchemaResolver`.
 
-    Returns ``(resolver, schema_warnings)``. A failed acquisition
+    The schema advisories are the translation's (``schema_warnings`` of its
+    result, #157): resolving the query's IRIs raises them. A failed acquisition
     raises ``HTTPException`` 503 with ``E_SCHEMA_UNAVAILABLE`` and
     a ``Retry-After: 30`` header — see PRD §5.2 row 5.
     """
@@ -523,8 +524,7 @@ def _resolver_for_session(session: _Session) -> tuple[SchemaResolver, list[dict[
             headers={"Retry-After": "30"},
         )
 
-    resolver = SchemaResolver.from_mapping_bundle(bundle)
-    return resolver, list(resolver.warnings)
+    return SchemaResolver.from_mapping_bundle(bundle)
 
 
 def _bundle_for_session(session: _Session):
@@ -819,7 +819,7 @@ def _execute_protocol_query(request: Request, query: str) -> Response:
         return _http_exception_to_flat_response(exc)
 
     try:
-        resolver, schema_warnings_initial = _resolver_for_session(session)
+        resolver = _resolver_for_session(session)
     except HTTPException as exc:
         return _http_exception_to_flat_response(exc)
 
@@ -833,6 +833,12 @@ def _execute_protocol_query(request: Request, query: str) -> Response:
     tenant_id = resolve_tenant_id(request)
     try:
         transpiled = _translate(query, resolver=resolver, tenant_id=tenant_id)
+        if transpiled.schema_warnings:
+            # A protocol client gets only the count header: log what they were.
+            logger.info(
+                "protocol query schema warnings: %s",
+                ", ".join(f"{w.get('code')} {w.get('iri')}" for w in transpiled.schema_warnings),
+            )
     except CrossTenantJoinError as exc:
         log_endpoint_timing(
             "/sparql",
@@ -955,7 +961,7 @@ def _execute_protocol_query(request: Request, query: str) -> Response:
     _add_observability_headers(
         response,
         elapsed_ms=elapsed_ms,
-        schema_warnings=len(schema_warnings_initial),
+        schema_warnings=len(transpiled.schema_warnings),
         bindings=len(bindings),
         aql=transpiled.aql,
         show_aql=_show_aql_param(request),
