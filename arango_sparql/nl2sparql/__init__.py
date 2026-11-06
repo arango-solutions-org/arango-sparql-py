@@ -50,7 +50,10 @@ illustrative SPARQL invariants ship in
 (:class:`~arango_sparql.nl2sparql.postconditions.RequireResultLimit`,
 :class:`~arango_sparql.nl2sparql.postconditions.ForbidUnboundProjection`). That
 submodule is imported explicitly (not re-exported here) so this package stays
-import-safe without the ``nl`` extra — same discipline as the adapter.
+import-safe without the ``nl`` extra — same discipline as the adapter. The
+same holds for :mod:`arango_sparql.nl2sparql.values`: the opt-in, soft
+:class:`~arango_sparql.nl2sparql.values.ValueCheck` and its values prompt
+section, which catch a filter value the data never holds.
 
 See ``.cursor/rules/300-nl2sparql.mdc``.
 """
