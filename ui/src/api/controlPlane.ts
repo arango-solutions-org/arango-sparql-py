@@ -20,6 +20,9 @@ export const controlPlane = {
   on: false,
   /** Where a user opens the project from (the control plane's own page). */
   home: "/",
+  /** This tool's id as the server verifies contexts for it (its `TOOL_ID`), read from
+   * `/control-plane/mode`: a context is issued for one tool, so renewal asks for this one. */
+  tool: null as string | null,
 };
 
 export type ControlPlaneStart = "off" | "no-context" | "ready";
@@ -97,9 +100,6 @@ export function adoptContext(): string | null {
   return contextToken();
 }
 
-/** This tool's id, as the control plane registers it: a context is issued for one tool. */
-const TOOL = "query";
-
 /** Renew the context two minutes before it expires, through the control plane's own
  * endpoint on this address (its session cookie is sent there, never to this tool). It asks
  * for this tool again: a control plane that issues a context per tool names it in the
@@ -118,7 +118,7 @@ export function scheduleRenewal(now: () => number = Date.now): void {
           method: "POST",
           credentials: "same-origin",
           headers: { "Content-Type": "application/json", "X-Control-Plane": "1" },
-          body: JSON.stringify({ project, tool: TOOL }),
+          body: JSON.stringify({ project, tool: controlPlane.tool }),
         });
         const body = res.ok ? ((await res.json()) as { token?: string }) : {};
         if (body.token) {
@@ -143,9 +143,12 @@ export async function startControlPlane(apiBase: string): Promise<ControlPlaneSt
   try {
     // Bounded: a request that hangs must not leave the page on its loading screen.
     const res = await fetch(apiBase + "/control-plane/mode", { signal: AbortSignal.timeout(MODE_TIMEOUT_MS) });
-    const body = res.ok ? ((await res.json()) as { control_plane?: boolean; home?: string | null }) : {};
+    const body = res.ok
+      ? ((await res.json()) as { control_plane?: boolean; home?: string | null; tool?: string | null })
+      : {};
     controlPlane.on = !!body.control_plane;
     controlPlane.home = body.home || "/";
+    controlPlane.tool = body.tool ?? null;
   } catch {
     controlPlane.on = false;
   }
