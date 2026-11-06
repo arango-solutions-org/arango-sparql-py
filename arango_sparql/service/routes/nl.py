@@ -80,26 +80,23 @@ def _llm_client_factory() -> Any:
     return get_default_client()
 
 
-def _schema_summary_for(req: Any, session: _Session | None) -> str:
-    """Classes + data properties from the connected database's analyzer
-    mapping, for the NL prompt (``nl2sparql/schema_summary.py``).
+def _schema_summary_for(req: Any, bundle: Any | None) -> str:
+    """Classes + data properties from the session's schema (*bundle*, the
+    analyzer mapping or a pinned project mapping), for the NL prompt
+    (``nl2sparql/schema_summary.py``).
 
-    Cache-only: uses the bundle the Workbench already loaded via
-    ``/schema/introspect`` and never waits for an analysis (a miss starts a
-    background one and the prompt simply has no summary yet). Rendered only
-    when the request's ontology (or the bundle's own OWL) names the default
-    ``:`` namespace the terms must be written in. Never fails the request:
-    the summary is an enrichment.
+    Cache-only: *bundle* is what the Workbench already loaded via
+    ``/schema/introspect``, never waited for (a miss starts a background
+    analysis and the prompt simply has no summary yet). Rendered only when
+    the request's ontology (or the bundle's own OWL) names the default ``:``
+    namespace the terms must be written in. Never fails the request: the
+    summary is an enrichment.
     """
-    if session is None:
+    if bundle is None:
         return ""
     try:
         from ...nl2sparql.schema_summary import build_schema_summary, default_namespace
-        from .sparql import _analyzer_bundle_for_session
 
-        bundle = _analyzer_bundle_for_session(session)
-        if bundle is None:
-            return ""
         namespace = default_namespace(getattr(req, "ontology_ttl", None), getattr(bundle, "owl_turtle", None))
         if not namespace:
             return ""
@@ -138,17 +135,22 @@ def _pipeline_for(
             },
         )
     from ...nl2sparql import NlPipeline
+    from .sparql import _analyzer_bundle_for_session
 
-    # Under a governance control plane the session's schema is the project's ontology (PRD
-    # §8.7): a question that brings no ontology of its own is asked in it.
+    # The session's schema, read once, as /translate merges it (#157): under a
+    # governance control plane the project's ontology, scoped to the session's
+    # graph (PRD §8.7), else the database's analysis, with its physical
+    # mapping and the indexes behind W_SCHEMA_URI_INDEX_MISSING.
+    bundle = _analyzer_bundle_for_session(session)
+    resolver = _resolver_or_422(req, analyzer_bundle=bundle)
+    # A question that brings no ontology of its own is asked in the project's.
     pinned = getattr(session, "project_mapping", None) if session is not None else None
-    resolver = _resolver_or_422(req, analyzer_bundle=pinned)
     return NlPipeline(
         client=client,
         resolver=resolver,
         ontology_ttl=getattr(req, "ontology_ttl", None) or getattr(pinned, "owl_turtle", None) or "",
         max_repairs=max_repairs,
-        schema_summary=_schema_summary_for(req, session),
+        schema_summary=_schema_summary_for(req, bundle),
     )
 
 

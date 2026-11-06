@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient
 
 from arango_sparql.nl2sparql.prompt import PromptBuilder
 from arango_sparql.nl2sparql.schema_summary import MAX_PROPS, build_schema_summary, default_namespace
+from arango_sparql.translate.mapping import MappingBundle, MappingSource
 
 NS = "http://arangodb.com/schema/hybrid#"
 
@@ -53,7 +54,10 @@ def _bundle(**over):
         }
     }
     cs.update(over.pop("cs", {}))
-    return SimpleNamespace(conceptual_schema=cs, physical_mapping=pm, owl_turtle=None, **over)
+    # A real bundle: the NL route also merges it into the resolver (#157).
+    return MappingBundle(
+        conceptual_schema=cs, physical_mapping=pm, source=MappingSource(kind="analyzer"), **over
+    )
 
 
 def test_lists_each_class_with_its_properties_as_prefixed_names() -> None:

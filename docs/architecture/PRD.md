@@ -649,9 +649,11 @@ routes the subject (`translate/visitor.py`):
   "analyzer"`) or a CSI the schema analyzer wrote in reverse. A hand-written
   ontology or mapping, or a forward-produced CSI, records no indexes, so
   nothing is reported. The message says to refresh the cached analysis
-  (`/schema/introspect?force=true`) after adding the index. The NL routes
-  build their resolver without the analysis and the SPARQL Protocol route
-  counts warnings before translating, so neither reports it yet. Even with the index, a union read with
+  (`/schema/introspect?force=true`) after adding the index. Every route that
+  translates reports it: `/translate`, `/execute`, `/explain`, `/profile`,
+  the NL routes (which merge the session's analysis, as `/translate` does,
+  #157) and the SPARQL Protocol route (its `X-Schema-Warnings-Count` counts
+  the translation's schema advisories, which it also logs). Even with the index, a union read with
   nothing else to narrow it pays a check per later-member row (2 × 100k:
   0.16 s against 0.03 s without the check; 0.09 s on `_id`-only data,
   where the guard alone runs). Known limit: an OPTIONAL attribute held by
@@ -1371,7 +1373,18 @@ When the resolver can do the right thing but the operator probably wants
 to know, it emits a `W_SCHEMA_*` advisory rather than throwing. Surfaced
 via `TranslateResponse.schema_warnings` (separate from operational
 `warnings`) so the UI can render them in a dedicated "schema-mapping
-advisories" panel.
+advisories" panel. A result carries the advisories of its own
+translation, once each, whether the resolver is new or reused
+(`SchemaResolver.collecting_warnings`): a resolution served from the
+resolver's cache reports its advisories again, and an earlier
+translation's do not carry over (#157). A survey of the whole ontology (`triple_store_class`) reports
+nothing: its advisories concern classes the query may not name, and a class
+the query names reports its own. `SchemaResolver.warnings` still
+accumulates for callers that read it directly. A resolver is not
+thread-safe (`translate/advisories.py`): the service, the NL pipeline and
+the eval harness build one per request or per pipeline. The SPARQL Protocol
+route's `X-Schema-Warnings-Count` is the count of the translation's
+`W_SCHEMA_*` advisories.
 
 | Code | Trigger |
 | --- | --- |

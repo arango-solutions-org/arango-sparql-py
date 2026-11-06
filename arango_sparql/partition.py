@@ -143,16 +143,17 @@ def translate_partition(
 
     key_vars = [k.lstrip("?") for k in canonical_keys]
     builder = AqlQueryBuilder()
-    visitor = AlgebraVisitor(
-        builder=builder,
-        resolver=resolver,
-        explicit_projection=parsed.explicit_projection,
-        base_iri=parsed.base_iri,
-        tenant_id=tenant_id,
-        extra_projection=key_vars,
-    )
-    visitor.visit(parsed.algebra)
-    aql, bind_vars = builder.finalize()
+    with resolver.collecting_warnings() as resolver_warnings:  # this translation's only (#157)
+        visitor = AlgebraVisitor(
+            builder=builder,
+            resolver=resolver,
+            explicit_projection=parsed.explicit_projection,
+            base_iri=parsed.base_iri,
+            tenant_id=tenant_id,
+            extra_projection=key_vars,
+        )
+        visitor.visit(parsed.algebra)
+        aql, bind_vars = builder.finalize()
 
     if parsed.explicit_projection is not None:
         projected = [str(v) for v in parsed.explicit_projection]
@@ -163,7 +164,7 @@ def translate_partition(
         if key_var not in projected:
             projected.append(key_var)
 
-    combined_warnings: list[dict[str, Any]] = list(resolver.warnings) + list(builder.warnings)
+    combined_warnings: list[dict[str, Any]] = list(resolver_warnings) + list(builder.warnings)
     return PartitionResult(
         aql=aql,
         bind_vars=bind_vars,
