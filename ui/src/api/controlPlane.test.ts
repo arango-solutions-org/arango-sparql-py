@@ -63,6 +63,7 @@ beforeEach(() => {
   });
   controlPlane.on = false;
   controlPlane.home = "/";
+  controlPlane.tool = null;
   __resetForTest();
 });
 
@@ -121,9 +122,9 @@ describe("startControlPlane", () => {
   });
 
   it("is ready with a context, and says where to open it from without one", async () => {
-    mode({ control_plane: true, home: "/projects" });
+    mode({ control_plane: true, home: "/projects", tool: "query" });
     expect(await startControlPlane("/query")).toBe("ready");
-    expect(controlPlane).toEqual({ on: true, home: "/projects" });
+    expect(controlPlane).toEqual({ on: true, home: "/projects", tool: "query" });
     // A new tab: its own storage and a fresh page.
     session = new MemoryStorage();
     __resetForTest();
@@ -136,6 +137,7 @@ describe("renewal", () => {
   it("asks the control plane for a new context two minutes before expiry and keeps it", async () => {
     vi.useFakeTimers();
     const now = 1_000_000_000_000;
+    controlPlane.tool = "query";
     session.setItem("arango-sparql.context", token("library", now / 1000 + 600));
     const renewed = token("library", now / 1000 + 1200);
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({ token: renewed })));
@@ -149,12 +151,31 @@ describe("renewal", () => {
       expect.objectContaining({
         method: "POST",
         credentials: "same-origin",
-        body: JSON.stringify({ project: "library" }),
+        body: JSON.stringify({ project: "library", tool: "query" }),
         headers: expect.objectContaining({ "X-Control-Plane": "1" }),
       }),
     );
     expect(contextToken()).toBe(renewed);
     expect(contextHeaders()).toEqual({ Authorization: `Bearer ${renewed}` });
+  });
+  it("asks for the tool the server verifies, as /control-plane/mode names it", async () => {
+    // The id is written once, on the server (`TOOL_ID`): a page that kept its own copy would
+    // renew for the old id after a rename, and every renewal would be refused.
+    const now = 1_000_000_000_000;
+    vi.useFakeTimers({ now });
+    address = `http://localhost/query/?ctx=${token("library", now / 1000 + 600)}`;
+    const calls: Array<[string, RequestInit | undefined]> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        calls.push([url, init]);
+        return new Response(JSON.stringify({ control_plane: true, home: "/", tool: "sparql-tab" }));
+      }),
+    );
+    expect(await startControlPlane("/query")).toBe("ready");
+    await vi.advanceTimersByTimeAsync(480_000);
+    const renewal = calls.find(([url]) => url === "/api/context");
+    expect(renewal?.[1]?.body).toBe(JSON.stringify({ project: "library", tool: "sparql-tab" }));
   });
 });
 

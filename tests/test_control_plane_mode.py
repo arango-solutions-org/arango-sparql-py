@@ -54,6 +54,9 @@ class _FakeControlPlane:
         self.mapping_rejects = False
         self.mapping_reads = 0
         self.mapping_attempts = 0
+        #: Questions recorded in the project's history, as the control plane received them.
+        self.recorded: list[dict[str, Any]] = []
+        self.recording_down = False
 
     def verify(self, token: str) -> control_plane.Identity:
         if self.unavailable:
@@ -77,6 +80,20 @@ class _FakeControlPlane:
         self.mapping_reads += 1
         return self.mappings.get(identity.project)
 
+    def record_question(self, token: str, *, question: str | None, query: str, database: str) -> None:
+        if self.recording_down:
+            raise control_plane.QuestionNotRecorded("control plane answered 503")
+        who = self.tokens[token]
+        self.recorded.append(
+            {
+                "principal": who.principal,
+                "project": who.project,
+                "question": question,
+                "query": query,
+                "database": database,
+            }
+        )
+
 
 class _FakeDb:
     #: Every call that would change the database, from any test's sessions.
@@ -84,6 +101,11 @@ class _FakeDb:
 
     def __init__(self, name: str) -> None:
         self.name = name
+        self.aql = self
+
+    def execute(self, aql: str, bind_vars: Any = None, **_: Any) -> Any:
+        """A query's answer: one member's name (the rows' content is not what is tested)."""
+        return iter([{"n": "Ada Lovelace"}])
 
     def has_collection(self, name: str) -> bool:
         return True
@@ -231,7 +253,9 @@ def test_a_refused_route_is_refused_under_a_path_prefix(governed) -> None:
 def test_open_routes_need_no_context(governed, client) -> None:
     assert client.get("/health").status_code == 200
     body = client.get("/control-plane/mode").json()
-    assert body == {"control_plane": True, "home": "/"}
+    # `tool` is the id the SDK verifies contexts for: the page renews for exactly that tool.
+    assert body == {"control_plane": True, "home": "/", "tool": control_plane.TOOL_ID}
+    assert body["tool"] == "query"
 
 
 def test_a_served_route_needs_a_context(governed, client) -> None:
@@ -634,7 +658,11 @@ def test_the_mode_needs_a_tenant_a_source_and_the_sdk(monkeypatch) -> None:
 
 def test_without_a_control_plane_nothing_changes(monkeypatch, client) -> None:
     monkeypatch.delenv("CONTROL_PLANE_URL", raising=False)
-    assert client.get("/control-plane/mode").json() == {"control_plane": False, "home": None}
+    assert client.get("/control-plane/mode").json() == {
+        "control_plane": False,
+        "home": None,
+        "tool": None,
+    }
     assert client.get("/connect/defaults").status_code == 200
     assert client.get("/graphs").status_code == 401  # the tool's own session rule, as before
     assert client.get("/control-plane/context").status_code == 404
@@ -693,3 +721,257 @@ def test_the_sdk_adapter_maps_a_verified_context(monkeypatch) -> None:
         adapter.project_mapping("bad")
     with pytest.raises(control_plane.ContextUnavailable):
         adapter.project_mapping("down")
+
+
+# --- questions are recorded (FR-14.4 there) --------------------------------------------------
+
+ASK = "SELECT ?n WHERE { ?l a :Loan ; :borrowedBy ?m . ?m :fullName ?n }"
+
+
+def _ask(client: TestClient, path: str = "/execute", token: str = "tok-alice", **extra: Any) -> Any:
+    return client.post(path, json={**_sparql(ASK), **extra}, headers=_bearer(token))
+
+
+def _generate(client: TestClient, words: str, token: str = "tok-alice") -> str:
+    """Ask *words* in plain English (``/nl-translate``, the page's generate step); the
+    SPARQL generated for them, which is :data:`ASK`."""
+    from arango_sparql.nl2sparql.client import LLMResponse, ScriptedLLMClient
+    from arango_sparql.service.routes.nl import _llm_client_factory
+
+    llm = ScriptedLLMClient(
+        [LLMResponse(content=_sparql(ASK)["sparql"], prompt_tokens=1, completion_tokens=1, total_tokens=2)],
+        latency_ms=0,
+    )
+    app.dependency_overrides[_llm_client_factory] = lambda: llm
+    try:
+        r = client.post("/nl-translate", json={"nl": words}, headers=_bearer(token))
+    finally:
+        app.dependency_overrides.pop(_llm_client_factory, None)
+    assert r.status_code == 200, r.text
+    assert r.json()["sparql"] == _sparql(ASK)["sparql"]
+    return str(r.json()["sparql"])
+
+
+def test_a_question_is_recorded_before_it_is_answered(governed, client) -> None:
+    governed.mappings["library"] = LIBRARY_MAPPING
+    _generate(client, "Who borrowed a book?")
+    r = _ask(client, question="Who borrowed a book?")
+    assert r.status_code == 200, r.text
+    assert r.json()["bindings"] == [{"n": "Ada Lovelace"}]
+    assert governed.recorded == [
+        {
+            "principal": "alice",
+            "project": "library",
+            "question": "Who borrowed a book?",
+            "query": _sparql(ASK)["sparql"],
+            "database": "library",
+        }
+    ]
+    r = _ask(client, token="tok-bob")  # written, not asked in words: no question
+    assert r.status_code == 200 and governed.recorded[-1]["question"] is None
+    assert governed.recorded[-1]["principal"] == "bob"
+
+
+def test_a_question_that_cannot_be_recorded_is_not_answered(governed, client) -> None:
+    governed.mappings["library"] = LIBRARY_MAPPING
+    governed.recording_down = True
+    for path in ("/execute", "/profile"):
+        r = _ask(client, path)
+        assert r.status_code == 503 and r.json()["detail"]["code"] == "E_QUESTION_NOT_RECORDED"
+        assert "Ada" not in r.text
+    r = client.get("/sparql", params={"query": _sparql(ASK)["sparql"]}, headers=_bearer("tok-alice"))
+    assert r.status_code == 503 and "Ada" not in r.text
+    governed.recording_down = False
+    assert _ask(client).status_code == 200  # positive control
+
+
+def test_every_route_that_runs_a_query_records_it(governed, client) -> None:
+    governed.mappings["library"] = LIBRARY_MAPPING
+    _generate(client, "Who?")
+    assert _ask(client, "/profile", question="Who?").status_code == 200
+    r = client.post(
+        "/sparql",
+        content=_sparql(ASK)["sparql"],
+        headers={
+            **_bearer("tok-alice"),
+            "Content-Type": "application/sparql-query",
+            "Accept": "application/sparql-results+json",
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert [q["question"] for q in governed.recorded] == ["Who?", None]
+    # In plain English: the question's own words, with the SPARQL generated for it.
+    from arango_sparql.nl2sparql.client import LLMResponse, ScriptedLLMClient
+    from arango_sparql.service.routes.nl import _llm_client_factory
+
+    answer = _sparql(ASK)["sparql"]
+    llm = ScriptedLLMClient(
+        [LLMResponse(content=answer, prompt_tokens=1, completion_tokens=1, total_tokens=2)], latency_ms=0
+    )
+    app.dependency_overrides[_llm_client_factory] = lambda: llm
+    try:
+        r = client.post("/nl-execute", json={"nl": "who borrowed"}, headers=_bearer("tok-alice"))
+    finally:
+        app.dependency_overrides.pop(_llm_client_factory, None)
+    assert r.status_code == 200, r.text
+    assert governed.recorded[-1]["question"] == "who borrowed"
+    assert governed.recorded[-1]["query"] == r.json()["sparql"]
+    # Translating runs nothing, and records nothing.
+    assert _ask(client, "/translate").status_code == 200
+    assert len(governed.recorded) == 3
+
+
+def test_the_graph_run_of_a_question_just_asked_is_not_recorded_twice(governed, client) -> None:
+    governed.mappings["library"] = LIBRARY_MAPPING
+    _generate(client, "Who?")
+    _generate(client, "Who else?")
+    assert _ask(client, question="Who?").status_code == 200
+    assert _ask(client, question="Who?", graph=True).status_code == 200
+    assert len(governed.recorded) == 1
+    # A graph run of a question this session did not just ask is a question: recorded.
+    assert _ask(client, question="Who else?", graph=True).status_code == 200
+    assert [q["question"] for q in governed.recorded] == ["Who?", "Who else?"]
+    # Asking the same question again (not the graph view) is recorded again.
+    assert _ask(client, question="Who?").status_code == 200
+    assert len(governed.recorded) == 3
+
+
+def test_a_recorded_graph_run_carries_the_sparql_that_ran(governed, client) -> None:
+    """The graph view widens the projection before running it; when that run is recorded,
+    the history holds the widened query that produced the rows, not the narrower one asked."""
+    from arango_sparql.translate.graph_shape import widen_projection
+
+    governed.mappings["library"] = LIBRARY_MAPPING
+    asked = _sparql(ASK)["sparql"]
+    widened = widen_projection(asked)
+    assert widened is not None and widened != asked  # the fixture's query is one that widens
+    assert _ask(client, graph=True).status_code == 200
+    assert governed.recorded[-1]["query"] == widened
+    # A plain run of the same query records it as written.
+    assert _ask(client).status_code == 200
+    assert governed.recorded[-1]["query"] == asked
+
+
+def test_a_graph_run_is_recorded_again_after_a_while(governed, client, monkeypatch) -> None:
+    from arango_sparql.service import recording
+
+    governed.mappings["library"] = LIBRARY_MAPPING
+    now = [1000.0]
+    monkeypatch.setattr(recording.time, "monotonic", lambda: now[0])
+    _generate(client, "Who?")
+    _ask(client, question="Who?")
+    now[0] += recording.AGAIN_SECONDS - 1
+    _ask(client, question="Who?", graph=True)
+    assert len(governed.recorded) == 1
+    now[0] += 2
+    _ask(client, question="Who?", graph=True)
+    assert len(governed.recorded) == 2
+
+
+def test_words_the_session_did_not_generate_are_not_recorded(governed, client) -> None:
+    """The words are recorded only for a query this session generated from them, run
+    unedited: a caller cannot label a query with words it was not asked in."""
+    governed.mappings["library"] = LIBRARY_MAPPING
+    for path in ("/execute", "/profile"):
+        assert _ask(client, path, question="How many books are on loan?").status_code == 200
+        assert governed.recorded[-1]["question"] is None
+    sparql = _generate(client, "Who borrowed a book?")
+    edited = sparql.replace("?n }", "?n } LIMIT 1")
+    r = client.post(
+        "/execute", json={"sparql": edited, "question": "Who borrowed a book?"}, headers=_bearer("tok-alice")
+    )
+    assert r.status_code == 200 and governed.recorded[-1]["question"] is None
+    # Another user's generated words are not this session's.
+    assert _ask(client, token="tok-bob", question="Who borrowed a book?").status_code == 200
+    assert governed.recorded[-1]["question"] is None
+    # Positive control: the generated query, unedited, with its words.
+    assert _ask(client, question="Who borrowed a book?").status_code == 200
+    assert governed.recorded[-1]["question"] == "Who borrowed a book?"
+
+
+def test_a_session_remembers_only_its_latest_generated_questions(governed, client) -> None:
+    from arango_sparql.service import recording
+
+    governed.mappings["library"] = LIBRARY_MAPPING
+    sparql = _generate(client, "first")
+    session = next(s for s in _sessions.values() if s.token.startswith("control-plane:"))
+    for i in range(recording.GENERATED_KEPT):  # directly: the NL rate limit bounds the route
+        recording.remember_generated(session, question=f"later {i}", query=sparql)
+    assert len(session.generated_questions) == recording.GENERATED_KEPT
+    assert _ask(client, question="first").status_code == 200
+    assert governed.recorded[-1]["question"] is None
+    assert _ask(client, question=f"later {recording.GENERATED_KEPT - 1}").status_code == 200
+    assert governed.recorded[-1]["question"] == f"later {recording.GENERATED_KEPT - 1}"
+
+
+def test_outside_a_control_plane_nothing_is_recorded(monkeypatch) -> None:
+    monkeypatch.delenv("CONTROL_PLANE_URL", raising=False)
+
+    def refuse() -> Any:
+        raise AssertionError("no control plane to record with")
+
+    monkeypatch.setattr(control_plane, "get", refuse)
+    control_plane.record_question({}, question="Who?", query="SELECT * {}")
+
+
+def test_the_sdk_adapter_records_a_question(monkeypatch) -> None:
+    sdk = types.ModuleType("control_plane_sdk")
+
+    class ControlPlaneError(Exception):
+        pass
+
+    sent: list[dict[str, Any]] = []
+
+    class ControlPlane:
+        def __init__(self, url: str, tool: str) -> None:
+            self.tool = tool
+
+        def verify(self, token: str) -> Any:
+            if token == "bad":
+                raise ControlPlaneError("rejected")
+            return types.SimpleNamespace(policy_version=7)
+
+        def record(self, verified: Any, **event: Any) -> None:
+            sent.append(event)
+
+    for name in ("Action", "Target", "Asked"):
+        setattr(sdk, name, lambda *a, _n=name: (_n, *a))
+    sdk.Decision = types.SimpleNamespace(permitted=lambda policy_version: ("permitted", policy_version))  # type: ignore[attr-defined]
+    sdk.ControlPlaneError, sdk.Unavailable, sdk.ControlPlane = (
+        ControlPlaneError,
+        ControlPlaneError,
+        ControlPlane,
+    )  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "control_plane_sdk", sdk)
+    adapter = control_plane._Sdk("http://control-plane:8000/api")
+    adapter.record_question("good", question="Who?", query="SELECT * {}", database="library")
+    assert sent == [
+        {
+            "action": ("Action", "query.use"),
+            "target": ("Target", "library"),
+            "asked": ("Asked", "SELECT * {}", "Who?"),
+            "decision": ("permitted", "7"),
+        }
+    ]
+    with pytest.raises(control_plane.QuestionNotRecorded):
+        adapter.record_question("bad", question=None, query="SELECT * {}", database="library")
+    del sdk.Asked  # an SDK from before questions were recorded
+    with pytest.raises(control_plane.QuestionNotRecorded, match="upgrade"):
+        adapter.record_question("good", question=None, query="SELECT * {}", database="library")
+
+
+def test_the_image_build_checks_every_sdk_name_the_adapter_uses() -> None:
+    """An image built against an SDK that lacks a name the adapter uses (``Asked``, before
+    questions were recorded) would start and then refuse every question; its build fails
+    instead (``control-plane.Dockerfile``)."""
+    import inspect
+    import re
+    from pathlib import Path
+
+    used = set(re.findall(r"\b(?:self\._sdk|sdk)\.([A-Z]\w*)", inspect.getsource(control_plane._Sdk)))
+    assert {"ControlPlane", "Asked"} <= used  # the scan sees the adapter's names
+    dockerfile = (Path(__file__).resolve().parents[1] / "control-plane.Dockerfile").read_text()
+    checks = re.findall(r'python -c "from control_plane_sdk import ([^"]+)"', dockerfile)
+    assert checks, "the build imports the SDK's names, not only the module"
+    imported = {name.strip() for name in checks[0].split(",")}
+    assert used <= imported, f"the build does not check {sorted(used - imported)}"

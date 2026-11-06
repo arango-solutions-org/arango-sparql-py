@@ -326,7 +326,7 @@ that already speak our shape.
 | `POST` | `/schema/force-reacquire` | session + rate-limited | Re-run analyzer (bypass cache); 503 if `SCHEMA_ANALYZER_REQUIRED=false` (no analyzer installed) and `ARANGO_SPARQL_ALLOW_HEURISTIC=false` (heuristic fallback also disabled) — see §6.3.4 |
 | `POST` | `/mapping/import-owl` | session + rate-limited | Replace the active mapping with one parsed from a posted OWL/Turtle ontology |
 | `POST` | `/mapping/export-owl` | session + rate-limited | Render the active mapping as `text/turtle` |
-| `GET`  | `/control-plane/mode` | none | Whether the service runs under a governance control plane, and where a user opens it from — see §8.7 |
+| `GET`  | `/control-plane/mode` | none | Whether the service runs under a governance control plane, where a user opens it from, and the tool id its contexts are verified for — see §8.7 |
 | `GET`  | `/control-plane/context` | control-plane context | Under a control plane: who the tab's context is for, its project, and the database it queries; 404 otherwise — see §8.7 |
 
 Every error response is a 422 with `{"error": "...", "code": "E_..."}`. Error
@@ -2018,8 +2018,11 @@ applies and the service is unchanged.
 - **The UI.** It asks `/control-plane/mode` first. In this mode it takes `?ctx=` into
   `sessionStorage` for the tab, removes it from the address bar, sends it on every call,
   renews it two minutes before expiry through the control plane's `POST /api/context` on the
-  same address, retrying every 15 seconds while the token is valid. A browser that refuses
-  storage keeps the context for the page load. The editor, ontology, history and dismissed
+  same address, asking for this tool again since a context is issued for one tool, and
+  retrying every 15 seconds while the token is valid. The tool id (`query`) is the server's
+  `TOOL_ID`, the one its contexts are verified for; `/control-plane/mode` returns it as `tool`,
+  so the page never keeps its own copy. A browser that refuses storage keeps
+  the context for the page load. The editor, ontology, history and dismissed
   schema warnings are kept in `sessionStorage` under the context's project, so a tab given a
   context for another project starts clean. There is no
   connect dialog: the bar shows the project, the user and the database. Opened without a
@@ -2038,8 +2041,20 @@ applies and the service is unchanged.
   nothing to rebuild; a forced re-analysis keeps it. A project with no such mapping, or one
   that maps no class, is introspected as without a control plane. If the mapping cannot be read, a
   session that has one keeps it, and one that has none answers 503.
-- **Not yet:** choosing among several databases; recording questions in the project's
-  history.
+- **Questions are recorded.** Each question that runs (`/execute`, `/profile`, `/nl-execute`,
+  `/sparql`) is recorded in the project's history through the SDK's `record` with `asked`:
+  who asked comes from the context; the event carries the SPARQL that ran and, when the query
+  was generated from plain English and run unedited, the question's words (the UI sends them as
+  `question` on `/execute` and `/profile`; `/nl-execute` has its own). The service vouches for
+  the words, not the caller: they are recorded only when this session's `/nl-translate`
+  generated that query from them (the last 64 kept); other words are dropped and the query is
+  recorded as written. It is recorded after the query runs and before the answer is returned,
+  and a question that cannot be recorded is not answered (503 `E_QUESTION_NOT_RECORDED`, no rows). The graph view's run (`graph: true`) of
+  a question the session recorded in the last ten minutes is the same question and is not
+  recorded again; any other graph run is, and its event carries the widened SPARQL that
+  produced its rows (`service/recording.py`). Translating and explaining
+  run nothing and record nothing.
+- **Not yet:** choosing among several databases.
 
 ---
 

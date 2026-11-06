@@ -78,6 +78,9 @@ export interface SparqlExecuteRequest {
   sparql: string;
   /** Run for the graph view: every variable in the query's patterns, and the patterns. */
   graph?: boolean;
+  /** The words the query was generated from, when it runs as generated: under a control
+   * plane, recorded in the project's history with the query. */
+  question?: string;
   ontology_ttl?: string;
   params?: Record<string, unknown>;
   database?: string;

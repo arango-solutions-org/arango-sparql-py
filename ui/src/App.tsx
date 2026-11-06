@@ -56,6 +56,7 @@ import {
   isBusy as pipelineBusy,
 } from "./utils/pipeline";
 import { resultAffordances, type AffordanceId } from "./utils/affordances";
+import { questionFor, type AskedQuestion } from "./utils/askedQuestion";
 import { examplesForGraph, mergeSuggestions, type MinedExample } from "./utils/minedExamples";
 
 // App.tsx implements the chat-first "Query Workbench Shell" (PRD §10.0),
@@ -211,6 +212,9 @@ function Workbench() {
   sparqlRef.current = state.sparql;
   const ontologyRef = useRef(state.ontologyTtl);
   ontologyRef.current = state.ontologyTtl;
+  // The last plain-English question and the SPARQL generated from it: a run of that SPARQL,
+  // unedited, carries the question's words (recorded with it under a control plane).
+  const askedRef = useRef<AskedQuestion | null>(null);
 
   // Schema-derived "Ask" suggestions (POST /nl-samples). Re-fetched only
   // when the schema source actually changes — keyed on (url, db,
@@ -318,6 +322,7 @@ function Workbench() {
       sparql: sparqlRef.current,
       ontology_ttl: ontologyRef.current || undefined,
       params: Object.keys(p).length > 0 ? p : undefined,
+      question: questionFor(askedRef.current, sparqlRef.current),
     };
   }, []);
 
@@ -646,6 +651,7 @@ function Workbench() {
         // Keep the ref in lock-step with the reducer so a chained
         // execute() in handleSend sees the just-generated query.
         sparqlRef.current = resp.sparql;
+        askedRef.current = { question: q, sparql: resp.sparql };
         if (resp.sparql.trim()) {
           dispatch({
             type: "ADD_HISTORY",

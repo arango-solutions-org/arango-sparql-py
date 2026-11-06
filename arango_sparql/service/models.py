@@ -153,6 +153,9 @@ class SparqlExecuteRequest(BaseModel):
     # and the response carries the patterns (``graph``), so the entities behind the rows and
     # how they connect can be drawn (``translate/graph_shape.py``).
     graph: bool = False
+    # The words the query was asked in, when it was generated from a question (``/nl-translate``)
+    # and run as generated: under a control plane it is recorded with the query (FR-14.4).
+    question: str | None = Field(default=None, min_length=1, max_length=4000)
 
 
 class GraphShape(BaseModel):
