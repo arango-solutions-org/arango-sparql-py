@@ -554,10 +554,10 @@ class AlgebraVisitor:
         if len(described) == 1:
             self.builder.return_triples_subquery(described[0])
         else:
-            # Multiple described resources in one query: APPEND the
-            # sub-lists so each binding row still produces a single
-            # flat list of triples the route layer can hydrate.
-            payload = "APPEND(" + ", ".join(described) + ")"
+            # Multiple described resources in one query: one flat list per
+            # binding row. ``APPEND(a, b, c)`` read ``c`` as its *unique*
+            # flag and dropped the third resource's triples (#150).
+            payload = "FLATTEN([" + ", ".join(f"({d})" for d in described) + "])"
             self.builder.return_triples_subquery(payload)
 
     def _describe_variable_subquery(self, var: Variable) -> str:
@@ -587,20 +587,98 @@ class AlgebraVisitor:
         return self._describe_pg_attributes_subquery(alias)
 
     def _describe_uri_subquery(self, uri: URIRef) -> str:
-        """Return the AQL sub-FOR that expands ``<iri>`` into triples
-        in the context of an already-open WHERE-derived FOR.
-
-        Opens a FOR over the default collection FILTERed by ``_uri ==
-        <bind>`` so the URI is interpreted as a PG-style document. We
-        deliberately reuse :meth:`_describe_pg_attributes_subquery` so
-        the bind-vars / clause shape are identical to the variable
-        path — easier to test and less code drift.
+        """Return the AQL that expands ``<iri>`` into triples in the context
+        of an already-open WHERE-derived FOR: :meth:`_describe_constants`,
+        a self-contained sub-query, so the WHERE's rows are not multiplied.
         """
 
-        alias = self._open_collection(self.resolver.default_collection)
-        bind = self.builder.bind(str(uri), hint="uri")
-        self.builder.filter_raw(subject_matches(alias, bind))
-        return self._describe_pg_attributes_subquery(alias)
+        return self._describe_constants([uri])
+
+    def _describe_constants(self, uris: list[Any]) -> str:
+        """Return an AQL expression for the list of every triple about the
+        constant IRIs *uris*, wherever the mapping can store them (#150).
+
+        Read the default collection only, they failed with "collection not
+        found" in a mapping without one (the service's: strict subject
+        resolution), and missed every IRI a class places elsewhere. Now:
+
+        * documents, from every document collection
+          (:meth:`SchemaResolver.described_sources`) at once, matched on
+          their IRI in each collection's ``_uri`` index, held to the tenant
+          as a document no class opened is (:meth:`_tenant_test`), and
+          fanned out into their attributes as ``DESCRIBE ?s`` does;
+        * triples tables (RPT), scanned on their subject column, under their
+          class's tenant filter.
+
+        A copy of an IRI in two collections describes both; the renderer
+        reads the triples into one graph, so a shared one comes back once.
+        """
+        if not all(isinstance(u, URIRef) for u in uris):
+            raise UnsupportedSparqlError("DESCRIBE without WHERE takes IRIs only")
+        collections, tables = self.resolver.described_sources()
+        if not collections and not tables:
+            raise SchemaResolutionError(
+                f"cannot DESCRIBE {', '.join(str(u) for u in uris)}: the mapping places no "
+                f"class in a collection, and strict subject resolution is enabled (no "
+                f"default-collection fallback)"
+            )
+        values = "[" + ", ".join(self.builder.bind(str(u), hint="uri") for u in uris) + "]"
+        indexes = self.resolver.uri_indexes
+        parts: list[str] = []
+        if collections:
+            child = self.builder.create_child()
+
+            def scan(builder: AqlQueryBuilder, collection: str) -> str:
+                # Each collection's ``_uri`` index serves the match; the
+                # active named-graph scope applies as a type pattern's does.
+                alias = builder.fresh_alias()
+                builder.for_(alias, collection)
+                builder.filter_raw(subject_in(alias, values))
+                scope = self._graph_scope_test(alias)
+                if scope is not None:
+                    builder.filter_raw(scope)
+                if indexes is not None and indexes.scanned(collection, [collection]):
+                    self.resolver.warn_unindexed_uri(collection)
+                return alias
+
+            if len(collections) == 1:
+                doc = scan(child, collections[0])
+            else:
+                arms: list[str] = []
+                for collection in collections:
+                    arm = child.create_child()
+                    arm.return_scalar(scan(arm, collection))
+                    arms.append(child.absorb_child(arm))
+                # After the arms, so the row's alias is not one of theirs.
+                doc = child.fresh_alias()
+                child.for_union(doc, arms, scans_documents=True)
+            tenant = self._tenant_test(doc, builder=child)
+            if tenant is not None:
+                child.filter_raw(tenant)
+            child.return_scalar(f"({self._describe_pg_attributes_subquery(doc)})")
+            parts.append(self.builder.absorb_child(child))
+        for table in tables:
+            # A table a tenant-scoped RPT class uses is refused, whichever
+            # class reads it (PRD §6.5.1), as every other read of it is.
+            self._refuse_tenant_scoped_triples(table.collection)
+            child = self.builder.create_child()
+            row = child.fresh_alias(prefix="d")
+            child.for_(row, table.collection)
+            child.filter_raw(f"{attribute_ref(row, table.subject_column)} IN {values}")
+            scope = self._graph_scope_test(row)
+            if scope is not None:
+                child.filter_raw(scope)
+            child.return_scalar(
+                f"{{subject: {attribute_ref(row, table.subject_column)}, "
+                f"predicate: {attribute_ref(row, table.predicate_column)}, "
+                f"object: NOT_NULL({attribute_ref(row, table.object_uri_column)}, "
+                f"{attribute_ref(row, table.object_value_column)})}}"
+            )
+            parts.append(f"[({self.builder.absorb_child(child)})]")
+        # A document part is one triple list per document, a table part one
+        # list of triples (wrapped once more): FLATTEN to depth 2 yields the
+        # triples, whatever the mix.
+        return "FLATTEN([" + ", ".join(f"({p})" for p in parts) + "], 2)"
 
     def _describe_pg_attributes_subquery(self, alias: str) -> str:
         """Return ``(FOR k IN ATTRIBUTES(<alias>) FILTER k NOT IN [<sys>]
@@ -653,27 +731,16 @@ class AlgebraVisitor:
         )
 
     def _emit_describe_bare(self, resources: list[Any]) -> None:
-        """Emit AQL for ``DESCRIBE <iri> [<iri> ...]`` (no WHERE).
+        """Emit AQL for ``DESCRIBE <iri> [<iri> ...]`` (no WHERE): one row,
+        the triples of every described IRI wherever the mapping stores them
+        (:meth:`_describe_constants`, #150)."""
 
-        v1 strategy: open ONE FOR over the resolver's
-        :attr:`~SchemaResolver.default_collection` and FILTER ``_uri
-        IN [...]`` against every described IRI. This favours PG/LPG
-        deployments — the dominant case for Protégé-style
-        ``DESCRIBE <Person123>`` queries.
-
-        Pure-RPT deployments where the default collection is the
-        triples store will currently produce a one-row-per-attribute
-        result that the renderer flattens correctly *only when* the
-        triples collection happens to be named via
-        ``defaultCollection``. The cleaner RPT-bare-DESCRIBE path is
-        tracked under PRD §6.6 as a v1.1 enhancement.
-        """
-
-        alias = self._open_collection(self.resolver.default_collection)
-        iri_binds = [self.builder.bind(str(r), hint="uri") for r in resources]
-        self.builder.filter_raw(subject_in(alias, f"[{', '.join(iri_binds)}]"))
-        subquery = self._describe_pg_attributes_subquery(alias)
-        self.builder.return_triples_subquery(subquery)
+        payload = self._describe_constants(resources)
+        # One result row per triple, so the row count and the result-row cap
+        # count triples, as one row per document did before.
+        triple = self.builder.fresh_alias(prefix="t")
+        self.builder.for_inline(triple, payload)
+        self.builder.return_triples_subquery(f"[{triple}]")
 
     def visit_Project(self, node: Any) -> Any:
         # Prefer the explicit declaration order captured upstream from

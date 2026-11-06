@@ -663,6 +663,29 @@ routes the subject (`translate/visitor.py`):
   `owl_export` write for a shared property) means any of the classes, like
   an `owl:unionOf`: routing, lookups and walks read all of them
   (`SchemaResolver.class_list`, issue #122).
+- **A described constant** (`DESCRIBE <iri>`, alone or beside a WHERE) is
+  read wherever the mapping can store it (#150,
+  `SchemaResolver.described_sources`): every class's collection, resolved
+  as a type pattern resolves it (a class with no `phys:collectionName` its
+  local-name collection, an RPT class its `phys:triplesCollection`; a
+  sharded one's whole family), in one `UNION` matched on the IRI, plus the
+  default collection unless strict subject resolution is on (the non-strict
+  contract keeps an IRI no class places there; a triple store has none),
+  and every triples table on its subject column. Each read takes the active
+  named-graph scope, as a type pattern does. A document is held to the
+  tenant as a document a walk reaches is; a triples table a tenant-scoped
+  RPT class uses is refused (§6.5.1). A collection without a `_uri` index
+  is scanned per DESCRIBE, reported as `W_SCHEMA_URI_INDEX_MISSING` when the
+  analysis says so. Every collection a class resolves to must exist (its
+  `phys:collectionName`, or a fallback such as its local name or
+  `_triples`): one that does not fails the DESCRIBE (ERR 1203), as a type
+  pattern on that class does. The legacy service read the default collection only, which a
+  mapping without one (the service's) cannot: ArangoDB refused the query.
+  A bare DESCRIBE returns one row per triple, so the row count and the
+  result-row cap count triples. Beside a WHERE the description is a
+  sub-query, so it does not multiply the WHERE's rows; several described
+  terms are flattened into one list (`APPEND(a, b, c)` had read `c` as its
+  *unique* flag and dropped it).
 
 The union refuses, with `E_SPARQL_UNSUPPORTED`, classes that disagree on
 tenant scoping (one tenant filter cannot serve them) and sharded classes.
@@ -1202,7 +1225,7 @@ FOR doc1 IN @@coll_Person
 
 **Documents a walk reaches are scoped too** (issue #118). An edge's far
 vertex, the source of a backward walk, a document read from the default
-collection (a subject no class places, DESCRIBE), and the endpoints of a
+collection (a subject no class places), a described constant (§6.1), and the endpoints of a
 relationship node read on its own (D8, `DOCUMENT(k._from)` /
 `DOCUMENT(k._to)`) are not opened by their class, so no class applies its
 filter there. Each such document gets one test per tenant field, keyed by
@@ -1397,7 +1420,7 @@ route's `X-Schema-Warnings-Count` is the count of the translation's
 | `W_SCHEMA_LOW_CONFIDENCE` | `metadata.confidence < 0.5`; the operator should review the mapping before relying on it for a production workload. |
 | `W_SCHEMA_DRIFT_STATS` | `/schema/status` detected a counts-fingerprint change since last refresh. Cardinality-aware planning may be stale. |
 | `W_SCHEMA_DRIFT_SHAPE` | `/schema/status` detected a shape-fingerprint change since last refresh. The mapping itself is stale; a re-acquire is recommended. |
-| `W_SCHEMA_URI_INDEX_MISSING` | A union read checks a later member's rows for a copy in an earlier member by `_uri` (§6.1, #124), and the schema analysis shows that member has no persistent, hash or skiplist index whose first field is `_uri`, so the check scans it once per row. Names the collection; add the index, then refresh the analysis. Reported only from a mapping that lists indexes (the service's analysis, or an analyzer-written reverse CSI). |
+| `W_SCHEMA_URI_INDEX_MISSING` | A union read checks a later member's rows for a copy in an earlier member by `_uri` (§6.1, #124), or a `DESCRIBE <iri>` looks the IRI up in a collection (§6.1, #150), and the schema analysis shows that collection has no persistent, hash or skiplist index whose first field is `_uri`, so it is scanned once per row or per DESCRIBE. Names the collection; add the index, then refresh the analysis. Reported only from a mapping that lists indexes (the service's analysis, or an analyzer-written reverse CSI). |
 
 ### 6.8 ArangoDB named-graph scoping (collection down-select)
 
