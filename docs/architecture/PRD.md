@@ -2041,8 +2041,20 @@ applies and the service is unchanged.
   nothing to rebuild; a forced re-analysis keeps it. A project with no such mapping, or one
   that maps no class, is introspected as without a control plane. If the mapping cannot be read, a
   session that has one keeps it, and one that has none answers 503.
-- **Not yet:** choosing among several databases; recording questions in the project's
-  history.
+- **Questions are recorded.** Each question that runs (`/execute`, `/profile`, `/nl-execute`,
+  `/sparql`) is recorded in the project's history through the SDK's `record` with `asked`:
+  who asked comes from the context; the event carries the SPARQL that ran and, when the query
+  was generated from plain English and run unedited, the question's words (the UI sends them as
+  `question` on `/execute` and `/profile`; `/nl-execute` has its own). The service vouches for
+  the words, not the caller: they are recorded only when this session's `/nl-translate`
+  generated that query from them (the last 64 kept); other words are dropped and the query is
+  recorded as written. It is recorded after the query runs and before the answer is returned,
+  and a question that cannot be recorded is not answered (503 `E_QUESTION_NOT_RECORDED`, no rows). The graph view's run (`graph: true`) of
+  a question the session recorded in the last ten minutes is the same question and is not
+  recorded again; any other graph run is, and its event carries the widened SPARQL that
+  produced its rows (`service/recording.py`). Translating and explaining
+  run nothing and record nothing.
+- **Not yet:** choosing among several databases.
 
 ---
 

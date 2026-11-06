@@ -92,6 +92,7 @@ from ..protocol.results import render_ask, render_select
 from ..protocol.results_rdf import render_construct
 from ..protocol.service_description import render_service_description
 from ..protocol.update_detect import is_sparql_update
+from ..recording import record_question
 from ..security import (
     _check_compute_rate_limit,
     _control_plane_session,
@@ -931,6 +932,12 @@ def _execute_protocol_query(request: Request, query: str) -> Response:
                 },
             )
         raise
+
+    # Under a control plane, the question is recorded before it is answered (recording.py).
+    try:
+        record_question(request, session, query=query)
+    except HTTPException as exc:
+        return _http_exception_to_flat_response(exc)
 
     # 7) Render the response body in the negotiated media type.
     # SELECT/ASK go through the tabular renderer; CONSTRUCT/DESCRIBE

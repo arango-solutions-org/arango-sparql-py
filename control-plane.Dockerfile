@@ -45,8 +45,9 @@ RUN python -m venv /venv \
 RUN --mount=type=bind,from=control_plane_sdk,target=/sdk \
     if [ -f /sdk/pyproject.toml ]; then /venv/bin/pip install --no-cache-dir /sdk; \
     else echo "missing --build-context control_plane_sdk=<control plane repo>/sdk/python" >&2; exit 1; fi
-# The service would refuse to start without the SDK: fail here instead.
-RUN /venv/bin/python -c "import control_plane_sdk"
+# The service would refuse to start without the SDK, and to answer any question with one that
+# lacks a name the adapter uses (`Asked` records questions): fail here instead.
+RUN /venv/bin/python -c "from control_plane_sdk import Action, Asked, ControlPlane, ControlPlaneError, Decision, Target, Unavailable"
 
 # ---- runtime ---------------------------------------------------------
 FROM python:3.12-slim
