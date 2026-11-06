@@ -47,6 +47,7 @@ _DOCS: dict[str, list[dict[str, Any]]] = {
         {"_key": "s", "_uri": "http://ex.org/s", "tenant": "A", "name": "S", "age": 3},
         {"_key": "t", "_uri": "http://ex.org/t", "tenant": "A", "name": "T"},
         {"_key": "u", "_uri": "http://ex.org/u", "tenant": "B", "name": "U"},
+        {"_key": "g", "_uri": "http://ex.org/g", "_graph": "http://ex.org/g1", "tenant": "A", "name": "G"},
     ],
     "d150_Org": [{"_key": "s", "_uri": "http://ex.org/s", "name": "S", "size": 9}],
     "d150_triples": [{"subject_uri": "http://ex.org/r", "predicate": "http://ex.org/p", "object_value": "R"}],
@@ -77,10 +78,10 @@ def db() -> Iterator[Any]:
                 handle.delete_collection(name)
 
 
-def _describe(db: Any, query: str, tenant_id: str = "A") -> set[tuple[str, str, str]]:
+def _describe(db: Any, query: str, tenant_id: str = "A", **resolver_kwargs: Any) -> set[tuple[str, str, str]]:
     # The service's resolver: no default collection to fall back to.
     resolver = SchemaResolver(
-        ontology=Graph().parse(data=_TTL, format="turtle"), strict_subject_resolution=True
+        ontology=Graph().parse(data=_TTL, format="turtle"), strict_subject_resolution=True, **resolver_kwargs
     )
     result = translate("PREFIX : <http://ex.org/>\n" + query, resolver=resolver, tenant_id=tenant_id)
     rows = db.aql.execute(result.aql, bind_vars=result.bind_vars, max_runtime=15)
@@ -135,3 +136,10 @@ def test_a_constant_is_described_wherever_the_mapping_stores_it(
 
 def test_the_other_tenant_sees_only_its_own_documents(db: Any) -> None:
     assert _describe(db, "DESCRIBE :s", tenant_id="B") == {(S, "name", "S"), (S, "size", "9")}
+
+
+def test_a_strict_default_graph_does_not_describe_a_named_graph_copy(db: Any) -> None:
+    # Read as a type pattern reads, under the active graph scope (review of #163).
+    assert _describe(db, "DESCRIBE :g", default_graph_includes_named=False) == set()
+    described = _describe(db, "DESCRIBE :g")
+    assert ("http://ex.org/g", "name", "G") in described

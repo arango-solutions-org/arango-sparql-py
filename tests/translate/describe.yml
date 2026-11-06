@@ -62,8 +62,7 @@ cases:
     sparql: |
       DESCRIBE <http://ex.org/alice>
     expected_aql: |-
-      FOR row5 IN [1]
-      RETURN (FLATTEN([(FOR doc3 IN UNION(
+      FOR t5 IN FLATTEN([(FOR doc3 IN UNION(
       (
         FOR doc1 IN @@c1_Document
         FILTER (doc1._uri IN [@_p1_uri] || (doc1._uri == null && doc1._id IN [@_p1_uri]))
@@ -77,7 +76,8 @@ cases:
       )
       RETURN (FOR k IN ATTRIBUTES(doc3) FILTER k NOT IN ['_id', '_key', '_rev', '_uri', '_type'] RETURN {subject: NOT_NULL(doc3._uri, doc3._id), predicate: k, object: doc3[k]})), ([(FOR d4 IN @@c3_rdf_triples
       FILTER d4.subject_uri IN [@_p1_uri]
-      RETURN {subject: d4.subject_uri, predicate: d4.predicate, object: NOT_NULL(d4.object_uri, d4.object_value)})])], 2))
+      RETURN {subject: d4.subject_uri, predicate: d4.predicate, object: NOT_NULL(d4.object_uri, d4.object_value)})])], 2)
+      RETURN ([t5])
     expected_bind_vars:
       "@c1_Document": "Document"
       "@c2_Person": "Person"
@@ -94,8 +94,7 @@ cases:
     sparql: |
       DESCRIBE <http://ex.org/a> <http://ex.org/b>
     expected_aql: |-
-      FOR row5 IN [1]
-      RETURN (FLATTEN([(FOR doc3 IN UNION(
+      FOR t5 IN FLATTEN([(FOR doc3 IN UNION(
       (
         FOR doc1 IN @@c1_Document
         FILTER (doc1._uri IN [@_p1_uri, @_p2_uri] || (doc1._uri == null && doc1._id IN [@_p1_uri, @_p2_uri]))
@@ -109,7 +108,8 @@ cases:
       )
       RETURN (FOR k IN ATTRIBUTES(doc3) FILTER k NOT IN ['_id', '_key', '_rev', '_uri', '_type'] RETURN {subject: NOT_NULL(doc3._uri, doc3._id), predicate: k, object: doc3[k]})), ([(FOR d4 IN @@c3_rdf_triples
       FILTER d4.subject_uri IN [@_p1_uri, @_p2_uri]
-      RETURN {subject: d4.subject_uri, predicate: d4.predicate, object: NOT_NULL(d4.object_uri, d4.object_value)})])], 2))
+      RETURN {subject: d4.subject_uri, predicate: d4.predicate, object: NOT_NULL(d4.object_uri, d4.object_value)})])], 2)
+      RETURN ([t5])
     expected_bind_vars:
       "@c1_Document": "Document"
       "@c2_Person": "Person"

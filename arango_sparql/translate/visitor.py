@@ -623,21 +623,31 @@ class AlgebraVisitor:
                 f"default-collection fallback)"
             )
         values = "[" + ", ".join(self.builder.bind(str(u), hint="uri") for u in uris) + "]"
+        indexes = self.resolver.uri_indexes
         parts: list[str] = []
         if collections:
             child = self.builder.create_child()
+
+            def scan(builder: AqlQueryBuilder, collection: str) -> str:
+                # Each collection's ``_uri`` index serves the match; the
+                # active named-graph scope applies as a type pattern's does.
+                alias = builder.fresh_alias()
+                builder.for_(alias, collection)
+                builder.filter_raw(subject_in(alias, values))
+                scope = self._graph_scope_test(alias)
+                if scope is not None:
+                    builder.filter_raw(scope)
+                if indexes is not None and indexes.scanned(collection, [collection]):
+                    self.resolver.warn_unindexed_uri(collection)
+                return alias
+
             if len(collections) == 1:
-                doc = child.fresh_alias()
-                child.for_(doc, collections[0])
-                child.filter_raw(subject_in(doc, values))
+                doc = scan(child, collections[0])
             else:
                 arms: list[str] = []
                 for collection in collections:
                     arm = child.create_child()
-                    inner = arm.fresh_alias()
-                    arm.for_(inner, collection)
-                    arm.filter_raw(subject_in(inner, values))
-                    arm.return_scalar(inner)
+                    arm.return_scalar(scan(arm, collection))
                     arms.append(child.absorb_child(arm))
                 # After the arms, so the row's alias is not one of theirs.
                 doc = child.fresh_alias()
@@ -648,11 +658,16 @@ class AlgebraVisitor:
             child.return_scalar(f"({self._describe_pg_attributes_subquery(doc)})")
             parts.append(self.builder.absorb_child(child))
         for table in tables:
+            # A table a tenant-scoped RPT class uses is refused, whichever
+            # class reads it (PRD §6.5.1), as every other read of it is.
+            self._refuse_tenant_scoped_triples(table.collection)
             child = self.builder.create_child()
             row = child.fresh_alias(prefix="d")
             child.for_(row, table.collection)
             child.filter_raw(f"{attribute_ref(row, table.subject_column)} IN {values}")
-            self._enforce_tenant_scope(row, table, builder=child)
+            scope = self._graph_scope_test(row)
+            if scope is not None:
+                child.filter_raw(scope)
             child.return_scalar(
                 f"{{subject: {attribute_ref(row, table.subject_column)}, "
                 f"predicate: {attribute_ref(row, table.predicate_column)}, "
@@ -721,9 +736,11 @@ class AlgebraVisitor:
         (:meth:`_describe_constants`, #150)."""
 
         payload = self._describe_constants(resources)
-        # One result row, the whole description: the sub-queries carry the FORs.
-        self.builder.open_one_row_scope_first(self.builder.fresh_alias(prefix="row"))
-        self.builder.return_triples_subquery(payload)
+        # One result row per triple, so the row count and the result-row cap
+        # count triples, as one row per document did before.
+        triple = self.builder.fresh_alias(prefix="t")
+        self.builder.for_inline(triple, payload)
+        self.builder.return_triples_subquery(f"[{triple}]")
 
     def visit_Project(self, node: Any) -> Any:
         # Prefer the explicit declaration order captured upstream from

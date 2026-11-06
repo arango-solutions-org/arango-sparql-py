@@ -1086,47 +1086,49 @@ class SchemaResolver:
         """Where a constant IRI's triples can be, for ``DESCRIBE <iri>`` (#150):
         the document collections and the triples-table (RPT) classes.
 
-        Document collections are those an ``owl:Class`` names with
-        ``phys:collectionName`` (a sharded one's whole family), plus the
-        default collection unless :attr:`strict_subject_resolution` is on:
-        the non-strict contract keeps an IRI no class places there, as an
+        Every ``owl:Class`` is resolved as a type pattern resolves it, with
+        its fallbacks (a class with no ``phys:collectionName`` reads its
+        local-name collection; an RPT class its ``phys:triplesCollection``),
+        but quietly: its advisories and cache entries are not this
+        translation's, as in :meth:`tenant_scoped_classes`. Document
+        collections are each class's (a sharded one's whole family), plus
+        the default collection unless :attr:`strict_subject_resolution` is
+        on: the non-strict contract keeps an IRI no class places there, as an
         untyped read assumes (not in a triple store, whose tables hold every
-        triple). Supertypes (``UNION``) have no collection of
-        their own. Triples tables are listed once per collection and column
-        layout. Read from the ontology's annotations, so nothing is resolved,
-        cached or warned about.
+        triple). Supertypes (``UNION``) have no collection of their own; a
+        class that does not resolve is read by nothing. Triples tables are
+        listed once per collection and column layout.
         """
         collections: set[str] = set()
         tables: dict[tuple[str, ...], ResolvedClass] = {}
-        for cls in sorted(self.ontology.subjects(RDF.type, OWL.Class), key=str):
-            if not isinstance(cls, URIRef):
-                continue
-            collection = self._physical_string(cls, "collectionName")
-            style = self._physical_string(cls, "mappingStyle")
-            if not collection or style == "UNION":
-                continue
-            if style == "RPT":
-                table = ResolvedClass(
-                    iri=str(cls),
-                    collection=collection,
-                    style=style,
-                    subject_column=self._physical_string(cls, "subjectColumn") or "subject_uri",
-                    predicate_column=self._physical_string(cls, "predicateColumn") or "predicate",
-                    object_uri_column=self._physical_string(cls, "objectUriColumn") or "object_uri",
-                    object_value_column=self._physical_string(cls, "objectValueColumn") or "object_value",
-                    tenant_field=self._physical_string(cls, "tenantField"),
-                    tenant_entity=self._physical_string(cls, "tenantEntity"),
-                )
-                key = (
-                    collection,
-                    table.subject_column,
-                    table.predicate_column,
-                    table.object_uri_column,
-                    table.object_value_column,
-                )
-                tables.setdefault(key, table)
-                continue
-            collections.update(self._shard_family_by_collection.get(collection) or (collection,))
+        warnings, warned, cache = list(self.warnings), set(self._warned_keys), dict(self._class_cache)
+        try:
+            for cls in sorted(self.ontology.subjects(RDF.type, OWL.Class), key=str):
+                if not isinstance(cls, URIRef):
+                    continue
+                try:
+                    resolved = self.resolve_class(cls)
+                except SchemaResolutionError:
+                    continue
+                if resolved.style == "UNION" or not resolved.collection:
+                    continue
+                if resolved.style == "RPT":
+                    key = (
+                        resolved.collection,
+                        resolved.subject_column,
+                        resolved.predicate_column,
+                        resolved.object_uri_column,
+                        resolved.object_value_column,
+                    )
+                    tables.setdefault(key, resolved)
+                    continue
+                collections.update(resolved.shard_family or (resolved.collection,))
+        finally:
+            self.warnings[:] = warnings
+            self._warned_keys.clear()
+            self._warned_keys.update(warned)
+            self._class_cache.clear()
+            self._class_cache.update(cache)
         # A triple store (only RPT classes) keeps every triple in its tables.
         if not self.strict_subject_resolution and (collections or not tables):
             collections.add(self.default_collection)
