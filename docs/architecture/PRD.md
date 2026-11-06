@@ -2018,8 +2018,9 @@ applies and the service is unchanged.
 - **The UI.** It asks `/control-plane/mode` first. In this mode it takes `?ctx=` into
   `sessionStorage` for the tab, removes it from the address bar, sends it on every call,
   renews it two minutes before expiry through the control plane's `POST /api/context` on the
-  same address, retrying every 15 seconds while the token is valid. A browser that refuses
-  storage keeps the context for the page load. The editor, ontology, history and dismissed
+  same address, asking for this tool (`query`) again since a context is issued for one tool,
+  and retrying every 15 seconds while the token is valid. A browser that refuses storage keeps
+  the context for the page load. The editor, ontology, history and dismissed
   schema warnings are kept in `sessionStorage` under the context's project, so a tab given a
   context for another project starts clean. There is no
   connect dialog: the bar shows the project, the user and the database. Opened without a

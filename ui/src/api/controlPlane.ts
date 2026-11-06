@@ -97,8 +97,13 @@ export function adoptContext(): string | null {
   return contextToken();
 }
 
+/** This tool's id, as the control plane registers it: a context is issued for one tool. */
+const TOOL = "query";
+
 /** Renew the context two minutes before it expires, through the control plane's own
- * endpoint on this address (its session cookie is sent there, never to this tool). */
+ * endpoint on this address (its session cookie is sent there, never to this tool). It asks
+ * for this tool again: a control plane that issues a context per tool names it in the
+ * token, and refuses one for a tool the user's role may not use. */
 export function scheduleRenewal(now: () => number = Date.now): void {
   const claims = tokenClaims(contextToken());
   if (!claims?.exp || !claims.ctx?.project) return;
@@ -113,7 +118,7 @@ export function scheduleRenewal(now: () => number = Date.now): void {
           method: "POST",
           credentials: "same-origin",
           headers: { "Content-Type": "application/json", "X-Control-Plane": "1" },
-          body: JSON.stringify({ project }),
+          body: JSON.stringify({ project, tool: TOOL }),
         });
         const body = res.ok ? ((await res.json()) as { token?: string }) : {};
         if (body.token) {

@@ -149,7 +149,7 @@ describe("renewal", () => {
       expect.objectContaining({
         method: "POST",
         credentials: "same-origin",
-        body: JSON.stringify({ project: "library" }),
+        body: JSON.stringify({ project: "library", tool: "query" }),
         headers: expect.objectContaining({ "X-Control-Plane": "1" }),
       }),
     );
