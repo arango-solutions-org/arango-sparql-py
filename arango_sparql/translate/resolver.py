@@ -1082,6 +1082,56 @@ class SchemaResolver:
             self._tenant_scoped_classes = tuple(found)
         return tuple(c for c in self._tenant_scoped_classes if (c.style == "RPT") == rpt)
 
+    def described_sources(self) -> tuple[tuple[str, ...], tuple[ResolvedClass, ...]]:
+        """Where a constant IRI's triples can be, for ``DESCRIBE <iri>`` (#150):
+        the document collections and the triples-table (RPT) classes.
+
+        Document collections are those an ``owl:Class`` names with
+        ``phys:collectionName`` (a sharded one's whole family), plus the
+        default collection unless :attr:`strict_subject_resolution` is on:
+        the non-strict contract keeps an IRI no class places there, as an
+        untyped read assumes (not in a triple store, whose tables hold every
+        triple). Supertypes (``UNION``) have no collection of
+        their own. Triples tables are listed once per collection and column
+        layout. Read from the ontology's annotations, so nothing is resolved,
+        cached or warned about.
+        """
+        collections: set[str] = set()
+        tables: dict[tuple[str, ...], ResolvedClass] = {}
+        for cls in sorted(self.ontology.subjects(RDF.type, OWL.Class), key=str):
+            if not isinstance(cls, URIRef):
+                continue
+            collection = self._physical_string(cls, "collectionName")
+            style = self._physical_string(cls, "mappingStyle")
+            if not collection or style == "UNION":
+                continue
+            if style == "RPT":
+                table = ResolvedClass(
+                    iri=str(cls),
+                    collection=collection,
+                    style=style,
+                    subject_column=self._physical_string(cls, "subjectColumn") or "subject_uri",
+                    predicate_column=self._physical_string(cls, "predicateColumn") or "predicate",
+                    object_uri_column=self._physical_string(cls, "objectUriColumn") or "object_uri",
+                    object_value_column=self._physical_string(cls, "objectValueColumn") or "object_value",
+                    tenant_field=self._physical_string(cls, "tenantField"),
+                    tenant_entity=self._physical_string(cls, "tenantEntity"),
+                )
+                key = (
+                    collection,
+                    table.subject_column,
+                    table.predicate_column,
+                    table.object_uri_column,
+                    table.object_value_column,
+                )
+                tables.setdefault(key, table)
+                continue
+            collections.update(self._shard_family_by_collection.get(collection) or (collection,))
+        # A triple store (only RPT classes) keeps every triple in its tables.
+        if not self.strict_subject_resolution and (collections or not tables):
+            collections.add(self.default_collection)
+        return tuple(sorted(collections)), tuple(tables[k] for k in sorted(tables))
+
     def edge_properties(self) -> tuple[ResolvedProperty, ...]:
         """Return edge-backed object properties in deterministic IRI order.
 

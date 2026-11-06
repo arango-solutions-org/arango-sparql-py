@@ -15,8 +15,8 @@
 #   * ``DESCRIBE ?s WHERE { ... }`` — the dominant Protégé / YASGUI
 #     shape; the WHERE binds the focal variable.
 #   * ``DESCRIBE <iri> [<iri> ...]`` — bare describe of explicit URIs;
-#     v1 fallback opens a FOR over the resolver's default collection
-#     and filters by ``_uri IN [...]``.
+#     reads every collection the mapping can store them in (#150) and
+#     filters by ``_uri IN [...]``.
 #   * RPT-bound DESCRIBE — when the focal class declares
 #     ``phys:mappingStyle "RPT"``, the expander scans the triples
 #     table directly.
@@ -53,17 +53,35 @@ cases:
       "_p1_name": "Alice"
 
   - name: describe_bare_single_iri
-    # Bare DESCRIBE falls back to the resolver's default collection
-    # (here ``Document``). The legacy Foxx service had the same
-    # behaviour — see ``describe-query-helper.js#buildDescribeQuery``.
+    # Bare DESCRIBE reads every collection the mapping can store the IRI
+    # in (#150): each class's collection (``Person``), the default one
+    # (``Document``, not under strict subject resolution) and each
+    # triples table (``rdf_triples``). The legacy Foxx service read the
+    # default collection only (``describe-query-helper.js``), which a
+    # mapping without one cannot do.
     sparql: |
       DESCRIBE <http://ex.org/alice>
     expected_aql: |-
-      FOR doc1 IN @@c1_Document
-      FILTER (doc1._uri IN [@_p1_uri] || (doc1._uri == null && doc1._id IN [@_p1_uri]))
-      RETURN (FOR k IN ATTRIBUTES(doc1) FILTER k NOT IN ['_id', '_key', '_rev', '_uri', '_type'] RETURN {subject: NOT_NULL(doc1._uri, doc1._id), predicate: k, object: doc1[k]})
+      FOR row5 IN [1]
+      RETURN (FLATTEN([(FOR doc3 IN UNION(
+      (
+        FOR doc1 IN @@c1_Document
+        FILTER (doc1._uri IN [@_p1_uri] || (doc1._uri == null && doc1._id IN [@_p1_uri]))
+        RETURN doc1
+      ),
+      (
+        FOR doc2 IN @@c2_Person
+        FILTER (doc2._uri IN [@_p1_uri] || (doc2._uri == null && doc2._id IN [@_p1_uri]))
+        RETURN doc2
+      )
+      )
+      RETURN (FOR k IN ATTRIBUTES(doc3) FILTER k NOT IN ['_id', '_key', '_rev', '_uri', '_type'] RETURN {subject: NOT_NULL(doc3._uri, doc3._id), predicate: k, object: doc3[k]})), ([(FOR d4 IN @@c3_rdf_triples
+      FILTER d4.subject_uri IN [@_p1_uri]
+      RETURN {subject: d4.subject_uri, predicate: d4.predicate, object: NOT_NULL(d4.object_uri, d4.object_value)})])], 2))
     expected_bind_vars:
       "@c1_Document": "Document"
+      "@c2_Person": "Person"
+      "@c3_rdf_triples": "rdf_triples"
       "_p1_uri": "http://ex.org/alice"
 
   - name: describe_bare_multi_iri
@@ -76,11 +94,26 @@ cases:
     sparql: |
       DESCRIBE <http://ex.org/a> <http://ex.org/b>
     expected_aql: |-
-      FOR doc1 IN @@c1_Document
-      FILTER (doc1._uri IN [@_p1_uri, @_p2_uri] || (doc1._uri == null && doc1._id IN [@_p1_uri, @_p2_uri]))
-      RETURN (FOR k IN ATTRIBUTES(doc1) FILTER k NOT IN ['_id', '_key', '_rev', '_uri', '_type'] RETURN {subject: NOT_NULL(doc1._uri, doc1._id), predicate: k, object: doc1[k]})
+      FOR row5 IN [1]
+      RETURN (FLATTEN([(FOR doc3 IN UNION(
+      (
+        FOR doc1 IN @@c1_Document
+        FILTER (doc1._uri IN [@_p1_uri, @_p2_uri] || (doc1._uri == null && doc1._id IN [@_p1_uri, @_p2_uri]))
+        RETURN doc1
+      ),
+      (
+        FOR doc2 IN @@c2_Person
+        FILTER (doc2._uri IN [@_p1_uri, @_p2_uri] || (doc2._uri == null && doc2._id IN [@_p1_uri, @_p2_uri]))
+        RETURN doc2
+      )
+      )
+      RETURN (FOR k IN ATTRIBUTES(doc3) FILTER k NOT IN ['_id', '_key', '_rev', '_uri', '_type'] RETURN {subject: NOT_NULL(doc3._uri, doc3._id), predicate: k, object: doc3[k]})), ([(FOR d4 IN @@c3_rdf_triples
+      FILTER d4.subject_uri IN [@_p1_uri, @_p2_uri]
+      RETURN {subject: d4.subject_uri, predicate: d4.predicate, object: NOT_NULL(d4.object_uri, d4.object_value)})])], 2))
     expected_bind_vars:
       "@c1_Document": "Document"
+      "@c2_Person": "Person"
+      "@c3_rdf_triples": "rdf_triples"
       "_p1_uri": "http://ex.org/a"
       "_p2_uri": "http://ex.org/b"
 
