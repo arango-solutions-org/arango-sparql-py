@@ -37,6 +37,7 @@ from ..models import (
     ValidateResponse,
 )
 from ..observability import log_endpoint_timing
+from ..recording import record_question
 from ..security import (
     _check_compute_rate_limit,
     _get_optional_session,
@@ -309,6 +310,8 @@ def execute_endpoint(
             }
         )
 
+    # The graph view's run is the question just asked again (recording.py).
+    record_question(request, session, query=req.sparql, question=req.question, again=req.graph)
     log_endpoint_timing(
         "/execute",
         elapsed_ms,
@@ -540,6 +543,7 @@ def profile_endpoint(
             profile_data = getter
         exec_ms = round((time.perf_counter() - t_exec) * 1000, 1)
 
+    record_question(request, session, query=req.sparql, question=req.question)
     profile_dict: dict[str, Any] = (
         dict(profile_data)
         if profile_data is not None and not isinstance(profile_data, dict)

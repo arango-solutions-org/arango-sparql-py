@@ -21,7 +21,7 @@ import time
 from itertools import islice
 from typing import Any
 
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Request
 
 from ...errors import SparqlError
 from ..app import app
@@ -42,6 +42,7 @@ from ..observability import (
     log_endpoint_timing,
     log_llm_call,
 )
+from ..recording import record_question
 from ..security import (
     _check_compute_rate_limit,
     _check_nl_rate_limit,
@@ -390,6 +391,7 @@ def nl_explain_endpoint(
 @app.post("/nl-execute", response_model=NlExecuteResponse)
 def nl_execute_endpoint(
     req: NlExecuteRequest,
+    request: Request,
     _: None = Depends(_check_nl_rate_limit),
     __: None = Depends(_check_compute_rate_limit),
     session: _Session = Depends(_get_session),
@@ -413,6 +415,7 @@ def nl_execute_endpoint(
         bindings, truncated = _materialise_cursor(cursor, _MAX_RESULT_DOCS)
         exec_ms = int((time.perf_counter() - t_exec) * 1000)
 
+    record_question(request, session, query=outcome.sparql, question=req.nl)
     warnings = list(outcome.warnings or [])
     if truncated:
         warnings.append(

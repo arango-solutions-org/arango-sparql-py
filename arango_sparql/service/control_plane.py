@@ -14,7 +14,10 @@ short-lived context token for one user in one project, and the page sends it on 
   credential reaches); a context for another tenant is refused, and a binding on another
   source is never served from this one;
 * querying reads: a route that runs caller-written AQL, or shows or changes how the service
-  connects, is refused, and a route not classified below is refused until it is.
+  connects, is refused, and a route not classified below is refused until it is;
+* each question that runs is recorded in the project's history (:func:`record_question`):
+  who asked (from the context), the question's words when it was asked in words, and the
+  SPARQL it ran. A question that cannot be recorded is not answered.
 
 The control plane's SDK (``control_plane_sdk``) verifies the token, offline, against the
 control plane's published keys. It is imported only in this mode, so the service installs
@@ -111,6 +114,10 @@ class NoDatabase(Exception):  # noqa: N818
     """The project names no database this deployment can open."""
 
 
+class QuestionNotRecorded(Exception):  # noqa: N818
+    """The control plane did not record the question, so it is not answered."""
+
+
 @dataclass(frozen=True)
 class Identity:
     """Who a verified context is for, and the project's database bindings."""
@@ -134,6 +141,11 @@ class ControlPlane(Protocol):
         assembles it for the context's project: OWL in Turtle with ``phys:*`` annotations,
         or ``None`` when the project has none. Raises :class:`ContextRejected`, or
         :class:`ContextUnavailable` when it cannot be read now."""
+
+    def record_question(self, token: str, *, question: str | None, query: str, database: str) -> None:
+        """Record a question in the context's project history: its words (``None`` when the
+        query was written rather than asked in words), the query that ran, and the database
+        it ran on. Raises :class:`QuestionNotRecorded`."""
 
 
 def mode() -> bool:
@@ -246,6 +258,23 @@ class _Sdk:
         except self._sdk.ControlPlaneError as exc:
             raise ContextRejected(str(exc)) from exc
 
+    def record_question(self, token: str, *, question: str | None, query: str, database: str) -> None:
+        sdk = self._sdk
+        if not hasattr(sdk, "Asked"):
+            raise QuestionNotRecorded("this control plane SDK cannot record questions; upgrade it")
+        try:
+            verified = self._client.verify(token)
+            version = verified.policy_version
+            self._client.record(
+                verified,
+                action=sdk.Action("query.use"),
+                target=sdk.Target(database),
+                asked=sdk.Asked(query, question),
+                decision=sdk.Decision.permitted(policy_version=None if version is None else str(version)),
+            )
+        except sdk.ControlPlaneError as exc:
+            raise QuestionNotRecorded(str(exc)) from exc
+
 
 _instance: ControlPlane | None = None
 _lock = threading.Lock()
@@ -264,6 +293,21 @@ def set_instance(instance: ControlPlane | None) -> None:
     global _instance
     with _lock:
         _instance = instance
+
+
+def record_question(headers: Mapping[str, str], *, question: str | None, query: str) -> None:
+    """Record a question asked with the request's context, on the project's database here.
+    Raises :class:`QuestionNotRecorded`; outside this mode there is nothing to record."""
+    if not mode():
+        return
+    token = token_from(headers)
+    try:
+        identity = verify(headers)
+        _, database = database_for(identity)
+    except (ContextRejected, ContextUnavailable, NoDatabase) as exc:
+        raise QuestionNotRecorded(str(exc)) from exc
+    assert token is not None  # verify() refused a request without one
+    get().record_question(token, question=question, query=query, database=database)
 
 
 def verify(headers: Mapping[str, str]) -> Identity:
