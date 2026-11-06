@@ -1,6 +1,6 @@
 [project]
 name = "arango-sparql-py"
-version = "0.6.2"
+version = "0.7.0"
 description = "Python-native SPARQL 1.1 to AQL transpiler for ArangoDB."
 readme = "README.md"
 license = "MIT"
