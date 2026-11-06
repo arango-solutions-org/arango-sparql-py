@@ -14,6 +14,7 @@
 // samples, so the missing route is a swallowed 404 rather than a failure.
 
 import type { MinedExample } from "../utils/minedExamples";
+import type { GraphShape } from "../utils/graphShape";
 import {
   contextHeaders,
   controlPlane,
@@ -75,6 +76,8 @@ export interface TranslateResponse {
 // `_id`/`_from`/`_to` IRIs the same way it does in Cypher.
 export interface SparqlExecuteRequest {
   sparql: string;
+  /** Run for the graph view: every variable in the query's patterns, and the patterns. */
+  graph?: boolean;
   ontology_ttl?: string;
   params?: Record<string, unknown>;
   database?: string;
@@ -82,6 +85,8 @@ export interface SparqlExecuteRequest {
 
 export interface SparqlExecuteResponse {
   bindings: Array<Record<string, unknown>>;
+  /** Set on a graph run (`graph: true`): the query's patterns, to draw the rows with. */
+  graph?: GraphShape | null;
   warnings: Array<{ message: string }>;
   aql?: string | null;
   bind_vars?: Record<string, unknown> | null;

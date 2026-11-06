@@ -3,6 +3,7 @@ import cytoscape from "cytoscape";
 import type { Core, EventObject, NodeSingular } from "cytoscape";
 import { CATEGORICAL, graphPalette, type GraphPalette } from "../theme/graphPalette";
 import { useTheme } from "../theme/theme";
+import type { ShapedGraph } from "../utils/graphShape";
 
 // CytoscapeGraph — RDF-aware variant of the Cypher UI's CytoscapeGraph.
 //
@@ -56,6 +57,10 @@ export interface CyNode {
 
 interface Props {
   bindings: SparqlRow[];
+  /** The graph drawn from the query's own patterns (`utils/graphShape.ts`): which values are
+   * entities, how they connect, their labels and classes. Without it the rows are drawn by
+   * the shape heuristics below. */
+  shape?: ShapedGraph;
   onNodeClick?: (node: CyNode) => void;
   onBackgroundClick?: () => void;
 }
@@ -237,9 +242,23 @@ interface BuildResult {
   literalProps: Map<string, Array<{ predicate: string; value: unknown }>>;
 }
 
-function buildElements(triples: Triple[], collapseLiterals: boolean): BuildResult {
+interface BuildOptions {
+  /** Whether a value is drawn as a node; by default, an IRI. */
+  isNode?: (value: unknown) => value is string;
+  labels?: Map<string, string>;
+  /** A node's class: it colours the node, in place of its namespace. */
+  classes?: Map<string, string>;
+  /** Nodes drawn even with no triple of their own (an entity the rows give only a class). */
+  nodes?: Iterable<string>;
+}
+
+function buildElements(
+  triples: Triple[],
+  collapseLiterals: boolean,
+  { isNode = isIri, labels, classes, nodes }: BuildOptions = {},
+): BuildResult {
   // Subject IRIs and any IRI that appears as object should be a node.
-  const subjectIris = new Set<string>();
+  const subjectIris = new Set<string>(nodes ?? []);
   const literalNodes = new Map<string, { predicate: string; value: unknown }>();
   const literalProps = new Map<string, Array<{ predicate: string; value: unknown }>>();
   const collColors = new Map<string, string>();
@@ -247,14 +266,14 @@ function buildElements(triples: Triple[], collapseLiterals: boolean): BuildResul
 
   for (const t of triples) {
     subjectIris.add(t.s);
-    if (isIri(t.o)) subjectIris.add(t.o);
+    if (isNode(t.o)) subjectIris.add(t.o);
   }
 
   const colorFor = (iri: string): string => {
     // group by host or namespace prefix so nodes from the same
     // ontology share a colour family — matches the Cypher graph's
     // "collection → colour" intuition.
-    const ns = iri.replace(/[^/#]+$/, "");
+    const ns = classes?.get(iri) ?? iri.replace(/[^/#]+$/, "");
     if (!collColors.has(ns)) {
       collColors.set(ns, NODE_COLORS[colorIdx++ % NODE_COLORS.length]);
     }
@@ -267,7 +286,7 @@ function buildElements(triples: Triple[], collapseLiterals: boolean): BuildResul
     elements.push({
       data: {
         id: iri,
-        label: localName(iri),
+        label: labels?.get(iri) ?? (classes?.get(iri) ? `${classes.get(iri)} ${localName(iri)}` : localName(iri)),
         iri,
         color: colorFor(iri),
         kind: "iri",
@@ -277,7 +296,7 @@ function buildElements(triples: Triple[], collapseLiterals: boolean): BuildResul
 
   triples.forEach((t, idx) => {
     const predLabel = isIri(t.p) ? localName(t.p) : t.p;
-    if (isIri(t.o)) {
+    if (isNode(t.o)) {
       elements.push({
         data: {
           id: `e${idx}`,
@@ -343,6 +362,7 @@ const COSE_LAYOUT = {
 
 export default function CytoscapeGraph({
   bindings,
+  shape,
   onNodeClick,
   onBackgroundClick,
 }: Props) {
@@ -368,10 +388,22 @@ export default function CytoscapeGraph({
   // current at build time, and the restyle effect below keeps it fresh.
   const paletteRef = useRef(palette);
 
-  const triples = useMemo(() => extractTriples(bindings), [bindings]);
+  const triples = useMemo(() => shape?.triples ?? extractTriples(bindings), [bindings, shape]);
   const { elements } = useMemo(
-    () => buildElements(triples, collapseLiterals),
-    [triples, collapseLiterals],
+    () =>
+      buildElements(
+        triples,
+        collapseLiterals,
+        shape
+          ? {
+              isNode: (value: unknown): value is string => typeof value === "string" && shape.nodes.has(value),
+              labels: shape.labels,
+              classes: shape.classes,
+              nodes: shape.nodes,
+            }
+          : {},
+      ),
+    [triples, collapseLiterals, shape],
   );
 
   const showHover = useCallback((node: NodeSingular) => {
