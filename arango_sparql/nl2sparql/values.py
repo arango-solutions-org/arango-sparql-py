@@ -233,7 +233,8 @@ def _equalities(expr: object, depth: int = 0) -> list[tuple[Variable, Literal]]:
         for item in expr:
             out.extend(_equalities(item, depth + 1))
         return out
-    if not isinstance(expr, dict):
+    # ``!(?s = "x")`` means ``?s != "x"``, which is not a use either.
+    if not isinstance(expr, dict) or getattr(expr, "name", None) == "UnaryNot":
         return out
     if getattr(expr, "name", None) == "RelationalExpression" and expr.get("op") == "=":
         other = expr.get("other")
@@ -312,6 +313,16 @@ def _scope(node: object, depth: int = 0) -> _Scope:
             branch.resolve()
             scope.absorb(branch)
         return scope
+    if name == "Minus":
+        # MINUS shares no bindings with the pattern around it: its right side
+        # resolves its own filters and keeps only the uses it found, so a
+        # filter outside never matches a property bound only inside.
+        scope.absorb(_scope(node.get("p1"), depth + 1))
+        right = _scope(node.get("p2"), depth + 1)
+        right.resolve()
+        scope.uses.extend(right.uses)
+        scope.resolve()
+        return scope
     for key, child in node.items():
         if key in ("_vars", "expr"):
             continue
@@ -327,8 +338,9 @@ def sparql_literal_uses(query: str) -> list[tuple[str, str]]:
     ``query`` compares a property with: the object of a triple
     (``ex:p "x"``), an ``=`` in a ``FILTER`` with a variable that is the
     object of ``ex:p`` in the same or an enclosing group (either side), or a
-    ``VALUES`` row for such a variable. ``CONTAINS``, ``!=``, ``IN``,
-    ``EXISTS`` bodies and typed literals are not uses. A query that does not
+    ``VALUES`` row for such a variable. ``CONTAINS``, ``!=`` (or a negated
+    ``=``), ``IN``, ``EXISTS`` bodies, a filter outside a ``MINUS`` on a
+    variable bound only inside it, and typed literals are not uses. A query that does not
     parse gives ``[]`` (``validate`` is the authority on parseability)."""
     try:
         algebra = parse_sparql(query).algebra

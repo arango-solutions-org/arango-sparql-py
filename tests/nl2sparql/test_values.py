@@ -392,6 +392,27 @@ def test_exists_bodies_are_not_uses() -> None:
     assert sparql_literal_uses(q) == []
 
 
+def test_a_filter_outside_minus_is_not_matched_to_a_binding_inside_it() -> None:
+    # MINUS shares no bindings: the outer ?s is the segment, never the status.
+    q = _P + 'SELECT ?a WHERE { ?a ex:segment ?s MINUS { ?a ex:status ?s } FILTER(?s = "Growth") }'
+    assert sparql_literal_uses(q) == [("segment", "Growth")]
+    assert value_flags(q, by_property([STATUS])) == []
+
+
+def test_uses_inside_minus_still_count() -> None:
+    q = _P + 'SELECT ?a WHERE { ?a a ex:Account MINUS { ?a ex:status ?s FILTER(?s = "Active") } }'
+    assert sparql_literal_uses(q) == [("status", "Active")]
+
+
+def test_a_negated_equality_is_not_a_use_like_not_equals() -> None:
+    q = _P + 'SELECT ?a WHERE { ?a ex:status ?s FILTER(!(?s = "Frozen")) }'
+    assert sparql_literal_uses(q) == []
+    nested = (
+        _P + 'SELECT ?a WHERE { ?a ex:status ?s ; ex:segment ?g FILTER(?g = "Growth" && !(?s = "Frozen")) }'
+    )
+    assert sparql_literal_uses(nested) == [("segment", "Growth")]
+
+
 def test_a_value_that_cannot_be_shown_exactly_is_left_out() -> None:
     pv = PropertyValues("A", "city", ("New  York", "Paris", "x" * 300, " padded"), ("str",), 10)
     section = values_prompt_section([pv])
