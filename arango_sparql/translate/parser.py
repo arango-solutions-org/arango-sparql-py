@@ -19,10 +19,12 @@ inspection workflow.
 
 from __future__ import annotations
 
+import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from rdflib import URIRef, Variable
+from rdflib import Literal, URIRef, Variable
 from rdflib.plugins.sparql.algebra import translateQuery
 from rdflib.plugins.sparql.parser import parseQuery
 
@@ -73,13 +75,45 @@ class ParsedSparql:
     base_iri: str | None = None
 
 
-def parse_sparql(query: str) -> ParsedSparql:
+#: A variable name inline VALUES accepts. Names are written into the query
+#: text, so this is narrower than SPARQL's VARNAME: ASCII letters, digits and
+#: ``_``, not starting with a digit. Anything else is refused, never escaped.
+_VARNAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+@dataclass(frozen=True)
+class InlineValues:
+    """Rows for a trailing ``VALUES`` clause, given as data, not text.
+
+    ``variables`` are bare names (no ``?``). Each row holds one cell per
+    variable: an :class:`~rdflib.term.URIRef` or :class:`~rdflib.term.Literal`
+    as rdflib would parse it, or ``None`` for ``UNDEF``.
+
+    A bind join's seed is data before it is ever text, and rdflib parses a
+    ``VALUES`` row at about 0.13 ms (arango-solutions-org/arango-sparql-py#160):
+    a thousand-row seed costs more than the rest of the query. Passing the rows
+    here skips that parse. The query text is still parsed by rdflib alone, and
+    rdflib still builds the algebra from the rows (see :func:`parse_sparql`).
+    """
+
+    variables: tuple[str, ...]
+    rows: Sequence[Sequence[URIRef | Literal | None]]
+
+
+def parse_sparql(query: str, values: InlineValues | None = None) -> ParsedSparql:
     """Parse *query* and return the rdflib Algebra plus declared projection.
+
+    With *values*, the query is parsed with an empty trailing data block,
+    ``VALUES (?a ?b) { }``, and the rows are set on rdflib's own
+    ``ValuesClause`` before ``translateQuery``: the algebra is exactly the one
+    rdflib builds from the same rows written as text, without parsing them.
 
     Raises
     ------
     SparqlParseError
-        If ``rdflib`` cannot parse the input string.
+        If ``rdflib`` cannot parse the input string, or *values* is
+        malformed, or the query already ends in a ``VALUES`` clause and
+        *values* is given too.
     UnsupportedSparqlError
         If ``rdflib``'s parser exceeds Python's recursion limit: deeply
         nested groups or expressions, and always a ``SERVICE`` nested in a
@@ -88,8 +122,13 @@ def parse_sparql(query: str) -> ParsedSparql:
     """
     if not isinstance(query, str) or not query.strip():
         raise SparqlParseError("SPARQL query must be a non-empty string")
+    rows = None if values is None else _checked_rows(values)
     try:
-        parsed = parseQuery(query)
+        if values is None:
+            parsed = parseQuery(query)
+        else:
+            parsed = _parse_with_empty_values(query, values)
+            parsed[1]["valuesClause"]["value"] = rows
         translated = translateQuery(parsed)
     except RecursionError as exc:
         # upstream: RDFLib/rdflib#3082 — remove when an rdflib release includes RDFLib/rdflib#3608
@@ -99,6 +138,8 @@ def parse_sparql(query: str) -> ParsedSparql:
             "in a SERVICE always does (RDFLib/rdflib#3082, fixed on rdflib's main branch by #3608, "
             "not yet released)"
         ) from exc
+    except SparqlParseError:
+        raise
     except Exception as exc:
         raise SparqlParseError(f"failed to parse SPARQL: {exc}") from exc
     explicit = _extract_explicit_projection(parsed)
@@ -110,6 +151,73 @@ def parse_sparql(query: str) -> ParsedSparql:
         describe_resources=describe,
         base_iri=base_iri,
     )
+
+
+def _checked_rows(values: InlineValues) -> list[list[Any]]:
+    """*values*' rows as rdflib's parse tree holds them, or why they can't be.
+
+    rdflib keeps ``UNDEF`` as the string ``"UNDEF"`` in a ``ValuesClause``;
+    callers say ``None``, so that sentinel stays rdflib's.
+    """
+    variables = values.variables
+    # A str is a sequence of strs: ``"sn"`` would read as ``?s ?n``.
+    if isinstance(variables, str):
+        raise SparqlParseError(
+            f"inline VALUES variables must be a sequence of names, not the string {variables!r}"
+        )
+    if not variables:
+        raise SparqlParseError("inline VALUES needs at least one variable")
+    for name in variables:
+        if not isinstance(name, str) or not _VARNAME.fullmatch(name):
+            raise SparqlParseError(f"inline VALUES variable {name!r} is not a SPARQL variable name")
+    if len(set(variables)) != len(variables):
+        raise SparqlParseError(f"inline VALUES names a variable twice: {list(variables)}")
+    rows: list[list[Any]] = []
+    for index, row in enumerate(values.rows):
+        # URIRef and Literal are strs too: a bare term would read as its characters.
+        if isinstance(row, str):
+            raise SparqlParseError(
+                f"inline VALUES row {index} is the single term {row!r}, not a sequence of cells"
+            )
+        if len(row) != len(variables):
+            raise SparqlParseError(
+                f"inline VALUES row {index} has {len(row)} cells for {len(variables)} variables"
+            )
+        cells: list[Any] = []
+        for cell in row:
+            if cell is None:
+                cells.append("UNDEF")
+            elif isinstance(cell, (URIRef, Literal)):
+                cells.append(cell)
+            else:
+                raise SparqlParseError(
+                    f"inline VALUES row {index} holds {type(cell).__name__} {cell!r}: a cell is "
+                    "a URIRef, a Literal, or None for UNDEF"
+                )
+        rows.append(cells)
+    return rows
+
+
+def _parse_with_empty_values(query: str, values: InlineValues) -> Any:
+    """Parse *query* with an empty trailing data block for *values*' variables.
+
+    A query that already ends in ``VALUES`` would then have two, which the
+    grammar refuses; that case is told apart from any other parse error.
+    """
+    declared = " ".join(f"?{name}" for name in values.variables)
+    try:
+        return parseQuery(f"{query}\nVALUES ({declared}) {{ }}")
+    except RecursionError:
+        raise
+    except Exception:
+        own = parseQuery(query)  # raises the query's own error if it has one
+        # ``in``, not ``get``: CompValue.get returns the key's name when absent.
+        if "valuesClause" in own[1]:
+            raise SparqlParseError(
+                "the query already ends in a VALUES clause; give its rows either in the text "
+                "or as inline values, not both"
+            ) from None
+        raise
 
 
 def _extract_base_iri(parsed: Any) -> str | None:
