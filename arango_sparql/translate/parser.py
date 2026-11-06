@@ -160,6 +160,11 @@ def _checked_rows(values: InlineValues) -> list[list[Any]]:
     callers say ``None``, so that sentinel stays rdflib's.
     """
     variables = values.variables
+    # A str is a sequence of strs: ``"sn"`` would read as ``?s ?n``.
+    if isinstance(variables, str):
+        raise SparqlParseError(
+            f"inline VALUES variables must be a sequence of names, not the string {variables!r}"
+        )
     if not variables:
         raise SparqlParseError("inline VALUES needs at least one variable")
     for name in variables:
@@ -169,6 +174,11 @@ def _checked_rows(values: InlineValues) -> list[list[Any]]:
         raise SparqlParseError(f"inline VALUES names a variable twice: {list(variables)}")
     rows: list[list[Any]] = []
     for index, row in enumerate(values.rows):
+        # URIRef and Literal are strs too: a bare term would read as its characters.
+        if isinstance(row, str):
+            raise SparqlParseError(
+                f"inline VALUES row {index} is the single term {row!r}, not a sequence of cells"
+            )
         if len(row) != len(variables):
             raise SparqlParseError(
                 f"inline VALUES row {index} has {len(row)} cells for {len(variables)} variables"

@@ -9,9 +9,11 @@ removed, and the two translations must give the same AQL and bind variables.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 from rdflib import BNode, Literal, URIRef, Variable
 from rdflib.plugins.sparql.algebra import translateQuery
 from rdflib.plugins.sparql.parser import parseQuery
@@ -26,6 +28,8 @@ _TTL = """@prefix owl: <http://www.w3.org/2002/07/owl#> .
 """
 
 _PREFIX = "PREFIX : <http://ex.org/>\n"
+
+_SUBSELECT_GOLDENS = Path(__file__).parent / "subselect.yml"
 
 #: (case, query without its trailing VALUES, the trailing VALUES clause)
 CASES = [
@@ -103,6 +107,46 @@ def test_rows_as_data_translate_as_the_same_rows_written(case: str, query: str, 
     assert as_data.bind_vars == written.bind_vars
 
 
+def _trailing_values_goldens() -> list[tuple[str, str, str, str, dict[str, Any]]]:
+    """``subselect.yml`` goldens whose query ends in a ``VALUES`` clause, as
+    ``(name, ontology, query, expected_aql, expected_bind_vars)``."""
+    data = yaml.safe_load(_SUBSELECT_GOLDENS.read_text())
+    return [
+        (
+            case["name"],
+            data["ontology"],
+            case["sparql"],
+            case["expected_aql"].rstrip("\n"),
+            case["expected_bind_vars"],
+        )
+        for case in data["cases"]
+        if "valuesClause" in parseQuery(case["sparql"])[1]
+    ]
+
+
+def test_the_trailing_values_goldens_are_found() -> None:
+    # Guards the parametrization below against silently selecting nothing.
+    assert len(_trailing_values_goldens()) >= 3
+
+
+@pytest.mark.parametrize(
+    ("name", "ontology", "query", "expected_aql", "expected_bind_vars"),
+    _trailing_values_goldens(),
+    ids=[c[0] for c in _trailing_values_goldens()],
+)
+def test_rows_as_data_give_the_golden_aql(
+    name: str, ontology: str, query: str, expected_aql: str, expected_bind_vars: dict[str, Any]
+) -> None:
+    # The acceptance test #160 names: the existing VALUES goldens, with their
+    # rows passed as data, give the AQL and bind variables the goldens pin.
+    without_clause = query[: query.rindex("VALUES")]
+    assert "valuesClause" not in parseQuery(without_clause)[1]
+    resolver = SchemaResolver.from_turtle(ontology, default_collection="Document")
+    result = translate(without_clause, resolver=resolver, values=_rows_rdflib_reads(query))
+    assert result.aql.rstrip("\n") == expected_aql
+    assert result.bind_vars == expected_bind_vars
+
+
 def test_no_rows_are_refused_as_an_empty_block_written_is() -> None:
     # rdflib reads an empty data block as no values at all, which the
     # translator refuses; rows as data must not translate where text does not.
@@ -144,6 +188,8 @@ def test_a_malformed_query_reports_its_own_error() -> None:
         (InlineValues(("s",), [(1,)]), "holds int"),
         (InlineValues(("s",), [(BNode(),)]), "holds BNode"),
         (InlineValues(("s",), [(Variable("x"),)]), "holds Variable"),
+        (InlineValues("sn", [(URIRef("http://ex.org/a"), Literal("a"))]), "not the string 'sn'"),
+        (InlineValues(("s",), [URIRef("http://ex.org/a")]), "is the single term"),
     ],
     ids=[
         "no_variables",
@@ -155,6 +201,8 @@ def test_a_malformed_query_reports_its_own_error() -> None:
         "plain_int",
         "blank_node",
         "variable_cell",
+        "variables_as_one_string",
+        "row_as_a_bare_term",
     ],
 )
 def test_malformed_values_are_refused_by_name(values: InlineValues, message: str) -> None:
