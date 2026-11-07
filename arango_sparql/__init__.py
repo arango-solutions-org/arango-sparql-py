@@ -13,4 +13,4 @@ from __future__ import annotations
 # pyproject.toml [project].version (tests/test_version_parity.py enforces it);
 # the BYOC deploy tool (arango-byoc-deploy, [tool.arango-byoc] in pyproject) tags
 # releases with it and verifies that openapi.json reports it after a deploy.
-__version__ = "0.6.2"
+__version__ = "0.7.0"

@@ -4,8 +4,8 @@
 `target: pypi`), 0.3.0 (2026-10-16, tag `v0.3.0`), 0.3.1 (2026-10-20, tag
 `v0.3.1`), 0.4.0 (2026-10-21, tag `v0.4.0`), 0.4.1 (2026-10-23, tag
 `v0.4.1`), 0.5.0 (2026-10-27, tag `v0.5.0`), 0.6.0 (2026-11-02, tag
-`v0.6.0`), 0.6.1 (2026-11-03, tag `v0.6.1`) and 0.6.2 (2026-11-04, tag
-`v0.6.2`). Later releases follow
+`v0.6.0`), 0.6.1 (2026-11-03, tag `v0.6.1`), 0.6.2 (2026-11-04, tag
+`v0.6.2`) and 0.7.0 (2026-11-06, tag `v0.7.0`). Later releases follow
 "Cut a release" below, minus the one-time setup. The workflow that does the upload —
 [`.github/workflows/publish.yml`](.github/workflows/publish.yml) — is **inert
 until a `v*` tag is pushed**, and mirrors `arango-query-core`'s proven setup
