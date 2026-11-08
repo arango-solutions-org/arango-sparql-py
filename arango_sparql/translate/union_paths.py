@@ -346,6 +346,9 @@ def _spawn_child(visitor: AlgebraVisitor) -> AlgebraVisitor:
         resolver=visitor.resolver,
         tenant_id=visitor.tenant_id,
         base_iri=visitor.base_iri,
+        # Whether a union in the arm or body may keep one row per IRI (#147).
+        query_triples=visitor.query_triples,
+        describe_resources=visitor.describe_resources,
     )
     cv.state.var_to_expr = dict(visitor.state.var_to_expr)
     cv.state.counters = visitor.state.counters
@@ -377,6 +380,9 @@ def _spawn_child(visitor: AlgebraVisitor) -> AlgebraVisitor:
     # exit predicate in an arm (LDBC ``?lk :hasPost|:hasComment ?m``)
     # reaches its far vertex (plan D8).
     cv.state.reified_edges = dict(visitor.state.reified_edges)
+    # An outer union row that stands for every copy of its IRI is read from
+    # all of them in the arm or OPTIONAL body too (#147).
+    cv.state.copy_members = dict(visitor.state.copy_members)
     cv.state.relationship_nodes = {name: set(rels) for name, rels in visitor.state.relationship_nodes.items()}
     cv.state.tenant_entity = visitor.state.tenant_entity
     cv.state.tenant_bind_placeholder = visitor.state.tenant_bind_placeholder

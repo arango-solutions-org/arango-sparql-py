@@ -620,16 +620,45 @@ routes the subject (`translate/visitor.py`):
   carrying its own label test and, for a constant subject, its own indexed
   `_uri` match (`_open_class_union`, LDBC plan decision D9). A `UNION`
   supertype in the domain stands for its members. One IRI stored in two
-  members (a PG entity of two classes) is one subject: once the BGP's
-  triples have filtered the rows, a row is dropped when an earlier member
-  (in name order) holds a copy with the same `_uri`, in the same graph (a
-  copy in another named graph is another quad) and tenant, and the same
-  value or absence for every attribute the query reads on the subject
-  (`_drop_repeated_copies`, #124). Every copy is kept when the query reaches
-  the subject by an edge or a path (as subject or object), uses a variable
-  predicate on it, reads one of its attributes from another copy
-  (`_attribute_source`), describes it, or binds `GRAPH ?g` per copy, and in
-  a child scope (a UNION arm, a sub-select, an OPTIONAL or EXISTS body). A
+  members (a PG entity of two classes) is one subject (`translate/copies.py`).
+  Once the BGP's triples have filtered the rows, a row is dropped when an
+  earlier member (in name order) holds a copy with the same `_uri`, in the
+  same graph (a copy in another named graph is another quad) and tenant, and
+  the same value or absence for every attribute that BGP read from the row's
+  own document (`drop_repeated_copies`, #124). That row then stands for
+  every copy, in the union's own scope and in child scopes (a UNION arm, a
+  sub-select, an OPTIONAL or EXISTS body, #148):
+  - in the BGP, the first attribute read whose declared domain names only
+    members (or none) is read from the row's own document and compared, as
+    above: every copy that can hold it is a row of its own, so a copy with
+    another value, or none, is another solution and stays. One triple
+    only: a second read from the row's own document (another attribute, or
+    the same one again) would have to be on the same copy as the first;
+  - any other attribute read is read from every copy (`emit_attribute_across_copies`,
+    #147): a second attribute triple in the BGP, one whose domain names a
+    collection outside the members, and any
+    read after the drop (an OPTIONAL body, a later group), a compared
+    attribute's too, so each kept row pairs with every copy's value. The
+    copies are looked up by `_uri`, in the same graph, tenant and graph
+    scope, in the members and the collections of the property's
+    `rdfs:domain` (a member's copy can hold a value outside the declared
+    domain), and the triple's values are their distinct values, so a value
+    two copies hold is one triple. The lookup is guarded as the probe is: a
+    row with no `_uri` reads its own document and starts no subquery, and
+    the lookup filters `_uri != null` so a sparse `_uri` index serves it;
+  - an edge into the subject whose property declares a usable range is
+    walked back from every copy in the range and in the members, or forward
+    and joined on the IRI (#149).
+
+  Every copy is kept (each row its own solution, as before) when the query
+  walks an edge out of the subject, reaches it by a path, an edge with no
+  usable range or a symmetric edge, uses a variable predicate on it,
+  describes it, or binds `GRAPH ?g` per copy (`copies_interchangeable`).
+  Known limits: under `fan_out_list_values` a list is compared as a whole
+  value, so an element two copies' different lists share comes back once
+  per copy (#170); and under the lax default graph, copies in different
+  named graphs are read as separate rows, each with its own graph's values
+  (pyoxigraph's union default graph pairs them across graphs). A
   row with no `_uri` (an `_id` identity names one collection's document) is
   never probed: the row's collection and `_uri` guard the probe in a
   ternary, and ArangoDB starts no subquery in the branch it does not take.
@@ -1420,7 +1449,7 @@ route's `X-Schema-Warnings-Count` is the count of the translation's
 | `W_SCHEMA_LOW_CONFIDENCE` | `metadata.confidence < 0.5`; the operator should review the mapping before relying on it for a production workload. |
 | `W_SCHEMA_DRIFT_STATS` | `/schema/status` detected a counts-fingerprint change since last refresh. Cardinality-aware planning may be stale. |
 | `W_SCHEMA_DRIFT_SHAPE` | `/schema/status` detected a shape-fingerprint change since last refresh. The mapping itself is stale; a re-acquire is recommended. |
-| `W_SCHEMA_URI_INDEX_MISSING` | A union read checks a later member's rows for a copy in an earlier member by `_uri` (§6.1, #124), or a `DESCRIBE <iri>` looks the IRI up in a collection (§6.1, #150), and the schema analysis shows that collection has no persistent, hash or skiplist index whose first field is `_uri`, so it is scanned once per row or per DESCRIBE. Names the collection; add the index, then refresh the analysis. Reported only from a mapping that lists indexes (the service's analysis, or an analyzer-written reverse CSI). |
+| `W_SCHEMA_URI_INDEX_MISSING` | A union read checks a later member's rows for a copy in an earlier member by `_uri` (§6.1, #124), reads an attribute from every copy of a union row's IRI (§6.1, #147), or a `DESCRIBE <iri>` looks the IRI up in a collection (§6.1, #150), and the schema analysis shows that collection has no persistent, hash or skiplist index whose first field is `_uri`, so it is scanned once per row or per DESCRIBE. Names the collection; add the index, then refresh the analysis. Reported only from a mapping that lists indexes (the service's analysis, or an analyzer-written reverse CSI). |
 
 ### 6.8 ArangoDB named-graph scoping (collection down-select)
 

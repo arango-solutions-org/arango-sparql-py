@@ -48,7 +48,7 @@ from .errors import UnsupportedSparqlError
 from .translate.builder import AqlQueryBuilder
 from .translate.parser import parse_sparql
 from .translate.resolver import SchemaResolver
-from .translate.visitor import AlgebraVisitor
+from .translate.visitor import AlgebraVisitor, collect_query_triples
 
 _SCHEMA_WARNING_CODE_PREFIX = "W_SCHEMA_"
 
@@ -151,6 +151,7 @@ def translate_partition(
             base_iri=parsed.base_iri,
             tenant_id=tenant_id,
             extra_projection=key_vars,
+            query_triples=collect_query_triples(parsed.algebra),
         )
         visitor.visit(parsed.algebra)
         aql, bind_vars = builder.finalize()

@@ -58,6 +58,13 @@ _RETURN_SCALAR_RE = re.compile(r"RETURN\s+(?!DISTINCT\b)([^{].*?)\s*$")
 # which counts the same 0 when it fails.
 _LEN_SUBQUERY_START_RE = re.compile(r"LET\s+(\w+)\s*=\s*(?:\((.*)\)\s*\?\s*)?LENGTH\(\(\s*$")
 _SUBQUERY_END_RE = re.compile(r"^\)\)(?:\s*:\s*0)?\s*$")
+# The distinct values of an attribute over every copy of an IRI (#147,
+# ``copies.emit_attribute_across_copies``): ``LET <alias> = (<guard>) ?
+# UNIQUE((`` opens a scalar-returning subquery and ``)) : <else>`` closes it.
+# The alias binds to the subquery's distinct results, by AQL equality, when
+# the guard holds, and to the else expression otherwise.
+_UNIQUE_SUBQUERY_START_RE = re.compile(r"LET\s+(\w+)\s*=\s*(?:\((.*)\)\s*\?\s*)?UNIQUE\(\(\s*$")
+_UNIQUE_SUBQUERY_END_RE = re.compile(r"^\)\)(?:\s*:\s*(.+))?\s*$")
 # Row-returning correlated subquery the cross-subject OPTIONAL emitter
 # (ADR-0002 Problem 1, Option A) binds to a LET: ``LET <alias> = (``
 # opens the block, a bare ``)`` closes it, and the inner lines are a
@@ -281,6 +288,9 @@ _AQL_BUILTINS: dict[str, Any] = {
     "FLATTEN": lambda v: (
         [x for e in v for x in (e if isinstance(e, list) else [e])] if isinstance(v, list) else [v]
     ),
+    # ``UNIQUE(FLATTEN(vals))``: the distinct elements of an attribute's
+    # values over every copy of an IRI, under fan-out (#147).
+    "UNIQUE": lambda v: _unique(list(v)),
     # ``HAS(doc, "attr")`` — predicate-existence guard the visitor
     # emits for every variable-object BGP triple (``?s :p ?o``).
     # SPARQL §18.5 semantics: a required triple ``(s, p, o)`` only
@@ -757,6 +767,22 @@ def _split_sort_keys(clause: str) -> list[tuple[str, str]]:
     return out
 
 
+def _unique_scalars(
+    step: tuple[str, str | None, str | None],
+    bind_vars: dict[str, Any],
+    docs: dict[str, list[dict[str, Any]]],
+    env: Any,
+    let_env: Any,
+) -> Any:
+    """The distinct scalar results of a guarded ``UNIQUE((…))`` subquery, or
+    its else expression when the guard fails."""
+    inner, guard, otherwise = step
+    if guard is not None and not _eval_filter(guard, env, bind_vars, let_env):
+        return _eval_expr(otherwise or "null", env, bind_vars, let_env)
+    rows = run_aql_subset(inner, bind_vars, docs, _outer_env=env, _outer_let=let_env)
+    return _unique([row["_scalar"] for row in rows])
+
+
 def _read_block(
     lines: list[str], i: int, into: list[str], opener: re.Pattern[str], closer: re.Pattern[str]
 ) -> int:
@@ -861,6 +887,22 @@ def run_aql_subset(
                 inner.insert(1, f"FILTER {guard}")
             sub_step: tuple[str, Any, Any] = ("SUBQUERY_LEN", alias, "\n".join(inner))
             (post_collect_steps if seen_collect else pre_collect_plan).append(sub_step)
+            continue
+        if m := _UNIQUE_SUBQUERY_START_RE.match(line):
+            alias = m.group(1)
+            unique_inner: list[str] = []
+            i = _read_block(lines, i, unique_inner, _UNIQUE_SUBQUERY_START_RE, _UNIQUE_SUBQUERY_END_RE)
+            if i >= len(lines):  # pragma: no cover - malformed AQL
+                raise AssertionError("unterminated UNIQUE(( subquery in AQL")
+            closer = _UNIQUE_SUBQUERY_END_RE.match(lines[i])
+            assert closer is not None
+            i += 1  # skip the closing ``)) [: <else>]``
+            unique_step: tuple[str, Any, Any] = (
+                "SUBQUERY_UNIQUE",
+                alias,
+                ("\n".join(unique_inner), m.group(2), closer.group(1)),
+            )
+            (post_collect_steps if seen_collect else pre_collect_plan).append(unique_step)
             continue
         if m := _ROWS_SUBQUERY_START_RE.match(line):
             # ``LET <alias> = (`` … ``)`` — consume the inner block up to
@@ -1066,6 +1108,8 @@ def run_aql_subset(
             # FOR-inline can iterate (and ``[null]``-pad) it.
             inner_rows = run_aql_subset(b, bind_vars, docs, _outer_env=env, _outer_let=let_env)
             run_plan(idx + 1, env, {**let_env, a: inner_rows})
+        elif kind == "SUBQUERY_UNIQUE":
+            run_plan(idx + 1, env, {**let_env, a: _unique_scalars(b, bind_vars, docs, env, let_env)})
         else:  # LET
             assert b is not None
             run_plan(idx + 1, env, {**let_env, b: _eval_expr(a, env, bind_vars, let_env)})
@@ -1128,6 +1172,8 @@ def run_aql_subset(
                     let_env[field_a] = run_aql_subset(
                         field_b, bind_vars, docs, _outer_env=env, _outer_let=let_env
                     )
+                elif kind == "SUBQUERY_UNIQUE":
+                    let_env[field_a] = _unique_scalars(field_b, bind_vars, docs, env, let_env)
                 else:  # LET — stored as ("LET", expr, alias)
                     assert field_b is not None
                     let_env[field_b] = _eval_expr(field_a, env, bind_vars, let_env)

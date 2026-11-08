@@ -162,6 +162,17 @@ def needs_subquery(visitor: AlgebraVisitor, p2: Any) -> bool:
     for s, p, o in triples:
         if not (isinstance(s, Variable) and str(s) in visitor.state.var_to_doc_alias):
             return True
+        if (
+            visitor.state.var_to_doc_alias[str(s)] in visitor.state.copy_members
+            and isinstance(o, Variable)
+            and str(o) not in visitor.state.var_to_expr
+        ):
+            # A union row standing for every copy of its IRI: its attributes
+            # are read from all of them, a FOR of values the inline emitter's
+            # attribute paths cannot express (#147). A variable the required
+            # side binds stays with the inline emitter, which refuses the
+            # re-bind: the subquery path drops its value (review of #171).
+            return True
         # A property path (``:replyOf*``) is not a URIRef either: the inline
         # emitter reads one attribute or one edge, so paths go to the subquery.
         if not isinstance(p, URIRef) or not isinstance(o, Variable):

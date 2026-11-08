@@ -39,6 +39,7 @@ from .builder import (
     subject_ref,
     type_predicate,
 )
+from .copies import CopyRow, copies_interchangeable, drop_repeated_copies, emit_attribute_across_copies
 from .date_arithmetic import compare_instants, date_shift, instant, is_date_shift, is_duration_literal
 from .expression_errors import certainly_error, unbound_variables
 from .filter_builtins import translate_builtin, translate_function
@@ -113,12 +114,15 @@ class _BindingState:
     exit's object → alias of the edge's source vertex, which the entry
     triple then binds its subject to (plan D8)."""
     bgp_entries: dict[str, set[str]] = field(default_factory=dict)
-    pending_copy_checks: list[tuple[str, dict[str, list[ResolvedClass]], list[tuple[str, ...]], str]] = field(
-        default_factory=list
-    )
+    pending_copy_checks: list[tuple[str, dict[str, list[ResolvedClass]], str]] = field(default_factory=list)
     """Union rows of a class's member collections opened in the BGP being
     emitted, to drop repeated copies of once its triples are emitted
-    (:meth:`AlgebraVisitor._drop_repeated_copies`, #124)."""
+    (:func:`.copies.drop_repeated_copies`, #124)."""
+    copy_members: dict[str, CopyRow] = field(default_factory=dict)
+    """Union row alias → the row standing for every copy of its IRI: its
+    members, and the attributes read from its own document and compared;
+    any other is read from every copy
+    (:func:`.copies.emit_attribute_across_copies`, #147)."""
     """In the BGP being emitted: relationship node variable → the reified
     entry predicates whose object it is. Lets an exit with a known object
     walk the right relationship backwards before its entry is emitted."""
@@ -305,10 +309,10 @@ class AlgebraVisitor:
 
     query_triples: list[tuple[Any, Any, Any]] | None = None
     """Every triple pattern of the whole query (:func:`_collect_bgp_triples`),
-    set by the top-level :func:`arango_sparql.api.translate`: what a union of
-    a class's member collections compares a subject's copies on
-    (:meth:`_copy_comparison_fields`, #124). ``None`` in a child visitor,
-    which then keeps every copy."""
+    set by the top-level :func:`arango_sparql.api.translate` and passed to
+    child visitors: whether a union of a class's member collections may keep
+    one row per IRI (:func:`.copies.copies_interchangeable`, #124). ``None``
+    keeps every copy."""
     state: _BindingState = field(default_factory=_BindingState)
 
     # ------------------------------------------------------------------
@@ -1802,7 +1806,7 @@ class AlgebraVisitor:
                     absorbed.append(type_triple)
                     continue
                 self._emit_triple(triple)
-            self._drop_repeated_copies()
+            drop_repeated_copies(self)
         finally:
             self.state.bgp_entries = outer_entries
             self.state.pending_copy_checks = outer_checks
@@ -1967,7 +1971,14 @@ class AlgebraVisitor:
             if prop.is_object_property:
                 self._emit_edge_triple(s, prop, o, triple)
                 return
-            alias = self._attribute_source(self._ensure_subject_alias(s, prop), prop)
+            alias = self._ensure_subject_alias(s, prop)
+            if emit_attribute_across_copies(self, alias, prop, o, triple):
+                return
+            if alias not in self.state.copy_members:
+                # A union row reading its own document has a row per copy
+                # that can hold the attribute (:func:`.copies.read_from_own_copy`):
+                # reading another copy here too would repeat its value.
+                alias = self._attribute_source(alias, prop)
             attr_path = attribute_path_ref(alias, prop.field_path)
             if isinstance(o, Variable):
                 # Predicate-existence filter (SPARQL 1.1 §18.5): a
@@ -3036,6 +3047,13 @@ class AlgebraVisitor:
         them), so an edge into another copy there is a known limit (#105).
         """
         by_collection = self._range_classes(range_iris)
+        row = self.state.copy_members.get(alias)
+        if row is not None and by_collection and not only_outside:
+            # A union row standing for every copy of its IRI: an edge into a
+            # member's copy outside the range was found from that copy's own
+            # row, which the copy check may have dropped (review of #171).
+            for collection, classes in row.members.items():
+                by_collection.setdefault(collection, classes)
         if not by_collection:
             return alias
         in_scope = self._graph_scope_test
@@ -3474,129 +3492,19 @@ class AlgebraVisitor:
         alias = self.builder.fresh_alias()
         self.builder.for_union(alias, arm_aqls, scans_documents=True)
         self.state.doc_collections[alias] = frozenset(by_collection)
-        compare = self._copy_comparison_fields(subject, frozenset(by_collection))
-        if compare is not None:
+        if copies_interchangeable(self, subject):
             # Checked once the BGP's triples have filtered the rows
-            # (:meth:`_drop_repeated_copies`): probing every document of
-            # every member first cost LDBC IS4 0.1 s -> 3.5 s.
-            self.state.pending_copy_checks.append((alias, by_collection, compare, what))
+            # (:func:`.copies.drop_repeated_copies`): probing every document
+            # of every member first cost LDBC IS4 0.1 s -> 3.5 s. The row
+            # stands for every copy that agrees on what it reads from its own
+            # document; its other attributes are read from all of them (#147).
+            self.state.pending_copy_checks.append((alias, by_collection, what))
+            self.state.copy_members[alias] = CopyRow(by_collection)
         self._apply_graph_scope(alias)
         self._enforce_tenant_scope(alias, classes[0])
         self._guard_relationship_endpoints(alias, classes)
         self._bind_opened_subject(subject, alias, matched=match_in_arms)
         return alias
-
-    def _copy_comparison_fields(self, subject: Any, members: frozenset[str]) -> list[tuple[str, ...]] | None:
-        """The attribute paths that tell two copies of *subject* apart in this
-        BGP, when a union of its class's collections can drop a repeated one
-        (#124); ``None`` when it cannot.
-
-        One IRI stored in two member collections (a PG entity of two classes)
-        is one subject: the union returned it once per document, so a BGP
-        reading only its type and attributes gave a solution twice when both
-        copies hold the same values. A later copy is dropped when an earlier
-        one holds the same value (or the same absence) for every attribute
-        the query reads on the subject anywhere (an OPTIONAL reads the kept
-        copy too). Edges, variable predicates and paths depend on which copy
-        is walked from, and an unbound ``GRAPH ?g`` binds per copy, so then
-        nothing is dropped (each copy stays, as before).
-        """
-        if self.query_triples is None:
-            return None
-        if any(str(r) == str(subject) for r in self.describe_resources or ()):
-            # DESCRIBE reads every attribute of every copy.
-            return None
-        graph = self.state.graph_scope[-1] if self.state.graph_scope else None
-        if isinstance(graph, Variable) and str(graph) not in self.state.var_to_expr:
-            return None
-        fields: list[tuple[str, ...]] = []
-        for s, p, o in self.query_triples:
-            if o == subject and s != subject and (not isinstance(p, URIRef) or p != RDF.type):
-                # Reached by an edge or a path (``?x :knows ?s``): only the
-                # copy the edge points at carries it (review of #146).
-                if not isinstance(p, URIRef) or self.resolver.resolve_property(p).is_object_property:
-                    return None
-            if s != subject:
-                continue
-            if not isinstance(p, URIRef):
-                return None
-            if p == RDF.type:
-                continue
-            prop = self.resolver.resolve_property(p)
-            if prop.is_object_property or prop.edge_target_of or prop.edge_collection:
-                return None
-            if not self._read_from_own_copy(prop, members):
-                # The attribute may be read from another copy
-                # (:meth:`_attribute_source`), which a probe comparing the
-                # rows' own documents would not see (review of #146).
-                return None
-            if prop.field_path not in fields:
-                fields.append(prop.field_path)
-        return fields
-
-    def _read_from_own_copy(self, prop: ResolvedProperty, members: frozenset[str]) -> bool:
-        """Whether every member collection is in *prop*'s domain, so each
-        union row reads the attribute from its own document."""
-        domain = self._range_classes(self.resolver.domain_classes(prop.iri))
-        return not domain or members <= set(domain)
-
-    def _drop_repeated_copies(self) -> None:
-        """Drop a union row that repeats an earlier member's copy (#124).
-
-        For a row of member collection *k* (in name order), each earlier
-        member *j* is probed for a document with the same IRI, of its
-        classes in the active graph scope and tenant (so the copy kept is
-        one the union keeps), with the same value or the same absence for
-        every compared attribute. Emitted once the BGP's triples have
-        filtered the rows; the row's collection and ``_uri`` guard the
-        probe in a ternary, so a row no probe concerns starts no subquery.
-        """
-        checks, self.state.pending_copy_checks = self.state.pending_copy_checks, []
-        for alias, by_collection, fields, what in checks:
-            order = sorted(by_collection)
-            for j, earlier in enumerate(order[:-1]):
-                indexes = self.resolver.uri_indexes
-                if indexes is not None and indexes.scanned(earlier, order[j + 1 :]):
-                    self.resolver.warn_unindexed_uri(earlier)
-                probe = self.builder.create_child()
-                other = probe.fresh_alias()
-                probe.for_(other, earlier)
-                later = " || ".join(
-                    f"IS_SAME_COLLECTION({probe.bind(c, hint='coll')}, {alias})" for c in order[j + 1 :]
-                )
-                # Only an IRI names a copy in another collection (an ``_id``
-                # includes the collection), so a row with no ``_uri`` is
-                # never probed. The test guards the subquery itself, not a
-                # FILTER inside it: ArangoDB skips a subquery in the branch
-                # a ternary does not take, so such a row starts no lookup.
-                guard = f"({later}) && {alias}._uri != null"
-                # Implied by the guard, but the optimizer cannot see it inside
-                # the subquery: without it a sparse ``_uri`` index is not used.
-                probe.filter_raw(f"{other}._uri != null")
-                probe.filter_raw(f"{other}._uri == {alias}._uri")
-                # A copy in another named graph is another quad (lax default
-                # graph, as pyoxigraph's union default graph reads it).
-                graph = self.resolver.graph_field
-                probe.filter_raw(f"{attribute_ref(other, graph)} == {attribute_ref(alias, graph)}")
-                for test in self._class_tests(probe, other, by_collection[earlier], what):
-                    probe.filter_raw(test)
-                scope = self._graph_scope_test(other)
-                if scope is not None:
-                    probe.filter_raw(scope)
-                for tenant in {(c.tenant_field, c.tenant_entity): c for c in by_collection[earlier]}.values():
-                    self._enforce_tenant_scope(other, tenant, builder=probe)
-                for path in fields:
-                    probe.filter_raw(
-                        f"{probe.attribute_exists(other, path)} == {probe.attribute_exists(alias, path)}"
-                        f" && {attribute_path_ref(other, path)} == {attribute_path_ref(alias, path)}"
-                    )
-                probe.limit(1)
-                probe.return_scalar("1")
-                text = self.builder.absorb_child(probe)
-                repeated = self.builder.fresh_alias(prefix="repeated")
-                indented = "\n".join("  " + line for line in text.splitlines())
-                self.builder.let(repeated, f"({guard}) ? LENGTH((\n{indented}\n)) : 0")
-                self.builder.filter_raw(f"{repeated} == 0")
 
     def _ensure_subject_alias(self, subject: Any, prop: Any | None = None) -> str:
         """Return the AQL alias whose document is *subject*, opening a
