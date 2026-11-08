@@ -65,6 +65,16 @@ CASES = [
         'VALUES (?s ?n) { (:alice "Alice") (:bob "Bob") }',
     ),
     (
+        "names_beyond_ascii",
+        "SELECT ?straße ?名前 WHERE { ?straße :name ?名前 }",
+        'VALUES (?straße ?名前) { (:alice "Alice") }',
+    ),
+    (
+        "names_with_a_leading_digit_or_a_joining_mark",
+        "SELECT ?1st ?n·2 ?x‿y ?é WHERE { ?1st :name ?n·2 . ?x‿y :age ?é }",
+        'VALUES (?1st ?n·2 ?x‿y ?é) { (:alice "Alice" :bob 7) }',
+    ),
+    (
         "a_bind_join_seed",
         "SELECT ?s ?n WHERE { ?s :name ?n }",
         "VALUES (?n) { " + " ".join(f'("key-{i}")' for i in range(250)) + " }",
@@ -176,13 +186,34 @@ def test_a_malformed_query_reports_its_own_error() -> None:
         )
 
 
+def test_a_name_is_accepted_exactly_when_rdflib_would_parse_it() -> None:
+    """The rule is SPARQL's VARNAME, as rdflib's grammar spells it: checked on
+    every code point, as a name's first character and as a later one."""
+    from rdflib.plugins.sparql.parser import VARNAME
+
+    from arango_sparql.translate.parser import _VARNAME
+
+    rdflib_varname = VARNAME.re
+    differ = [
+        (hex(point), name)
+        for point in range(0x110000)
+        for name in (chr(point), "a" + chr(point))
+        if bool(_VARNAME.fullmatch(name)) != bool(rdflib_varname.fullmatch(name))
+    ]
+    assert differ == []
+
+
 @pytest.mark.parametrize(
     ("values", "message"),
     [
         (InlineValues((), []), "at least one variable"),
         (InlineValues(("s", "s"), []), "names a variable twice"),
         (InlineValues(("s) { } #",), []), "is not a SPARQL variable name"),
-        (InlineValues(("1s",), []), "is not a SPARQL variable name"),
+        (InlineValues(("s-t",), []), "is not a SPARQL variable name"),
+        (InlineValues(("s.t",), []), "is not a SPARQL variable name"),
+        (InlineValues(("?s",), []), "is not a SPARQL variable name"),
+        (InlineValues(("",), []), "is not a SPARQL variable name"),
+        (InlineValues(("·s",), []), "is not a SPARQL variable name"),
         (InlineValues(("s",), [(URIRef("http://ex.org/a"), Literal(1))]), "has 2 cells for 1"),
         (InlineValues(("s",), [("http://ex.org/a",)]), "holds str"),
         (InlineValues(("s",), [(1,)]), "holds int"),
@@ -195,7 +226,11 @@ def test_a_malformed_query_reports_its_own_error() -> None:
         "no_variables",
         "duplicate_variable",
         "injected_text",
-        "leading_digit",
+        "hyphen",
+        "dot",
+        "question_mark",
+        "empty",
+        "middle_dot_first",
         "row_too_wide",
         "plain_string",
         "plain_int",

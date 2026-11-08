@@ -75,10 +75,20 @@ class ParsedSparql:
     base_iri: str | None = None
 
 
-#: A variable name inline VALUES accepts. Names are written into the query
-#: text, so this is narrower than SPARQL's VARNAME: ASCII letters, digits and
-#: ``_``, not starting with a digit. Anything else is refused, never escaped.
-_VARNAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+#: SPARQL 1.1's PN_CHARS_U (grammar [164], [165]): the letters a name may use.
+#: Raw, so ``re`` reads the escapes and the source shows no invisible characters.
+_PN_CHARS_U = (
+    r"_A-Za-z\u00c0-\u00d6\u00d8-\u00f6\u00f8-\u02ff\u0370-\u037d\u037f-\u1fff"
+    r"\u200c-\u200d\u2070-\u218f\u2c00-\u2fef\u3001-\ud7ff\uf900-\ufdcf\ufdf0-\ufffd"
+    r"\U00010000-\U000effff"
+)
+
+#: A variable name inline VALUES accepts: SPARQL 1.1's VARNAME (grammar [166]),
+#: so any name a query can spell can be given as data, ``?straße`` and ``?1st``
+#: included. Names are written into the query text, and every character of a
+#: VARNAME is part of the name's token there: nothing can end it early.
+#: Anything else is refused, never escaped.
+_VARNAME = re.compile(rf"[{_PN_CHARS_U}0-9][{_PN_CHARS_U}0-9\u00b7\u0300-\u036f\u203f-\u2040]*")
 
 
 @dataclass(frozen=True)
