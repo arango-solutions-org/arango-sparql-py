@@ -628,19 +628,24 @@ routes the subject (`translate/visitor.py`):
   own document (`drop_repeated_copies`, #124). That row then stands for
   every copy, in the union's own scope and in child scopes (a UNION arm, a
   sub-select, an OPTIONAL or EXISTS body, #148):
-  - in the BGP, an attribute whose domain covers every member is read from
-    the row's own document and compared, as above: a copy with another
-    value, or none, is another solution and stays;
+  - in the BGP, an attribute whose declared domain names only members (or
+    none) is read from the row's own document and compared, as above: every
+    copy that can hold it is a row of its own, so a copy with another value,
+    or none, is another solution and stays;
   - any other attribute read is read from every copy (`emit_attribute_across_copies`,
-    #147): one stored on a copy outside the members, or any read after the
-    drop (an OPTIONAL body, a later group). The copies are looked up by an
-    indexed `_uri` match, in the same graph, tenant and graph scope, in the
-    collections of the property's `rdfs:domain` (or the members, with none
-    declared), and the triple's values are their distinct values, so a value
-    two copies hold is one triple; a row with no `_uri` is its own only copy;
+    #147): one whose domain names a collection outside the members, and any
+    read after the drop (an OPTIONAL body, a later group), a compared
+    attribute's too, so each kept row pairs with every copy's value. The
+    copies are looked up by `_uri`, in the same graph, tenant and graph
+    scope, in the members and the collections of the property's
+    `rdfs:domain` (a member's copy can hold a value outside the declared
+    domain), and the triple's values are their distinct values, so a value
+    two copies hold is one triple. The lookup is guarded as the probe is: a
+    row with no `_uri` reads its own document and starts no subquery, and
+    the lookup filters `_uri != null` so a sparse `_uri` index serves it;
   - an edge into the subject whose property declares a usable range is
-    walked back from every copy in the range, or forward and joined on the
-    IRI (#149).
+    walked back from every copy in the range and in the members, or forward
+    and joined on the IRI (#149).
 
   Every copy is kept (each row its own solution, as before) when the query
   walks an edge out of the subject, reaches it by a path, an edge with no

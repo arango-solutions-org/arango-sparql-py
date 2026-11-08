@@ -11,16 +11,21 @@ earlier member holds in the same graph, once the BGP that opened it has
 filtered the rows (:func:`drop_repeated_copies`). Its attribute reads
 (:func:`emit_attribute_across_copies`, :class:`CopyRow`):
 
-* in that BGP, an attribute stored on every member's copy (its domain covers
-  the members) is read from the row's own document, as before, and compared
-  by the probe: a copy with another value, or none, is another solution and
-  stays (#124);
-* any other read — an attribute stored on a copy outside the members, or any
-  read after the probe (an OPTIONAL body, a later group) — is read from every
-  copy: its distinct values, so a value on two copies is one triple, as in
-  RDF, and the rows of one IRI read the same (#147). One lookup per member
-  per row, so only where the row's own document is not enough: LDBC's
-  messages read ``content`` from their own document.
+* in that BGP, an attribute whose declared domain names only members (or
+  none) is read from the row's own document, as before, and compared by the
+  probe: every copy that can hold it is a row of its own, so a copy with
+  another value, or none, is another solution and stays (#124);
+* any other read — an attribute whose domain names a collection outside the
+  members, or any read after the probe (an OPTIONAL body, a later group), a
+  compared attribute's too — is read from every copy in the members and the
+  domain: its distinct values, so a value on two copies is one triple, as in
+  RDF, and the rows of one IRI read the same (#147). An indexed ``_uri``
+  lookup per collection per row, guarded so a row with no ``_uri`` starts
+  none; so only where the row's own document is not enough: LDBC's messages
+  read ``content`` from their own document.
+
+An edge walked back into such a row starts from every copy in the range and
+the members (``AlgebraVisitor._every_copy``).
 
 Known limit: under ``fan_out_list_values`` a list is one triple per element,
 and comparing whole values keeps two copies whose lists differ but share an
@@ -48,8 +53,6 @@ from .builder import (
     attribute_path_ref,
     attribute_ref,
     is_aql_identifier,
-    subject_matches_value,
-    subject_ref,
 )
 from .resolver import ResolvedClass, ResolvedProperty
 
@@ -121,10 +124,13 @@ def copies_interchangeable(visitor: AlgebraVisitor, subject: Any) -> bool:
 def read_from_own_copy(
     visitor: AlgebraVisitor, prop: ResolvedProperty, members: dict[str, list[ResolvedClass]]
 ) -> bool:
-    """Whether every member collection is in *prop*'s domain (or it declares
-    none), so each union row holds the attribute on its own document."""
+    """Whether every collection of *prop*'s domain is a member (or it declares
+    none), so every copy that can hold the attribute is a union row of its
+    own, read from its own document: comparing them keeps each value
+    (review of #171: a domain collection outside the members, ``Employee``,
+    held a value no row read)."""
     domain = visitor._range_classes(visitor.resolver.domain_classes(prop.iri))
-    return not domain or set(members) <= set(domain)
+    return not domain or set(domain) <= set(members)
 
 
 def drop_repeated_copies(visitor: AlgebraVisitor) -> None:
@@ -198,43 +204,58 @@ def emit_attribute_across_copies(
     """Emit the attribute triple ``(alias, prop, obj)`` from every copy of the
     subject's IRI, when *alias* is a union row that stands for all of them
     (``copy_members``); ``False`` (nothing emitted) when the row's own
-    document is read: *prop* is compared, or, before the probe, stored on
-    every member's copy (then it is compared from now on).
+    document is read: before the probe, *prop* is compared, or every copy
+    that can hold it is a union row (then it is compared from now on). After
+    the probe every read is from every copy, a compared attribute's too: the
+    rows kept differ on it, and each pairs with every copy's value (review
+    of #171).
 
     The copies are the documents with the row's IRI, in the same graph, in
-    the collections of *prop*'s ``rdfs:domain`` (trusted as where the
-    attribute is stored, as ``AlgebraVisitor._attribute_source`` trusts it),
-    or in the union's members when it declares none, each read as a document
-    of its class would be: its tenant FILTER and the active graph scope. The
-    triple's values are their distinct values of the attribute, so a value
-    two copies hold is one triple (``UNIQUE``); a row with no ``_uri`` is its
-    own only copy (an ``_id`` names one document)::
+    the union's members and the collections of *prop*'s ``rdfs:domain``
+    (where the attribute is declared; a member outside it can still hold a
+    value, which a read of the bound document finds, review of #171), each
+    read as a document of its class would be: its tenant FILTER and the
+    active graph scope. The triple's values are their distinct values of the
+    attribute, so a value two copies hold is one triple (``UNIQUE``). Only an
+    IRI names a copy in another collection, so a row with no ``_uri`` reads
+    its own document, and the lookup is guarded as the probe is: ArangoDB
+    starts no subquery in the branch a ternary does not take, and the
+    lookup's ``_uri != null`` lets a sparse index serve it (review of #171:
+    an unguarded ``_uri``-or-``_id`` match scanned every collection per row)::
 
-        LET vals = UNIQUE((
-          FOR c IN UNION((FOR c1 IN Org FILTER <same IRI, graph> RETURN c1), …)
+        LET vals = (row._uri != null) ? UNIQUE((
+          FOR c IN UNION((FOR c1 IN Org FILTER c1._uri != null
+                          FILTER c1._uri == row._uri … RETURN c1), …)
           FILTER HAS(c, "name")
           RETURN c.name
-        ))
+        )) : (HAS(row, "name") ? [row.name] : [])
         FOR n IN vals                          -- ?n unbound
         FILTER <bound value> IN vals           -- ?n bound, or a constant
     """
     row = visitor.state.copy_members.get(alias)
-    if row is None or prop.field_path in row.compared:
+    if row is None:
         return False
     members = row.members
-    if not row.probed and read_from_own_copy(visitor, prop, members):
-        row.compared.append(prop.field_path)
-        return False
+    if not row.probed:
+        if prop.field_path in row.compared:
+            return False
+        if read_from_own_copy(visitor, prop, members):
+            row.compared.append(prop.field_path)
+            return False
     builder = visitor.builder
-    # One lookup per collection per row: only where the attribute can be.
-    sources = visitor._range_classes(visitor.resolver.domain_classes(prop.iri)) or members
+    sources: dict[str, list[ResolvedClass]] = {c: list(cs) for c, cs in members.items()}
+    for collection, classes in visitor._range_classes(visitor.resolver.domain_classes(prop.iri)).items():
+        sources.setdefault(collection, classes)
     sub = builder.create_child()
 
     def scan(into: AqlQueryBuilder, collection: str) -> str:
         """Open *collection*'s copies of the row's IRI in *into*."""
         inner = into.fresh_alias()
         into.for_(inner, collection)
-        into.filter_raw(subject_matches_value(inner, subject_ref(alias)))
+        # Implied by the guard, but the optimizer cannot see it inside the
+        # subquery: without it a sparse ``_uri`` index is not used.
+        into.filter_raw(f"{inner}._uri != null")
+        into.filter_raw(f"{inner}._uri == {alias}._uri")
         graph = visitor.resolver.graph_field
         into.filter_raw(f"{attribute_ref(inner, graph)} == {attribute_ref(alias, graph)}")
         scope = visitor._graph_scope_test(inner)
@@ -248,20 +269,24 @@ def emit_attribute_across_copies(
             visitor.resolver.warn_unindexed_uri(collection)
         return inner
 
-    if len(sources) == 1:
-        copy = scan(sub, next(iter(sources)))
-    else:
-        arms = []
-        for collection in sorted(sources):
-            arm = sub.create_child()
-            arm.return_scalar(scan(arm, collection))
-            arms.append(sub.absorb_child(arm))
-        copy = sub.fresh_alias()
-        sub.for_union(copy, arms, scans_documents=True)
+    # A union has two members or more, so there are always two arms.
+    arms = []
+    for collection in sorted(sources):
+        arm = sub.create_child()
+        arm.return_scalar(scan(arm, collection))
+        arms.append(sub.absorb_child(arm))
+    copy = sub.fresh_alias()
+    sub.for_union(copy, arms, scans_documents=True)
     sub.filter_raw(sub.attribute_exists(copy, prop.field_path))
     sub.return_scalar(attribute_path_ref(copy, prop.field_path))
     values = builder.fresh_alias(prefix="vals")
-    builder.let(values, f"UNIQUE((\n{_indent(builder.absorb_child(sub))}\n))")
+    own = (
+        f"({builder.attribute_exists(alias, prop.field_path)} ? "
+        f"[{attribute_path_ref(alias, prop.field_path)}] : [])"
+    )
+    builder.let(
+        values, f"({alias}._uri != null) ? UNIQUE((\n{_indent(builder.absorb_child(sub))}\n)) : {own}"
+    )
     # Under ``fan_out_list_values`` a list value is one triple per element,
     # as a one-document read fans it out (``FLATTEN([attr])``).
     elements = f"UNIQUE(FLATTEN({values}))" if visitor.resolver.fan_out_list_values else values

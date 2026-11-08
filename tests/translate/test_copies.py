@@ -35,13 +35,39 @@ def test_an_attribute_every_member_holds_is_read_from_the_row_and_compared() -> 
     assert 'HAS(doc4, "name") == HAS(doc3, "name") && doc4.name == doc3.name' in aql
 
 
-def test_an_attribute_on_another_copy_is_looked_up_in_its_domain_only() -> None:
-    # One domain collection: a plain FOR, not a one-arm UNION (which the
-    # builder refuses), and no lookup in the members, which cannot hold it.
+def test_an_attribute_on_another_copy_is_looked_up_in_the_members_and_its_domain() -> None:
+    # The domain (Employee) is where it is declared; a member's copy can still
+    # hold a value (review of #171), so both are looked up.
     aql = _aql("SELECT ?s ?y WHERE { ?s a :Agent ; :salary ?y }")
-    lookup = aql[aql.index("UNIQUE((") :]
-    assert "@@c3_Employee" in lookup.split("))")[0]
-    assert "UNION(" not in lookup.split("))")[0]
+    lookup = aql[aql.index("UNIQUE((") : aql.index("FILTER HAS(")]
+    assert all(f"_{c}" in lookup for c in ("Employee", "Org", "Person"))
+
+
+def test_the_lookup_is_guarded_and_served_by_a_sparse_index() -> None:
+    # A row with no _uri reads its own document and starts no subquery; the
+    # lookup filters _uri != null, so a sparse _uri index serves it (review
+    # of #171: an _uri-or-_id match scanned every collection per row).
+    aql = _aql("SELECT ?s ?y WHERE { ?s a :Agent ; :salary ?y }")
+    assert "LET vals" in aql and "._uri != null) ? UNIQUE((" in aql
+    assert ': (HAS(doc3, "salary") ? [doc3.salary] : [])' in aql
+    lookup = aql[aql.index("UNIQUE((") : aql.index("FILTER HAS(")]
+    assert "_id ==" not in lookup
+
+
+def test_a_compared_attribute_read_again_later_is_read_from_every_copy() -> None:
+    # The rows kept differ on it; each pairs with every copy's value.
+    aql = _aql("SELECT ?s ?n ?m WHERE { ?s a :Agent ; :name ?n OPTIONAL { ?s :name ?m } }")
+    assert 'HAS(doc4, "name") == HAS(doc3, "name")' in aql
+    assert "UNIQUE((" in aql[aql.index("LET optsub") :]
+
+
+def test_an_optional_that_rebinds_a_variable_is_still_refused() -> None:
+    import pytest
+
+    from arango_sparql.errors import UnsupportedSparqlError
+
+    with pytest.raises(UnsupportedSparqlError, match="re-binds variable"):
+        _aql("SELECT ?s ?y WHERE { ?s a :Agent OPTIONAL { ?s :name ?y } OPTIONAL { ?s :salary ?y } }")
 
 
 def test_an_optional_attribute_is_read_from_every_copy_and_not_compared() -> None:

@@ -581,6 +581,54 @@ UNION_LIST_COPIES = Store(
     resolver_kwargs={"fan_out_list_values": True},
 )
 
+#: Review of #171: ``:salary`` declares the domain Org ∪ Employee, but the
+#: Person copies hold it (a value outside its domain is still a triple).
+UNION_OFF_DOMAIN = Store(
+    ontology=UNION_COPIES.ontology,
+    docs={
+        "Person": [
+            {"_id": "Person/s", "_uri": EX + "s", "name": "S", "salary": 10},
+            {"_id": "Person/p", "_uri": EX + "p", "name": "P", "salary": 7},
+        ],
+        "Org": [{"_id": "Org/s", "_uri": EX + "s", "name": "S"}],
+        "Employee": [],
+    },
+    data=':s a :Person, :Org, :Agent ; :name "S" ; :salary 10 . :p a :Person, :Agent ; :name "P" ; :salary 7 .',
+)
+
+#: Review of #171: ``:likes`` declares the range Org, but the edge points at
+#: the Person copy of ``:s``.
+UNION_RANGE_OUTSIDE = Store(
+    ontology=PREFIXES
+    + """
+:Person a owl:Class ; phys:collectionName "Person" ; rdfs:subClassOf :Agent .
+:Org a owl:Class ; phys:collectionName "Org" ; rdfs:subClassOf :Agent .
+:Agent a owl:Class ; phys:mappingStyle "UNION" .
+:likes a owl:ObjectProperty ; phys:edgeCollectionName "likes" ; rdfs:domain :Person ; rdfs:range :Org .
+""",
+    docs={
+        "Person": [{"_id": "Person/s", "_uri": EX + "s"}, {"_id": "Person/a", "_uri": EX + "a"}],
+        "Org": [{"_id": "Org/s", "_uri": EX + "s"}],
+        "likes": [{"_id": "likes/1", "_from": "Person/a", "_to": "Person/s"}],
+    },
+    data=":s a :Person, :Org, :Agent . :a a :Person, :Agent ; :likes :s .",
+)
+
+#: Review of #171: ``:name``'s domain names Employee too, outside the
+#: union's members, and only the Employee copy of ``:s`` holds "E".
+UNION_WIDE_DOMAIN = Store(
+    ontology=UNION_COPIES.ontology.replace(
+        ":name a owl:DatatypeProperty ; rdfs:domain [ owl:unionOf ( :Person :Org ) ] .",
+        ":name a owl:DatatypeProperty ; rdfs:domain [ owl:unionOf ( :Person :Org :Employee ) ] .",
+    ),
+    docs={
+        "Person": [{"_id": "Person/s", "_uri": EX + "s", "name": "S"}],
+        "Org": [{"_id": "Org/s", "_uri": EX + "s", "name": "S"}],
+        "Employee": [{"_id": "Employee/s", "_uri": EX + "s", "name": "E"}],
+    },
+    data=':s a :Person, :Org, :Agent, :Employee ; :name "S", "E" .',
+)
+
 #: Copies of ``:s`` in two named graphs, read through the lax default graph
 #: (the union of every graph): two quads, so ``:s`` comes back once per
 #: graph, as pyoxigraph and main read it (review of #146).
@@ -837,6 +885,9 @@ _CASES: list[tuple[str, Store, str, str | None]] = [
             ("subselect", "SELECT ?s ?n WHERE { ?s a :Agent { SELECT ?s ?n WHERE { ?s :name ?n } } }"),
             # Read from every copy in the BGP too: a constant, a bound value,
             # an EXISTS body; a second type pattern joins on the IRI.
+            # A compared attribute read again after the drop pairs every copy's
+            # value (:d holds D1 and D2; review of #171).
+            ("compared_again", "SELECT ?s ?n ?m WHERE { ?s a :Agent ; :name ?n OPTIONAL { ?s :name ?m } }"),
             ("second_type", "SELECT ?s WHERE { ?s a :Agent , :Person }"),
             ("constant_elsewhere", "SELECT ?s WHERE { ?s a :Agent ; :salary 10 }"),
             ("bound_elsewhere", "SELECT ?s WHERE { VALUES ?y { 10 } ?s a :Agent ; :salary ?y }"),
@@ -862,6 +913,33 @@ _CASES: list[tuple[str, Store, str, str | None]] = [
             ("attribute", "SELECT ?s ?t WHERE { ?s a :Agent ; :tag ?t }", "#170"),
             ("optional", "SELECT ?s ?t WHERE { ?s a :Agent OPTIONAL { ?s :tag ?t } }", None),
             ("constant", 'SELECT ?s WHERE { ?s a :Agent OPTIONAL { ?s :tag ?t } FILTER(?t = "c") }', None),
+        ]
+    ],
+    *[
+        (f"union_off_domain_{name}", UNION_OFF_DOMAIN, query, None)
+        for name, query in [
+            ("attribute", "SELECT ?s ?y WHERE { ?s a :Agent ; :salary ?y }"),
+            ("optional", "SELECT ?s ?y WHERE { ?s a :Agent OPTIONAL { ?s :salary ?y } }"),
+            ("member_type", "SELECT ?s ?y WHERE { ?s a :Person ; :salary ?y }"),
+        ]
+    ],
+    *[
+        (f"union_range_outside_{name}", UNION_RANGE_OUTSIDE, query, None)
+        for name, query in [
+            ("incoming", "SELECT ?x ?s WHERE { ?s a :Agent . ?x :likes ?s }"),
+            ("typed_source", "SELECT ?x ?s WHERE { ?s a :Agent . ?x a :Person . ?x :likes ?s }"),
+            ("edge_first", "SELECT ?x ?s WHERE { ?x a :Person . ?x :likes ?s . ?s a :Agent }"),
+            ("inverse", "SELECT ?s ?x WHERE { ?s a :Agent . ?s ^:likes ?x }"),
+            ("constant", "SELECT ?x WHERE { :s a :Agent . ?x :likes :s }"),
+            ("count", "SELECT (COUNT(*) AS ?c) WHERE { ?s a :Agent . ?x :likes ?s }"),
+        ]
+    ],
+    *[
+        (f"union_wide_domain_{name}", UNION_WIDE_DOMAIN, query, None)
+        for name, query in [
+            ("attribute", "SELECT ?s ?n WHERE { ?s a :Agent ; :name ?n }"),
+            ("constant", 'SELECT ?s WHERE { ?s a :Agent ; :name "E" }'),
+            ("optional", "SELECT ?s ?n WHERE { ?s a :Agent OPTIONAL { ?s :name ?n } }"),
         ]
     ],
     *[
@@ -1408,6 +1486,9 @@ _LIVE_ONLY = {
     "union_copies_optional_filter",
     "union_copies_optional_count",
     "union_copies_optional_after_union",
+    "union_copies_compared_again",
+    "union_off_domain_optional",
+    "union_wide_domain_optional",
     "union_list_copies_optional",
     "union_list_copies_constant",
     "ng_strict_optional",

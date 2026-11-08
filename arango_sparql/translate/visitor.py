@@ -1974,7 +1974,11 @@ class AlgebraVisitor:
             alias = self._ensure_subject_alias(s, prop)
             if emit_attribute_across_copies(self, alias, prop, o, triple):
                 return
-            alias = self._attribute_source(alias, prop)
+            if alias not in self.state.copy_members:
+                # A union row reading its own document has a row per copy
+                # that can hold the attribute (:func:`.copies.read_from_own_copy`):
+                # reading another copy here too would repeat its value.
+                alias = self._attribute_source(alias, prop)
             attr_path = attribute_path_ref(alias, prop.field_path)
             if isinstance(o, Variable):
                 # Predicate-existence filter (SPARQL 1.1 §18.5): a
@@ -3043,6 +3047,13 @@ class AlgebraVisitor:
         them), so an edge into another copy there is a known limit (#105).
         """
         by_collection = self._range_classes(range_iris)
+        row = self.state.copy_members.get(alias)
+        if row is not None and by_collection and not only_outside:
+            # A union row standing for every copy of its IRI: an edge into a
+            # member's copy outside the range was found from that copy's own
+            # row, which the copy check may have dropped (review of #171).
+            for collection, classes in row.members.items():
+                by_collection.setdefault(collection, classes)
         if not by_collection:
             return alias
         in_scope = self._graph_scope_test

@@ -59,10 +59,12 @@ _RETURN_SCALAR_RE = re.compile(r"RETURN\s+(?!DISTINCT\b)([^{].*?)\s*$")
 _LEN_SUBQUERY_START_RE = re.compile(r"LET\s+(\w+)\s*=\s*(?:\((.*)\)\s*\?\s*)?LENGTH\(\(\s*$")
 _SUBQUERY_END_RE = re.compile(r"^\)\)(?:\s*:\s*0)?\s*$")
 # The distinct values of an attribute over every copy of an IRI (#147,
-# ``copies.emit_attribute_across_copies``): ``LET <alias> = UNIQUE((`` opens
-# a scalar-returning subquery, a bare ``))`` closes it, and the alias binds
-# to its distinct results, by AQL equality.
-_UNIQUE_SUBQUERY_START_RE = re.compile(r"LET\s+(\w+)\s*=\s*UNIQUE\(\(\s*$")
+# ``copies.emit_attribute_across_copies``): ``LET <alias> = (<guard>) ?
+# UNIQUE((`` opens a scalar-returning subquery and ``)) : <else>`` closes it.
+# The alias binds to the subquery's distinct results, by AQL equality, when
+# the guard holds, and to the else expression otherwise.
+_UNIQUE_SUBQUERY_START_RE = re.compile(r"LET\s+(\w+)\s*=\s*(?:\((.*)\)\s*\?\s*)?UNIQUE\(\(\s*$")
+_UNIQUE_SUBQUERY_END_RE = re.compile(r"^\)\)(?:\s*:\s*(.+))?\s*$")
 # Row-returning correlated subquery the cross-subject OPTIONAL emitter
 # (ADR-0002 Problem 1, Option A) binds to a LET: ``LET <alias> = (``
 # opens the block, a bare ``)`` closes it, and the inner lines are a
@@ -766,9 +768,17 @@ def _split_sort_keys(clause: str) -> list[tuple[str, str]]:
 
 
 def _unique_scalars(
-    inner: str, bind_vars: dict[str, Any], docs: dict[str, list[dict[str, Any]]], env: Any, let_env: Any
-) -> list[Any]:
-    """The distinct scalar results of the correlated subquery *inner*."""
+    step: tuple[str, str | None, str | None],
+    bind_vars: dict[str, Any],
+    docs: dict[str, list[dict[str, Any]]],
+    env: Any,
+    let_env: Any,
+) -> Any:
+    """The distinct scalar results of a guarded ``UNIQUE((…))`` subquery, or
+    its else expression when the guard fails."""
+    inner, guard, otherwise = step
+    if guard is not None and not _eval_filter(guard, env, bind_vars, let_env):
+        return _eval_expr(otherwise or "null", env, bind_vars, let_env)
     rows = run_aql_subset(inner, bind_vars, docs, _outer_env=env, _outer_let=let_env)
     return _unique([row["_scalar"] for row in rows])
 
@@ -881,11 +891,17 @@ def run_aql_subset(
         if m := _UNIQUE_SUBQUERY_START_RE.match(line):
             alias = m.group(1)
             unique_inner: list[str] = []
-            i = _read_block(lines, i, unique_inner, _UNIQUE_SUBQUERY_START_RE, _SUBQUERY_END_RE)
+            i = _read_block(lines, i, unique_inner, _UNIQUE_SUBQUERY_START_RE, _UNIQUE_SUBQUERY_END_RE)
             if i >= len(lines):  # pragma: no cover - malformed AQL
                 raise AssertionError("unterminated UNIQUE(( subquery in AQL")
-            i += 1  # skip the closing ``))``
-            unique_step: tuple[str, Any, Any] = ("SUBQUERY_UNIQUE", alias, "\n".join(unique_inner))
+            closer = _UNIQUE_SUBQUERY_END_RE.match(lines[i])
+            assert closer is not None
+            i += 1  # skip the closing ``)) [: <else>]``
+            unique_step: tuple[str, Any, Any] = (
+                "SUBQUERY_UNIQUE",
+                alias,
+                ("\n".join(unique_inner), m.group(2), closer.group(1)),
+            )
             (post_collect_steps if seen_collect else pre_collect_plan).append(unique_step)
             continue
         if m := _ROWS_SUBQUERY_START_RE.match(line):
