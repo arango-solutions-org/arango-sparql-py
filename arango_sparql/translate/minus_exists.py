@@ -239,6 +239,9 @@ def _translate_probe(
         resolver=visitor.resolver,
         tenant_id=visitor.tenant_id,
         base_iri=visitor.base_iri,
+        # Whether a union in the probe may keep one row per IRI (#147).
+        query_triples=visitor.query_triples,
+        describe_resources=visitor.describe_resources,
     )
     # Pre-seed the child's var_to_expr with the outer scope's
     # bindings so shared variables turn into equality FILTERs

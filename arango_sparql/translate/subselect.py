@@ -161,6 +161,9 @@ def _emit_subselect(
         tenant_id=visitor.tenant_id,
         base_iri=visitor.base_iri,
         explicit_projection=list(inner_pv),
+        # Whether a union in the sub-select may keep one row per IRI (#148).
+        query_triples=visitor.query_triples,
+        describe_resources=visitor.describe_resources,
     )
     # Shared sigil counters (see _BindingState.counters).
     child_visitor.state.counters = visitor.state.counters

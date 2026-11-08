@@ -537,8 +537,8 @@ UNION_EDGE_COPIES = Store(
 :Org a owl:Class ; phys:collectionName "Org" ; rdfs:subClassOf :Agent .
 :Agent a owl:Class ; phys:mappingStyle "UNION" .
 :name a owl:DatatypeProperty ; rdfs:domain [ owl:unionOf ( :Person :Org ) ] .
-:knows a owl:ObjectProperty ; phys:edgeCollectionName "knows" ; rdfs:range :Person .
-:likes a owl:ObjectProperty ; phys:edgeCollectionName "likes" ; rdfs:range :Agent .
+:knows a owl:ObjectProperty ; phys:edgeCollectionName "knows" ; rdfs:domain :Person ; rdfs:range :Person .
+:likes a owl:ObjectProperty ; phys:edgeCollectionName "likes" ; rdfs:domain :Person ; rdfs:range :Agent .
 """,
     docs={
         "Person": [
@@ -550,6 +550,35 @@ UNION_EDGE_COPIES = Store(
         "likes": [{"_id": "likes/1", "_from": "Person/a", "_to": "Person/s"}],
     },
     data=':s a :Person, :Org, :Agent ; :name "S" . :a a :Person, :Agent ; :name "A" ; :knows :s ; :likes :s .',
+)
+
+#: As UNION_EDGE_COPIES, with ``:a`` in Org too: only its Person copy has
+#: the edges out, so a union row of ``:a`` depends on its copy for them.
+UNION_EDGE_OUT_COPIES = Store(
+    ontology=UNION_EDGE_COPIES.ontology,
+    docs={
+        **UNION_EDGE_COPIES.docs,
+        "Org": [*UNION_EDGE_COPIES.docs["Org"], {"_id": "Org/a", "_uri": EX + "a", "name": "A"}],
+    },
+    data=UNION_EDGE_COPIES.data + " :a a :Org .",
+)
+
+#: List values under ``fan_out_list_values`` (one triple per element):
+#: ``:s``'s copies share the tag "b", which is one triple, not two.
+UNION_LIST_COPIES = Store(
+    ontology=PREFIXES
+    + """
+:Person a owl:Class ; phys:collectionName "Person" ; rdfs:subClassOf :Agent .
+:Org a owl:Class ; phys:collectionName "Org" ; rdfs:subClassOf :Agent .
+:Agent a owl:Class ; phys:mappingStyle "UNION" .
+:tag a owl:DatatypeProperty ; rdfs:domain [ owl:unionOf ( :Person :Org ) ] .
+""",
+    docs={
+        "Person": [{"_id": "Person/s", "_uri": EX + "s", "tag": ["a", "b"]}],
+        "Org": [{"_id": "Org/s", "_uri": EX + "s", "tag": ["b", "c"]}, {"_id": "Org/t", "_uri": EX + "t"}],
+    },
+    data=':s a :Person, :Org, :Agent ; :tag "a", "b", "c" . :t a :Org, :Agent .',
+    resolver_kwargs={"fan_out_list_values": True},
 )
 
 #: Copies of ``:s`` in two named graphs, read through the lax default graph
@@ -788,31 +817,65 @@ _CASES: list[tuple[str, Store, str, str | None]] = [
         ]
     ],
     *[
-        (f"union_copies_{name}", UNION_COPIES, query, issue)
-        for name, query, issue in [
+        (f"union_copies_{name}", UNION_COPIES, query, None)
+        for name, query in [
             # #147: the value is on one copy, or on a third (Employee).
-            ("optional_attribute", "SELECT ?s ?n WHERE { ?s a :Agent OPTIONAL { ?s :name ?n } }", "#147"),
+            ("optional_attribute", "SELECT ?s ?n WHERE { ?s a :Agent OPTIONAL { ?s :name ?n } }"),
+            ("optional_attribute_elsewhere", "SELECT ?s ?y WHERE { ?s a :Agent OPTIONAL { ?s :salary ?y } }"),
+            ("optional_constant", "SELECT ?n WHERE { :m a :Agent OPTIONAL { :m :name ?n } }"),
             (
-                "optional_attribute_elsewhere",
-                "SELECT ?s ?y WHERE { ?s a :Agent OPTIONAL { ?s :salary ?y } }",
-                "#147",
+                "optional_filter",
+                'SELECT ?s ?n WHERE { ?s a :Agent OPTIONAL { ?s :name ?n FILTER(?n != "D1") } }',
+            ),
+            ("optional_count", "SELECT (COUNT(*) AS ?c) WHERE { ?s a :Agent OPTIONAL { ?s :name ?n } }"),
+            # A UNION repeats ?s legitimately; the OPTIONAL then reads every copy.
+            (
+                "optional_after_union",
+                "SELECT ?s ?n WHERE { { ?s a :Agent } UNION { ?s a :Person } OPTIONAL { ?s :name ?n } }",
             ),
             # #148: a sub-select joined to the union's subject.
-            (
-                "subselect",
-                "SELECT ?s ?n WHERE { ?s a :Agent { SELECT ?s ?n WHERE { ?s :name ?n } } }",
-                "#148",
-            ),
+            ("subselect", "SELECT ?s ?n WHERE { ?s a :Agent { SELECT ?s ?n WHERE { ?s :name ?n } } }"),
+            # Read from every copy in the BGP too: a constant, a bound value,
+            # an EXISTS body; a second type pattern joins on the IRI.
+            ("second_type", "SELECT ?s WHERE { ?s a :Agent , :Person }"),
+            ("constant_elsewhere", "SELECT ?s WHERE { ?s a :Agent ; :salary 10 }"),
+            ("bound_elsewhere", "SELECT ?s WHERE { VALUES ?y { 10 } ?s a :Agent ; :salary ?y }"),
+            ("exists_elsewhere", "SELECT ?s WHERE { ?s a :Agent FILTER EXISTS { ?s :salary ?y } }"),
+            ("not_exists", "SELECT ?s WHERE { ?s a :Agent FILTER NOT EXISTS { ?s :name ?n } }"),
         ]
     ],
     *[
-        (f"union_edge_copies_{name}", UNION_EDGE_COPIES, query, "#149")
+        (f"union_edge_copies_{name}", UNION_EDGE_COPIES, query, None)
         for name, query in [
             # #149: the edge points at the Person copy only.
             ("constant_source", "SELECT ?s WHERE { ?s a :Agent . :a :knows ?s }"),
             ("range_person", "SELECT ?x ?s WHERE { ?s a :Agent . ?x :knows ?s }"),
             ("range_supertype", "SELECT ?x ?s WHERE { ?s a :Agent . ?x :likes ?s }"),
             ("forward", "SELECT ?s ?x WHERE { ?s a :Agent . ?s ^:likes ?x }"),
+        ]
+    ],
+    *[
+        (f"union_list_copies_{name}", UNION_LIST_COPIES, query, issue)
+        for name, query, issue in [
+            # Compared as whole lists, so both copies stay and "b" comes back
+            # twice (#170, also on main).
+            ("attribute", "SELECT ?s ?t WHERE { ?s a :Agent ; :tag ?t }", "#170"),
+            ("optional", "SELECT ?s ?t WHERE { ?s a :Agent OPTIONAL { ?s :tag ?t } }", None),
+            ("constant", 'SELECT ?s WHERE { ?s a :Agent OPTIONAL { ?s :tag ?t } FILTER(?t = "c") }', None),
+        ]
+    ],
+    *[
+        (f"union_edge_out_copies_{name}", UNION_EDGE_OUT_COPIES, query, None)
+        for name, query in [
+            # An edge out of one copy (``Person/a``): every copy stays when a
+            # group walks it, and an EXISTS body (not a group's triple) reads
+            # the edge by the row's IRI, so the copy kept does not hide it.
+            ("out_edge", "SELECT ?s ?x WHERE { ?s a :Agent ; :knows ?x }"),
+            ("exists_out", "SELECT ?s WHERE { ?s a :Agent FILTER EXISTS { ?s :knows ?x } }"),
+            (
+                "exists_out_attribute",
+                "SELECT ?s ?n WHERE { ?s a :Agent ; :name ?n FILTER EXISTS { ?s :knows ?x } }",
+            ),
         ]
     ],
     *[
@@ -1339,6 +1402,14 @@ _CASES: list[tuple[str, Store, str, str | None]] = [
 #: runs them.
 _LIVE_ONLY = {
     "union_copies_subselect",
+    "union_copies_optional_attribute",
+    "union_copies_optional_attribute_elsewhere",
+    "union_copies_optional_constant",
+    "union_copies_optional_filter",
+    "union_copies_optional_count",
+    "union_copies_optional_after_union",
+    "union_list_copies_optional",
+    "union_list_copies_constant",
     "ng_strict_optional",
     "ng_strict_optional_class_walk",
     "graph_outside_optional",
