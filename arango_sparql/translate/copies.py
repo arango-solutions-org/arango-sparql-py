@@ -15,8 +15,9 @@ filtered the rows (:func:`drop_repeated_copies`). Its attribute reads
   members (or none) is read from the row's own document, as before, and
   compared by the probe: every copy that can hold it is a row of its own, so
   a copy with another value, or none, is another solution and stays (#124).
-  One attribute only: a second read from the row's own document would have
-  to be on the same copy as the first;
+  One triple only: a second read from the row's own document (another
+  attribute, or the same one again) would have to be on the same copy as
+  the first;
 * any other read — an attribute whose domain names a collection outside the
   members, or any read after the probe (an OPTIONAL body, a later group), a
   compared attribute's too — is read from every copy in the members and the
@@ -67,9 +68,10 @@ class CopyRow:
     """A union row that stands for every copy of its IRI (``copy_members``)."""
 
     members: dict[str, list[ResolvedClass]]
-    #: Attribute paths read from the row's own document before the probe,
-    #: which compares them.
+    #: The attribute path read from the row's own document before the probe,
+    #: which compares it (one at most), and the triple that read it.
     compared: list[tuple[str, ...]] = field(default_factory=list)
+    compared_by: Any = None
     #: Whether the probe is emitted: a read from the own document now would
     #: not be compared, so every later read is from every copy.
     probed: bool = False
@@ -240,14 +242,16 @@ def emit_attribute_across_copies(
         return False
     members = row.members
     if not row.probed:
-        if prop.field_path in row.compared:
+        if triple == row.compared_by:
             return False
         if not row.compared and read_from_own_copy(visitor, prop, members):
-            # One attribute only: a row reads it from its own document, so a
+            # One triple only: a row reads it from its own document, so a
             # second one read that way would have to be on the same copy
             # (review of #171: ``name "O"`` on Org/s and ``nick`` on Person/s
-            # matched no row). The others are read from every copy.
+            # matched no row; ``:name ?a ; :name ?b`` paired only one copy's
+            # names). The others are read from every copy.
             row.compared.append(prop.field_path)
+            row.compared_by = triple
             return False
     builder = visitor.builder
     sources: dict[str, list[ResolvedClass]] = {c: list(cs) for c, cs in members.items()}

@@ -968,6 +968,9 @@ _CASES: list[tuple[str, Store, str, str | None]] = [
             ("domain_members", 'SELECT ?s ?a WHERE { ?s a :Agent ; :name "O" ; :age ?a }'),
             ("both_variables", "SELECT ?s ?n ?a WHERE { ?s a :Agent ; :name ?n ; :age ?a }"),
             ("optional", 'SELECT ?s ?k WHERE { ?s a :Agent ; :name "O" OPTIONAL { ?s :nick ?k } }'),
+            # The compared attribute read again in the BGP pairs every copy's value.
+            ("same_attribute_twice", "SELECT ?s ?a ?b WHERE { ?s a :Agent ; :name ?a ; :name ?b }"),
+            ("same_attribute_constant", 'SELECT ?s ?b WHERE { ?s a :Agent ; :name "O" ; :name ?b }'),
         ]
     ],
     *[
