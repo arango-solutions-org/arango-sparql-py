@@ -11,10 +11,12 @@ earlier member holds in the same graph, once the BGP that opened it has
 filtered the rows (:func:`drop_repeated_copies`). Its attribute reads
 (:func:`emit_attribute_across_copies`, :class:`CopyRow`):
 
-* in that BGP, an attribute whose declared domain names only members (or
-  none) is read from the row's own document, as before, and compared by the
-  probe: every copy that can hold it is a row of its own, so a copy with
-  another value, or none, is another solution and stays (#124);
+* in that BGP, the first attribute read whose declared domain names only
+  members (or none) is read from the row's own document, as before, and
+  compared by the probe: every copy that can hold it is a row of its own, so
+  a copy with another value, or none, is another solution and stays (#124).
+  One attribute only: a second read from the row's own document would have
+  to be on the same copy as the first;
 * any other read — an attribute whose domain names a collection outside the
   members, or any read after the probe (an OPTIONAL body, a later group), a
   compared attribute's too — is read from every copy in the members and the
@@ -204,8 +206,9 @@ def emit_attribute_across_copies(
     """Emit the attribute triple ``(alias, prop, obj)`` from every copy of the
     subject's IRI, when *alias* is a union row that stands for all of them
     (``copy_members``); ``False`` (nothing emitted) when the row's own
-    document is read: before the probe, *prop* is compared, or every copy
-    that can hold it is a union row (then it is compared from now on). After
+    document is read: before the probe, *prop* is compared, or it is the
+    first attribute read and every copy that can hold it is a union row
+    (then it is compared from now on). After
     the probe every read is from every copy, a compared attribute's too: the
     rows kept differ on it, and each pairs with every copy's value (review
     of #171).
@@ -239,7 +242,11 @@ def emit_attribute_across_copies(
     if not row.probed:
         if prop.field_path in row.compared:
             return False
-        if read_from_own_copy(visitor, prop, members):
+        if not row.compared and read_from_own_copy(visitor, prop, members):
+            # One attribute only: a row reads it from its own document, so a
+            # second one read that way would have to be on the same copy
+            # (review of #171: ``name "O"`` on Org/s and ``nick`` on Person/s
+            # matched no row). The others are read from every copy.
             row.compared.append(prop.field_path)
             return False
     builder = visitor.builder

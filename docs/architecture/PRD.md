@@ -628,12 +628,15 @@ routes the subject (`translate/visitor.py`):
   own document (`drop_repeated_copies`, #124). That row then stands for
   every copy, in the union's own scope and in child scopes (a UNION arm, a
   sub-select, an OPTIONAL or EXISTS body, #148):
-  - in the BGP, an attribute whose declared domain names only members (or
-    none) is read from the row's own document and compared, as above: every
-    copy that can hold it is a row of its own, so a copy with another value,
-    or none, is another solution and stays;
+  - in the BGP, the first attribute read whose declared domain names only
+    members (or none) is read from the row's own document and compared, as
+    above: every copy that can hold it is a row of its own, so a copy with
+    another value, or none, is another solution and stays. One attribute
+    only: a second read from the row's own document would have to be on the
+    same copy as the first;
   - any other attribute read is read from every copy (`emit_attribute_across_copies`,
-    #147): one whose domain names a collection outside the members, and any
+    #147): a second attribute in the BGP, one whose domain names a
+    collection outside the members, and any
     read after the drop (an OPTIONAL body, a later group), a compared
     attribute's too, so each kept row pairs with every copy's value. The
     copies are looked up by `_uri`, in the same graph, tenant and graph

@@ -629,6 +629,25 @@ UNION_WIDE_DOMAIN = Store(
     data=':s a :Person, :Org, :Agent, :Employee ; :name "S", "E" .',
 )
 
+#: Recheck of #171: two attributes the BGP reads are on different copies of
+#: ``:s`` (``name "O"`` on Org/s, ``nick`` and ``age`` on Person/s).
+UNION_SPLIT_ATTRIBUTES = Store(
+    ontology=PREFIXES
+    + """
+:Person a owl:Class ; phys:collectionName "Person" ; rdfs:subClassOf :Agent .
+:Org a owl:Class ; phys:collectionName "Org" ; rdfs:subClassOf :Agent .
+:Agent a owl:Class ; phys:mappingStyle "UNION" .
+:name a owl:DatatypeProperty ; rdfs:domain :Agent .
+:age a owl:DatatypeProperty ; rdfs:domain :Agent .
+:nick a owl:DatatypeProperty ; rdfs:domain :Person .
+""",
+    docs={
+        "Person": [{"_id": "Person/s", "_uri": EX + "s", "name": "P", "nick": "k", "age": 3}],
+        "Org": [{"_id": "Org/s", "_uri": EX + "s", "name": "O"}],
+    },
+    data=':s a :Person, :Org, :Agent ; :name "P", "O" ; :nick "k" ; :age 3 .',
+)
+
 #: Copies of ``:s`` in two named graphs, read through the lax default graph
 #: (the union of every graph): two quads, so ``:s`` comes back once per
 #: graph, as pyoxigraph and main read it (review of #146).
@@ -940,6 +959,15 @@ _CASES: list[tuple[str, Store, str, str | None]] = [
             ("attribute", "SELECT ?s ?n WHERE { ?s a :Agent ; :name ?n }"),
             ("constant", 'SELECT ?s WHERE { ?s a :Agent ; :name "E" }'),
             ("optional", "SELECT ?s ?n WHERE { ?s a :Agent OPTIONAL { ?s :name ?n } }"),
+        ]
+    ],
+    *[
+        (f"union_split_attributes_{name}", UNION_SPLIT_ATTRIBUTES, query, None)
+        for name, query in [
+            ("domain_subset", 'SELECT ?s ?k WHERE { ?s a :Agent ; :name "O" ; :nick ?k }'),
+            ("domain_members", 'SELECT ?s ?a WHERE { ?s a :Agent ; :name "O" ; :age ?a }'),
+            ("both_variables", "SELECT ?s ?n ?a WHERE { ?s a :Agent ; :name ?n ; :age ?a }"),
+            ("optional", 'SELECT ?s ?k WHERE { ?s a :Agent ; :name "O" OPTIONAL { ?s :nick ?k } }'),
         ]
     ],
     *[
@@ -1487,6 +1515,7 @@ _LIVE_ONLY = {
     "union_copies_optional_count",
     "union_copies_optional_after_union",
     "union_copies_compared_again",
+    "union_split_attributes_optional",
     "union_off_domain_optional",
     "union_wide_domain_optional",
     "union_list_copies_optional",
