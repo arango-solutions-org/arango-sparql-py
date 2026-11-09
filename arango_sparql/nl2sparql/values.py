@@ -249,43 +249,77 @@ def _equalities(expr: object, depth: int = 0) -> list[tuple[Variable, Literal]]:
     return out
 
 
+_Pair = tuple[Variable, Literal]
+
+
 class _Scope:
     """What one algebra subtree contributes: literal uses already resolved,
-    variables bound by a property, and ``=`` / VALUES pairs not yet matched
-    to a binding (resolved as soon as an enclosing scope binds the variable)."""
+    variables bound by a property, and pairs not yet matched to a binding.
+
+    * ``pending`` — FILTER ``=`` pairs, resolved as soon as an enclosing scope
+      binds the variable;
+    * ``pending_values`` — VALUES rows, resolved the same way;
+    * ``escaped`` — VALUES rows that left a UNION branch unresolved. A VALUES
+      row joins with the group around the UNION, never with the sibling branch,
+      so these resolve only against bindings outside that UNION
+      (:func:`_absorb_children`)."""
 
     def __init__(self) -> None:
         self.uses: list[tuple[str, str]] = []
         self.bound: dict[Variable, list[str]] = {}
-        self.pending: list[tuple[Variable, Literal]] = []
+        self.pending: list[_Pair] = []
+        self.pending_values: list[_Pair] = []
+        self.escaped: list[_Pair] = []
 
     def absorb(self, other: _Scope) -> None:
         self.uses.extend(other.uses)
         for var, props in other.bound.items():
             self.bound.setdefault(var, []).extend(props)
         self.pending.extend(other.pending)
+        self.pending_values.extend(other.pending_values)
+        self.escaped.extend(other.escaped)
 
-    def resolve(self) -> None:
-        left: list[tuple[Variable, Literal]] = []
-        for var, lit in self.pending:
-            props = self.bound.get(var)
+    def _match(self, pairs: list[_Pair], bound: Mapping[Variable, list[str]]) -> list[_Pair]:
+        left: list[_Pair] = []
+        for var, lit in pairs:
+            props = bound.get(var)
             if props:
                 self.uses.extend((p, str(lit)) for p in props)
             else:
                 left.append((var, lit))
-        self.pending = left
+        return left
+
+    def resolve(self) -> None:
+        self.pending = self._match(self.pending, self.bound)
+        self.pending_values = self._match(self.pending_values, self.bound)
+
+
+def _absorb_children(scope: _Scope, children: list[_Scope]) -> None:
+    """Absorb sibling scopes into ``scope``. Each child's ``escaped`` VALUES
+    rows are first matched against the *other* children's bindings — the
+    patterns its UNION is joined with — never its own, which include the
+    sibling branch's."""
+    for i, child in enumerate(children):
+        if child.escaped:
+            others: dict[Variable, list[str]] = {}
+            for j, sibling in enumerate(children):
+                if j != i:
+                    for var, props in sibling.bound.items():
+                        others.setdefault(var, []).extend(props)
+            child.escaped = scope._match(child.escaped, others)
+        scope.absorb(child)
 
 
 def _scope(node: object, depth: int = 0) -> _Scope:
     """Walk an rdflib algebra tree, matching each FILTER ``=`` and VALUES row
     only to properties bound in the same group or an enclosing one — never to
-    a sibling UNION branch or OPTIONAL that binds the same variable name."""
+    a sibling UNION branch or OPTIONAL that binds the same variable name, and
+    never across a sub-SELECT's projection."""
     scope = _Scope()
     if node is None or depth > _MAX_DEPTH or isinstance(node, (str, Literal, URIRef, Variable)):
         return scope
     if isinstance(node, (list, tuple)):
-        for item in node:
-            scope.absorb(_scope(item, depth + 1))
+        _absorb_children(scope, [_scope(item, depth + 1) for item in node])
         return scope
     if not isinstance(node, dict):  # rdflib's CompValue is an OrderedDict
         return scope
@@ -302,16 +336,35 @@ def _scope(node: object, depth: int = 0) -> _Scope:
         return scope
     if name == "values":
         for row in node.get("res") or ():
-            scope.pending.extend((v, lit) for v, lit in row.items() if _is_string_literal(lit))
+            scope.pending_values.extend((v, lit) for v, lit in row.items() if _is_string_literal(lit))
         return scope
     if name == "Union":
-        # Each branch resolves its own filters first, so a filter inside one
-        # branch never matches the other's binding; the branches' bindings then
-        # go up for a filter written above the UNION, which applies to both.
+        # Each branch is evaluated on its own. A branch resolves its own pairs
+        # first; a FILTER it cannot resolve is dropped, because nothing outside
+        # the branch can satisfy it. A VALUES row it cannot resolve escapes, to
+        # be matched only against the patterns the UNION is joined with. The
+        # branches' bindings go up for a filter written above the UNION, which
+        # applies to both.
         for side in ("p1", "p2"):
             branch = _scope(node.get(side), depth + 1)
             branch.resolve()
+            branch.escaped.extend(branch.pending_values)
+            branch.pending, branch.pending_values = [], []
             scope.absorb(branch)
+        return scope
+    if name == "Project":
+        # A sub-SELECT (``ToMultiSet`` → ``Project``) is evaluated first and
+        # exposes only its projected variables. Its unresolved FILTER pairs
+        # are dropped; VALUES rows and bindings survive only on a projected
+        # variable. (The top-level query is also a Project; its filters sit
+        # below it and nothing sits above it, so the same rule is harmless.)
+        inner = _scope(node.get("p"), depth + 1)
+        inner.resolve()
+        projected = {v for v in node.get("PV") or () if isinstance(v, Variable)}
+        scope.uses.extend(inner.uses)
+        scope.bound = {v: props for v, props in inner.bound.items() if v in projected}
+        scope.pending_values = [(v, lit) for v, lit in inner.pending_values if v in projected]
+        scope.escaped = [(v, lit) for v, lit in inner.escaped if v in projected]
         return scope
     if name == "Minus":
         # MINUS shares no bindings with the pattern around it: its right side
@@ -323,10 +376,9 @@ def _scope(node: object, depth: int = 0) -> _Scope:
         scope.uses.extend(right.uses)
         scope.resolve()
         return scope
-    for key, child in node.items():
-        if key in ("_vars", "expr"):
-            continue
-        scope.absorb(_scope(child, depth + 1))
+    _absorb_children(
+        scope, [_scope(child, depth + 1) for key, child in node.items() if key not in ("_vars", "expr")]
+    )
     if name in ("Filter", "LeftJoin"):
         scope.pending.extend(_equalities(node.get("expr")))
     scope.resolve()
@@ -340,8 +392,13 @@ def sparql_literal_uses(query: str) -> list[tuple[str, str]]:
     object of ``ex:p`` in the same or an enclosing group (either side), or a
     ``VALUES`` row for such a variable. ``CONTAINS``, ``!=`` (or a negated
     ``=``), ``IN``, ``EXISTS`` bodies, a filter outside a ``MINUS`` on a
-    variable bound only inside it, and typed literals are not uses. A query that does not
-    parse gives ``[]`` (``validate`` is the authority on parseability)."""
+    variable bound only inside it, a filter in a ``UNION`` branch on a
+    variable only the other branch binds, a filter on a variable a sub-SELECT
+    binds but does not project (or inside a sub-SELECT on one bound only
+    outside it), and typed literals are not uses. A ``VALUES`` row in a
+    ``UNION`` branch is matched to a binding in its own branch or around the
+    ``UNION``, never in the other branch. A query that does not parse gives
+    ``[]`` (``validate`` is the authority on parseability)."""
     try:
         algebra = parse_sparql(query).algebra
     except Exception:  # noqa: BLE001 - validate() is the authority on parseability
