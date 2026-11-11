@@ -487,3 +487,70 @@ def test_the_service_never_sends_values_to_the_provider() -> None:
         if any(name in path.read_text(encoding="utf-8") for name in ("nl2sparql.values", "ValueCheck"))
     ]
     assert offenders == []
+
+
+# ---------------------------------------------------------------------------
+# Scoping across UNION branches and sub-SELECTs
+# ---------------------------------------------------------------------------
+
+_REGION = PropertyValues("Account", "region", ("EMEA", "APAC"), ("str",), 9)
+
+
+@pytest.mark.parametrize(
+    "branch",
+    [
+        "?a ex:owner/ex:region ?s",  # bound only by a property path
+        "?a ex:region ?r BIND(?r AS ?s)",  # bound only by BIND
+        "?a ex:region ?r",  # not bound at all: the filter is dead
+    ],
+)
+def test_a_branch_filter_its_branch_cannot_resolve_never_matches_the_other_branch(branch: str) -> None:
+    q = _P + f'SELECT ?a WHERE {{ {{ ?a ex:status ?s }} UNION {{ {branch} FILTER(?s = "EMEA") }} }}'
+    assert ("status", "EMEA") not in sparql_literal_uses(q)
+    assert value_flags(q, by_property([STATUS, _REGION])) == []
+
+
+def test_a_branch_filter_in_a_nested_union_never_matches_an_outer_branch() -> None:
+    q = (
+        _P + "SELECT ?a WHERE { { ?a ex:status ?s } UNION "
+        '{ { ?a ex:segment ?g } UNION { ?a ex:owner/ex:region ?s FILTER(?s = "EMEA") } } }'
+    )
+    assert value_flags(q, by_property([STATUS, _REGION])) == []
+
+
+def test_a_values_row_in_a_branch_never_matches_the_other_branch() -> None:
+    q = _P + 'SELECT ?a WHERE { { ?a ex:status ?s } UNION { VALUES ?s { "EMEA" } ?a ex:owner/ex:region ?s } }'
+    assert value_flags(q, by_property([STATUS, _REGION])) == []
+
+
+def test_a_values_row_in_a_branch_still_joins_a_binding_outside_the_union() -> None:
+    # VALUES, unlike a FILTER, joins with the group around the UNION: here the
+    # row is compared with status, and status never holds it.
+    q = _P + 'SELECT ?a WHERE { ?a ex:status ?s { VALUES ?s { "EMEA" } } UNION { ?a ex:region ?r } }'
+    assert sparql_literal_uses(q) == [("status", "EMEA")]
+    assert [(f.property, f.literal) for f in value_flags(q, by_property([STATUS]))] == [("status", "EMEA")]
+
+
+def test_an_outer_filter_never_matches_a_variable_a_sub_select_does_not_project() -> None:
+    q = _P + 'SELECT ?a WHERE { ?y ex:region ?r { SELECT ?a WHERE { ?a ex:status ?s } } FILTER(?s = "EMEA") }'
+    assert sparql_literal_uses(q) == []
+    assert value_flags(q, by_property([STATUS])) == []
+
+
+def test_a_filter_inside_a_sub_select_never_matches_an_outer_binding() -> None:
+    q = (
+        _P
+        + 'SELECT ?a WHERE { ?a ex:region ?s { SELECT ?a WHERE { ?a ex:status ?q FILTER(?s = "active") } } }'
+    )
+    assert sparql_literal_uses(q) == []
+    assert value_flags(q, by_property([_REGION])) == []
+
+
+def test_an_outer_filter_matches_a_variable_a_sub_select_projects() -> None:
+    q = _P + 'SELECT ?a WHERE { { SELECT ?a ?s WHERE { ?a ex:status ?s } } FILTER(?s = "Active") }'
+    assert sparql_literal_uses(q) == [("status", "Active")]
+
+
+def test_a_values_row_on_a_projected_variable_joins_outside_the_sub_select() -> None:
+    q = _P + 'SELECT ?a WHERE { { SELECT ?s WHERE { VALUES ?s { "Active" } } } ?a ex:status ?s }'
+    assert sparql_literal_uses(q) == [("status", "Active")]

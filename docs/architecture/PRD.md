@@ -1697,9 +1697,13 @@ confident `0`.
 - **What it checks:** each plain string literal the query compares a property
   with: a triple object, a `FILTER` `=` in the same or an enclosing group, or
   a `VALUES` row. A `!=` (or negated `=`), `IN`, `CONTAINS`, an `EXISTS` body,
-  and a filter outside a `MINUS` on a variable bound only inside it are not
-  checked. It flags a literal that is `absent`, matches only in another
-  `case`, or is the wrong `type`.
+  a filter outside a `MINUS` on a variable bound only inside it, a filter in a
+  `UNION` branch on a variable only the other branch binds, and a filter on a
+  variable a sub-`SELECT` binds but does not project (or inside a sub-`SELECT`
+  on one bound only outside it) are not checked. A `VALUES` row in a `UNION`
+  branch is matched to its own branch or the patterns around the `UNION`,
+  never the other branch. It flags a literal that is `absent`, matches only
+  in another `case`, or is the wrong `type`.
 - **On a flag:** it asks for one repair, with the values in the hint. It is
   soft because a value can be absent by the question's own premise.
 - **The prompt section:** `values_prompt_section` lists categorical
