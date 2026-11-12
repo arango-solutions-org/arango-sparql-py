@@ -139,3 +139,58 @@ def test_sanitized_env_bake_keeps_service_keys_and_strips_the_rest(tmp_path: Pat
         assert leaked not in baked, f"{leaked} must not ship in the bundle"
     # ROOT_PATH still appended alongside the sanitized keys
     assert "ROOT_PATH=/_service/uds/_db/IAM/arango-sparql-py" in baked
+
+
+def _baked_values(baked: str, key: str) -> list[str]:
+    """Every value the baked .env assigns to ``key`` (``export `` prefix allowed)."""
+    values = []
+    for line in baked.splitlines():
+        name, sep, value = line.removeprefix("export ").partition("=")
+        if sep and name.strip() == key:
+            values.append(value)
+    return values
+
+
+@pytest.mark.parametrize("root_path", ["/_service/uds/_db/IAM/arango-sparql-py", None])
+def test_bundle_bakes_json_logging(tmp_path: Path, root_path: str | None) -> None:
+    """PRD §9.5: production deployments MUST log JSON. The service's own default
+    is key=value, and the platform drops app env, so the bundle carries it."""
+    baked = _member(_build(tmp_path, root_path=root_path), ".env")
+    assert baked is not None, "no .env was baked into the bundle"
+    assert _baked_values(baked, "ARANGO_SPARQL_LOG_JSON") == ["1"]
+
+
+@pytest.mark.parametrize("line", ["ARANGO_SPARQL_LOG_JSON=0", "export ARANGO_SPARQL_LOG_JSON=0"])
+def test_env_file_setting_overrides_baked_json_logging(tmp_path: Path, line: str) -> None:
+    """An operator's explicit value is kept, and never followed by a second line
+    that load_dotenv would read instead."""
+    src = tmp_path / "src.env"
+    src.write_text(f"ARANGO_URL=https://h:8529\n{line}\n", encoding="utf-8")
+    tar = _build(tmp_path, root_path="/_service/uds/_db/IAM/arango-sparql-py", include_env_file=src)
+    baked = _member(tar, ".env")
+    assert baked is not None
+    assert _baked_values(baked, "ARANGO_SPARQL_LOG_JSON") == ["0"]
+
+
+def test_baked_json_logging_switches_the_service_formatter(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The baked value is one the service reads as "on" (it accepts 1/true/yes)."""
+    import logging
+
+    from arango_sparql.service import observability
+
+    monkeypatch.setenv("ARANGO_SPARQL_LOG_JSON", "1")
+    root = logging.getLogger("arango_sparql")
+    saved_handlers, saved_filters, saved_level = list(root.handlers), list(root.filters), root.level
+    try:
+        observability.configure_observability(force=True)
+        assert any(isinstance(h.formatter, observability._JsonFormatter) for h in root.handlers)
+    finally:
+        for h in list(root.handlers):
+            root.removeHandler(h)
+        for f in list(root.filters):
+            root.removeFilter(f)
+        for h in saved_handlers:
+            root.addHandler(h)
+        for f in saved_filters:
+            root.addFilter(f)
+        root.setLevel(saved_level)

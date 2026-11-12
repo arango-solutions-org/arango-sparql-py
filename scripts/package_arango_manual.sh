@@ -112,6 +112,18 @@ else
     echo "    SERVICE_ROOT_PATH=/_service/uds/_db/<db>/<instance> to fix it." >&2
 fi
 
+# --- bake JSON logging (PRD §9.5: production deployments MUST log JSON) --------
+# The service defaults to key=value log lines, which suit a developer terminal;
+# a deployed bundle logs one JSON object per line. Baked for the same reason as
+# ROOT_PATH: the platform drops app env at deploy time. An env file that already
+# sets ARANGO_SPARQL_LOG_JSON (either value) wins, so an operator can opt out.
+if grep -qE '^(export +)?ARANGO_SPARQL_LOG_JSON=' "${ROOTDIR}/.env" 2>/dev/null; then
+    echo "==> ARANGO_SPARQL_LOG_JSON already set by the baked env file; leaving it"
+else
+    printf 'ARANGO_SPARQL_LOG_JSON=1\n' >> "${ROOTDIR}/.env"
+    echo "==> Baked ARANGO_SPARQL_LOG_JSON=1 (JSON log lines, PRD §9.5)"
+fi
+
 # Strip lingering macOS xattrs (provenance/quarantine) that break Linux tar.
 if [[ "$(uname -s)" == "Darwin" ]] && command -v xattr >/dev/null 2>&1; then
     xattr -cr "${ROOTDIR}" 2>/dev/null || true

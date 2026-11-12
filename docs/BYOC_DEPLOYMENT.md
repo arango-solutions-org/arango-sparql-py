@@ -117,3 +117,10 @@ Beyond the `ARANGO_*` connection vars above: `ARANGO_SPARQL_PUBLIC_MODE`,
 `MAX_SESSIONS`, `OPENAI_API_KEY`/`ANTHROPIC_API_KEY` (NL), `ROOT_PATH` (above),
 and `ARANGO_SPARQL_UI_DIR` (set automatically by `entrypoint` to the bundled
 `ui/dist`; the service serves the SPA only when this points at a real bundle).
+
+**Logging.** The packager bakes `ARANGO_SPARQL_LOG_JSON=1` into every bundle,
+so a deployed service writes one JSON object per log line (PRD §9.5 requires
+JSON in production). The service itself defaults to `key=value` lines for
+local runs. To ship a bundle with `key=value` logs, set
+`ARANGO_SPARQL_LOG_JSON=0` in the env file you bake (`PACKAGE_ENV_FILE`); an
+explicit value there is kept.
