@@ -78,7 +78,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 
   1. Session / connect / public-mode / CORS / rate-limit / SSRF / redaction / startup-guard each have a passing parity test
   2. Every §8.6 STRIDE threat-matrix row has an asserting, CI-blocking security test
-  3. No request/response bodies appear in logs; `LOG_FORMAT=json` default emits the §9.5 envelope
+  3. No request/response bodies appear in logs; `ARANGO_SPARQL_LOG_JSON=1` emits the §9.5 envelope
   4. Adding an env var without updating Appendix A fails CI
 
 **Plans**: Shipped pre-GSD (no plans authored)

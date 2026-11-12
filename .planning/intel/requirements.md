@@ -101,7 +101,7 @@ Every row of the §8.6 STRIDE threat matrix has its asserting test.
 - acceptance: `tests/security/test_*.py` (CI-blocking).
 
 ## REQ-privacy-contract (§3.14)
-No-bodies-in-logs property test passes; `LOG_FORMAT=json` default emits the §9.5
+No-bodies-in-logs property test passes; `ARANGO_SPARQL_LOG_JSON=1` emits the §9.5
 envelope; opt-in tenant-label toggles behave per §17.2.
 - acceptance: `tests/security/test_no_body_in_logs.py`, `tests/test_log_envelope.py`.
 
