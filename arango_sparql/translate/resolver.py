@@ -229,6 +229,14 @@ class ResolvedProperty:
     edge of one of these reified relationships and ``?o`` is the vertex at its
     ``_to`` end (LDBC's ``snvoc:hasPerson`` for ``knows`` and ``hasMember``)."""
 
+    multi_valued: bool = False
+    """``phys:multiValued "true"`` on a datatype property (CSI ``multiValued``):
+    its attribute holds a list, and each element is one value, one triple. Read
+    one element per row, and matched by membership, as
+    :attr:`SchemaResolver.fan_out_list_values` reads every attribute; every other
+    attribute keeps whole-value semantics (CDF #220). Use
+    :meth:`SchemaResolver.fans_out`, which also honours the global flag."""
+
     @property
     def field_path(self) -> tuple[str, ...]:
         """Where the value is stored: one name per level, top level first."""
@@ -312,6 +320,12 @@ class SchemaResolver(AdvisoryLog):
     one-row-per-value semantics for RDF-loaded data. The W3C
     live-execution harness turns this on because its loader is
     exactly such an RDF flattener (ADR-0002-adjacent; PRD §6.6).
+
+    Per attribute instead: a mapping that knows which attributes hold lists
+    marks them (``phys:multiValued``, CSI 1.2 ``multiValued``;
+    :attr:`ResolvedProperty.multi_valued`), and only those fan out with this
+    knob off, so equality on every other attribute stays index-friendly
+    (CDF #220). :meth:`fans_out` answers for one property.
 
     Scope note: applies to required BGP reads and variable-predicate
     fan-outs. OPTIONAL's conditional-binding path keeps scalar
@@ -401,6 +415,8 @@ class SchemaResolver(AdvisoryLog):
     """Cached result of :meth:`tenant_scoped_classes`."""
     _nested_properties: tuple[str, ...] | None = field(default=None)
     """Lazily-built IRIs of datatype properties stored in a nested object."""
+    _multi_valued_attributes: tuple[str, ...] | None = field(default=None)
+    """Lazily-built result of :meth:`multi_valued_attributes`."""
     _shard_family_by_collection: dict[str, tuple[str, ...]] = field(default_factory=dict)
     """Reverse index: physical collection name → the shard family
     tuple it belongs to. Built once in :meth:`__post_init__` so
@@ -812,6 +828,7 @@ class SchemaResolver(AdvisoryLog):
             nested_path=nested_path,
             reified_edge=is_object and parse_flag(self._physical_string(ref, "reifiedEdge")) is True,
             edge_target_of=tuple(self._physical_iris(ref, "edgeTargetOf")) if is_object else (),
+            multi_valued=is_datatype and not is_object and self._multi_valued(ref, key),
         )
         if resolved.reified_edge and resolved.edge_collection is None:
             raise SchemaResolutionError(
@@ -820,6 +837,44 @@ class SchemaResolver(AdvisoryLog):
             )
         self._property_cache[key] = resolved
         return resolved
+
+    def _multi_valued(self, ref: URIRef, key: str) -> bool:
+        """Read ``phys:multiValued`` on *ref*: ``False`` when absent. A value that
+        is not a boolean raises rather than read a list as one value."""
+        raw = self._physical_string(ref, "multiValued")
+        if raw is None:
+            return False
+        flag = parse_flag(raw)
+        if flag is None:
+            raise SchemaResolutionError(
+                f'property {key!r} has phys:multiValued {raw!r}; expected "true" or "false"'
+            )
+        return flag
+
+    def fans_out(self, prop: ResolvedProperty) -> bool:
+        """Whether a read of datatype property *prop* is one row per list element:
+        under :attr:`fan_out_list_values` every attribute is, otherwise only one
+        declared :attr:`ResolvedProperty.multi_valued` (CDF #220)."""
+        if prop.is_object_property:
+            return False
+        return self.fan_out_list_values or prop.multi_valued
+
+    def multi_valued_attributes(self) -> tuple[str, ...]:
+        """The top-level attributes of the declared multi-valued datatype
+        properties, sorted: what a variable predicate (``?s ?p ?o``), which
+        reads attributes by name at run time, fans out. Empty under
+        :attr:`fan_out_list_values`, where every attribute fans out."""
+        if self._multi_valued_attributes is not None:
+            return self._multi_valued_attributes
+        attributes = {
+            prop.attribute
+            for subject in self.ontology.subjects(RDF.type, OWL.DatatypeProperty)
+            if isinstance(subject, URIRef)
+            for prop in [self.resolve_property(subject)]
+            if prop.multi_valued and prop.nested_path is None
+        }
+        self._multi_valued_attributes = tuple(sorted(attributes))
+        return self._multi_valued_attributes
 
     def _attribute_path(self, ref: URIRef, key: str) -> tuple[str, ...] | None:
         """Read ``phys:attributePath`` on *ref*: ``None`` when absent, else
@@ -1490,6 +1545,11 @@ def _synthesize_graph_from_bundle(bundle: MappingBundle) -> Graph:
                     g.add((p_iri, _SYNTHETIC_PHYS_NS["attributePath"], Literal(json.dumps(list(location)))))
                 elif location[0] != prop_name:
                     g.add((p_iri, _SYNTHETIC_PHYS_NS["attributeName"], Literal(location[0])))
+                # The attribute holds a list, one value per element (CSI 1.2
+                # ``multiValued``, CDF #220). One entity holding a list is
+                # enough: a scalar read as a one-element list loses nothing.
+                if isinstance(prop_spec, dict) and prop_spec.get("multiValued") is True:
+                    g.add((p_iri, _SYNTHETIC_PHYS_NS["multiValued"], Literal("true")))
 
     # A conceptual entity's properties are its datatype properties, as
     # arango-query-core's ``mapping_to_turtle`` declares them, so a subject

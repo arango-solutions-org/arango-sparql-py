@@ -15,7 +15,7 @@ from __future__ import annotations
 import datetime
 import decimal
 import logging
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Collection, Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -837,6 +837,9 @@ class AlgebraVisitor:
         # (``opt2``) for object properties. The downstream emitter does
         # not need to distinguish the two.
         new_bindings: list[tuple[str, str]] = []  # (sparql_var, source_expr)
+        # The datatype bindings read one row per list element: every one under
+        # ``fan_out_list_values``, else those declared multi-valued (CDF #220).
+        fan_out_vars: set[str] = set()
         # Object-property bindings, emitted together below: an edge can match
         # more than once, so they need rows, not a scalar (issue #48).
         edge_bindings: list[
@@ -902,6 +905,8 @@ class AlgebraVisitor:
                 )
             else:
                 value_expr = attribute_path_ref(subject_alias, prop.field_path)
+                if self.resolver.fans_out(prop):
+                    fan_out_vars.add(o_name)
 
             if is_rebind:
                 # Conditional-add inside a MINUS probe (SPARQL §18.2.5.2):
@@ -933,11 +938,13 @@ class AlgebraVisitor:
         has_filter = expr is not None and getattr(expr, "name", "") != "TrueFilter"
 
         # Rows, not scalars, whenever a binding can match more than once: an
-        # edge (issue #48), or — under ``fan_out_list_values``, where a
-        # list-valued attribute is one triple per element as in a required
-        # triple — any attribute (issue #53).
-        if edge_bindings or (new_bindings and self.resolver.fan_out_list_values):
-            self._emit_optional_rows(edge_bindings, new_bindings, expr if has_filter else None)
+        # edge (issue #48), or an attribute read one triple per list element
+        # as in a required triple — any attribute under ``fan_out_list_values``
+        # (issue #53), a declared multi-valued one otherwise (CDF #220).
+        if edge_bindings or any(var in fan_out_vars for var, _ in new_bindings):
+            self._emit_optional_rows(
+                edge_bindings, new_bindings, expr if has_filter else None, fan_out_vars=fan_out_vars
+            )
             return
 
         # Fast path: a single new binding, no inner FILTER. For both
@@ -988,10 +995,14 @@ class AlgebraVisitor:
         edge_bindings: list[tuple[str, ResolvedProperty, str, str]],
         attr_bindings: list[tuple[str, str]],
         filter_expr: Any,
+        *,
+        fan_out_vars: Collection[str] = (),
     ) -> None:
         """An OPTIONAL block with object-property triples: emit its padded rows
         (:meth:`_emit_padded_rows`) and bind the block's variables to them."""
-        for var, row_expr in self._emit_padded_rows(edge_bindings, attr_bindings, filter_expr):
+        for var, row_expr in self._emit_padded_rows(
+            edge_bindings, attr_bindings, filter_expr, fan_out_vars=fan_out_vars
+        ):
             self.state.var_to_expr[var] = row_expr
             self.state.maybe_unbound.add(var)
 
@@ -1000,6 +1011,8 @@ class AlgebraVisitor:
         edge_bindings: list[tuple[str, ResolvedProperty, str, str]],
         attr_bindings: list[tuple[str, str]],
         filter_expr: Any,
+        *,
+        fan_out_vars: Collection[str] = (),
     ) -> list[tuple[str, str]]:
         """An OPTIONAL block with object-property triples, as a padded left join.
 
@@ -1020,8 +1033,9 @@ class AlgebraVisitor:
               FOR <v>, <e> IN OUTBOUND <subject> @@<edges>   -- per edge triple
               [FILTER <e>.<type_field> == @<type>]          -- GENERIC_WITH_TYPE
               FILTER <subject>.<attr> != null               -- per attribute triple
-            -- (under fan_out_list_values: FOR <lv> IN FLATTEN([<subject>.<attr>])
-            --  FILTER <lv> != null, one row per list element; issue #53)
+            -- (an attribute that fans out, *fan_out_vars*:
+            --  FOR <lv> IN FLATTEN([<subject>.<attr>]) FILTER <lv> != null,
+            --  one row per list element; issue #53, CDF #220)
               [FILTER <inner filter>]
               RETURN {f0: <target identity>, f1: <subject>.<attr>, …}
             )
@@ -1056,7 +1070,7 @@ class AlgebraVisitor:
             self._guard_tenants(v_alias, child)
             fields.append((var, subject_ref(v_alias)))
         for var, source_expr in attr_bindings:
-            if self.resolver.fan_out_list_values:
+            if var in fan_out_vars:
                 # One row per element, the fan-out a required triple gets
                 # (``visit_BGP``): FLATTEN([attr]) is the list's elements, or
                 # ``[scalar]``; a missing attribute is ``[null]``, no match.
@@ -1999,13 +2013,15 @@ class AlgebraVisitor:
                 # level; a non-identifier name travels as a bind variable.
                 self.builder.filter_raw(self.builder.attribute_exists(alias, prop.field_path))
                 existing = self.state.var_to_expr.get(str(o))
+                fan_out = self.resolver.fans_out(prop)
                 if existing is None:
-                    if self.resolver.fan_out_list_values:
+                    if fan_out:
                         # RDF multi-valued semantics: a list-valued
                         # attribute is N triples, so ``?o`` must bind
                         # once per element. Scalars wrap into a
                         # one-element list so the loop is uniform
-                        # (see SchemaResolver.fan_out_list_values).
+                        # (see SchemaResolver.fan_out_list_values, and
+                        # ResolvedProperty.multi_valued for one attribute).
                         value_alias = self.builder.fresh_alias(prefix="lv")
                         self.builder.for_inline(value_alias, self._fan_out_source(attr_path))
                         self._record_var_expr(o, value_alias)
@@ -2022,7 +2038,7 @@ class AlgebraVisitor:
                     # Under fan-out semantics the join is a membership
                     # test: the bound value must be ONE OF the
                     # attribute's values.
-                    self.builder.filter_raw(self._value_match_expr(attr_path, existing))
+                    self.builder.filter_raw(self._value_match_expr(attr_path, existing, fan_out=fan_out))
                 # else: the same expression is already bound — the
                 # triple just re-states what we already knew, no-op.
             elif isinstance(o, (Literal, URIRef)):
@@ -2032,8 +2048,8 @@ class AlgebraVisitor:
                     # for a name that is not an identifier (it used to raise).
                     hint=prop.field_path[-1] if is_aql_identifier(prop.field_path[-1]) else None,
                 )
-                if self.resolver.fan_out_list_values:
-                    self.builder.filter_raw(self._value_match_expr(attr_path, bind))
+                if self.resolver.fans_out(prop):
+                    self.builder.filter_raw(self._value_match_expr(attr_path, bind, fan_out=True))
                 else:
                     self.builder.filter_eq(attr_path, bind)
             else:
@@ -3655,10 +3671,12 @@ class AlgebraVisitor:
         # lookup on ``_uri`` / ``_id`` rather than a scan per outer row.
         self.builder.filter_raw(subject_matches_value(alias, subject_ref(existing_alias)))
 
-    def _value_match_expr(self, attr_path: str, value_expr: str) -> str:
+    def _value_match_expr(self, attr_path: str, value_expr: str, *, fan_out: bool) -> str:
         """Equality between an attribute read and a value expression.
 
-        Plain ``==`` normally. Under ``fan_out_list_values`` a
+        Plain ``==`` normally. When the attribute fans out
+        (:meth:`SchemaResolver.fans_out`: every attribute under
+        ``fan_out_list_values``, else one declared multi-valued), a
         list-valued attribute represents multiple triples, so the
         match is a membership test over ``FLATTEN([attr])`` — which
         is ``[v1, v2, …]`` for a list attribute and ``[scalar]`` for
@@ -3666,7 +3684,7 @@ class AlgebraVisitor:
         live ArangoDB). ``FLATTEN`` (vs. an ``IS_LIST`` ternary) keeps
         the emission free of the conditional the fan-out FOR also
         avoids."""
-        if self.resolver.fan_out_list_values:
+        if fan_out:
             return f"{value_expr} IN FLATTEN([{attr_path}])"
         return f"{attr_path} == {value_expr}"
 

@@ -30,10 +30,16 @@ filtered the rows (:func:`drop_repeated_copies`). Its attribute reads
 An edge walked back into such a row starts from every copy in the range and
 the members (``AlgebraVisitor._every_copy``).
 
-Known limit: under ``fan_out_list_values`` a list is one triple per element,
-and comparing whole values keeps two copies whose lists differ but share an
-element, which then comes back once per copy. Reading every copy's elements
-instead costs those lookups on every row (LDBC's PG layout fans out): #170.
+A list is one triple per element when the attribute fans out
+(:meth:`~.resolver.SchemaResolver.fans_out`). Comparing whole lists would keep
+two copies whose lists differ but share an element, which then came back once
+per copy (#170). So an attribute the mapping declares multi-valued
+(``phys:multiValued``, CSI ``multiValued``) is never the one compared: it is
+read from every copy, its distinct elements, like any read after the probe.
+Known limit: under ``fan_out_list_values`` alone, an attribute not declared
+multi-valued is still compared as a whole list, so #170 stays there; reading
+every copy's elements for every attribute would cost those lookups on every
+row (LDBC's PG layout fans out). Declaring its list attributes fixes it.
 
 Otherwise every copy is kept, as before.
 
@@ -244,7 +250,10 @@ def emit_attribute_across_copies(
     if not row.probed:
         if triple == row.compared_by:
             return False
-        if not row.compared and read_from_own_copy(visitor, prop, members):
+        # A declared list is never compared whole: two copies whose lists
+        # differ but share an element would both stay, and the element come
+        # back once per copy (#170). It is read from every copy below.
+        if not row.compared and not prop.multi_valued and read_from_own_copy(visitor, prop, members):
             # One triple only: a row reads it from its own document, so a
             # second one read that way would have to be on the same copy
             # (review of #171: ``name "O"`` on Org/s and ``nick`` on Person/s
@@ -298,9 +307,10 @@ def emit_attribute_across_copies(
     builder.let(
         values, f"({alias}._uri != null) ? UNIQUE((\n{_indent(builder.absorb_child(sub))}\n)) : {own}"
     )
-    # Under ``fan_out_list_values`` a list value is one triple per element,
-    # as a one-document read fans it out (``FLATTEN([attr])``).
-    elements = f"UNIQUE(FLATTEN({values}))" if visitor.resolver.fan_out_list_values else values
+    # When the attribute fans out (``fan_out_list_values``, or declared
+    # multi-valued) a list value is one triple per element, as a one-document
+    # read fans it out (``FLATTEN([attr])``).
+    elements = f"UNIQUE(FLATTEN({values}))" if visitor.resolver.fans_out(prop) else values
     if isinstance(obj, Variable):
         existing = visitor.state.var_to_expr.get(str(obj))
         if existing is None:

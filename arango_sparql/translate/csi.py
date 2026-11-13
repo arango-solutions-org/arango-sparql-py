@@ -17,10 +17,12 @@ CSI provenance is preserved verbatim under ``metadata["csiProvenance"]``.
 See contextual-data-fabric ADR-0001 / M5 implementation-plan WP-A3, and the
 forward producer in r2g (``src/r2g/csi.py``).
 
-Versions: ``"1"`` and ``"1.1"``. 1.1 adds ``path`` to a property mapping (a
-value inside a nested object, issue #72) and is written only by a document
-that uses it. Property mappings are strict in both versions: a key this
-reader does not know is refused, since it could change where a value is read.
+Versions: ``"1"``, ``"1.1"`` and ``"1.2"``. 1.1 adds ``path`` to a property
+mapping (a value inside a nested object, issue #72); 1.2 adds ``multiValued``
+(the attribute holds a list, one value per element; CDF #220). A producer
+writes each only for a document that uses it. Property mappings are strict in
+every version: a key this reader does not know is refused, since it could
+change where or how a value is read.
 """
 
 from __future__ import annotations
@@ -42,7 +44,13 @@ _ENDPOINT_FIELDS = ("fromEntity", "toEntity")
 # mapping (issue #72); a producer writes it only for a document that uses
 # ``path``, so a reader that knows only "1" refuses just those documents
 # instead of silently reading every nested property as a missing field.
-CSI_VERSIONS = ("1", "1.1")
+CSI_VERSIONS = ("1", "1.1", "1.2")
+
+# The versions whose property mappings may carry ``multiValued``. A reader of
+# "1" or "1.1" would ignore the key and bind a whole list as one value, so a
+# document that uses it declares "1.2" (arango-schema-analyzer writes it only
+# then), and a "1" or "1.1" document that carries it is refused.
+_MULTI_VALUED_VERSIONS = ("1.2",)
 
 # What a CSI property mapping (``arangoPhysicalMapping.entities.<E>.properties.
 # <p>``) may hold. The rest of a CSI document keeps the schema's additive rule
@@ -51,7 +59,9 @@ CSI_VERSIONS = ("1", "1.1")
 # and is refused. Location keys first, then the descriptive extras producers
 # write today (arango-schema-analyzer: indexed, unique; arango-cypher-py's
 # acquisition: type, role, required, sentinelValues, numericLike,
-# sampleValues). A key starting with ``x-`` is an explicitly ignorable extra.
+# sampleValues), and ``multiValued``, which changes how a value is read (one
+# per list element) and so is checked against the version. A key starting with
+# ``x-`` is an explicitly ignorable extra.
 _PROPERTY_LOCATION_KEYS = ("field", "path")
 _PROPERTY_DESCRIPTIVE_KEYS = (
     "type",
@@ -62,6 +72,7 @@ _PROPERTY_DESCRIPTIVE_KEYS = (
     "sentinelValues",
     "numericLike",
     "sampleValues",
+    "multiValued",
 )
 _PROPERTY_EXTENSION_PREFIX = "x-"
 
@@ -76,7 +87,8 @@ def _check_property_mappings(entity: str, spec: dict[str, Any], version: str) ->
     """Refuse a property mapping this reader could misread (issue #72).
 
     Every key must be a location key, a known descriptive extra, or an
-    ``x-`` extension; ``path`` needs ``csiVersion`` "1.1".
+    ``x-`` extension; ``path`` needs ``csiVersion`` "1.1", and ``multiValued``
+    (a boolean) needs "1.2".
     """
     properties = spec.get("properties")
     if properties is None:
@@ -109,6 +121,16 @@ def _check_property_mappings(entity: str, spec: dict[str, Any], version: str) ->
                 f"CSI {prop_where} uses 'path', which needs csiVersion '1.1' (the document says '1'); "
                 f"a reader of version 1 would ignore it and read the wrong field"
             )
+        if "multiValued" in prop_spec:
+            if version not in _MULTI_VALUED_VERSIONS:
+                raise MappingError(
+                    f"CSI {prop_where} uses 'multiValued', which needs csiVersion '1.2' (the document "
+                    f"says {version!r}); a reader of an earlier version would read the whole list as one value"
+                )
+            if not isinstance(prop_spec["multiValued"], bool):
+                raise MappingError(
+                    f"CSI {prop_where} sets 'multiValued' to {prop_spec['multiValued']!r}; expected true or false"
+                )
 
 
 def mapping_bundle_from_csi(csi: dict[str, Any] | None) -> MappingBundle:

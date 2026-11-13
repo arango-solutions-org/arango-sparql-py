@@ -129,7 +129,7 @@ def test_relationship_without_conceptual_entry_omits_endpoints():
     assert rel["edgeCollectionName"] == "placed_by"
 
 
-@pytest.mark.parametrize("bad_version", ["2", "1.2", 1, 1.1, None, ""])
+@pytest.mark.parametrize("bad_version", ["2", "1.3", 1, 1.1, 1.2, None, ""])
 def test_bad_version_rejected(bad_version):
     csi = _forward_csi()
     csi["csiVersion"] = bad_version

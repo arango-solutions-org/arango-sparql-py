@@ -1,0 +1,206 @@
+# Golden corpus for attributes declared multi-valued (contextual-data-fabric #220).
+#
+# Contract — ``phys:multiValued "true"`` (CSI 1.2 ``multiValued``) on a
+# datatype property says its attribute holds a list, each element one value;
+# ``fan_out_list_values`` stays off:
+#   * that attribute reads one row per element (``FOR lv IN FLATTEN([attr])``),
+#     and a constant or a bound value matches by membership
+#     (``value IN FLATTEN([attr])``); an empty list is no value;
+#   * every other attribute keeps whole-value semantics: ``attr == @v``, which
+#     an index can serve, and ``?r`` binds the stored value;
+#   * OPTIONAL over the list attribute is padded rows (issue #53's shape);
+#     over another attribute the scalar fast path is unchanged;
+#   * a variable predicate decides per attribute at run time, from the bound
+#     list of declared list attributes (``k IN @list_attrs``).
+
+ontology: |
+  @prefix : <http://ex.org/> .
+  @prefix owl: <http://www.w3.org/2002/07/owl#> .
+  @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+  @prefix phys: <https://arango.solutions/phys#> .
+
+  :Document a owl:Class ; phys:collectionName "documents" .
+  :questionsServed a owl:DatatypeProperty ; rdfs:domain :Document ;
+    phys:attributeName "questions_served" ; phys:multiValued "true" .
+  :role a owl:DatatypeProperty ; rdfs:domain :Document .
+
+cases:
+  - name: list_constant_is_membership
+    sparql: |
+      PREFIX : <http://ex.org/>
+      SELECT ?d WHERE {
+        ?d a :Document ; :questionsServed "Q2" .
+      }
+    expected_aql: |-
+      FOR doc1 IN @@c1_documents
+      FILTER @_p1_questions_served IN FLATTEN([doc1.questions_served])
+      RETURN { d: NOT_NULL(doc1._uri, doc1._id) }
+    expected_bind_vars:
+      "@c1_documents": "documents"
+      "_p1_questions_served": "Q2"
+
+  - name: list_binds_each_element
+    sparql: |
+      PREFIX : <http://ex.org/>
+      SELECT ?d ?q WHERE {
+        ?d a :Document ; :questionsServed ?q .
+      }
+    expected_aql: |-
+      FOR doc1 IN @@c1_documents
+      FILTER HAS(doc1, "questions_served")
+      FOR lv2 IN FLATTEN([doc1.questions_served])
+      RETURN { d: NOT_NULL(doc1._uri, doc1._id), q: lv2 }
+    expected_bind_vars:
+      "@c1_documents": "documents"
+
+  - name: list_filter_reads_elements
+    sparql: |
+      PREFIX : <http://ex.org/>
+      SELECT ?d WHERE {
+        ?d a :Document ; :questionsServed ?q .
+        FILTER(?q = "Q2")
+      }
+    expected_aql: |-
+      FOR doc1 IN @@c1_documents
+      FILTER HAS(doc1, "questions_served")
+      FOR lv2 IN FLATTEN([doc1.questions_served])
+      FILTER (lv2 == @_p1)
+      RETURN { d: NOT_NULL(doc1._uri, doc1._id) }
+    expected_bind_vars:
+      "@c1_documents": "documents"
+      "_p1": "Q2"
+
+  - name: scalar_constant_stays_equality
+    sparql: |
+      PREFIX : <http://ex.org/>
+      SELECT ?d WHERE {
+        ?d a :Document ; :role "pdf" .
+      }
+    expected_aql: |-
+      FOR doc1 IN @@c1_documents
+      FILTER doc1.role == @_p1_role
+      RETURN { d: NOT_NULL(doc1._uri, doc1._id) }
+    expected_bind_vars:
+      "@c1_documents": "documents"
+      "_p1_role": "pdf"
+
+  - name: scalar_binds_whole_value
+    sparql: |
+      PREFIX : <http://ex.org/>
+      SELECT ?d ?r WHERE {
+        ?d a :Document ; :role ?r .
+      }
+    expected_aql: |-
+      FOR doc1 IN @@c1_documents
+      FILTER HAS(doc1, "role")
+      RETURN { d: NOT_NULL(doc1._uri, doc1._id), r: doc1.role }
+    expected_bind_vars:
+      "@c1_documents": "documents"
+
+  - name: join_scalar_into_list_is_membership
+    sparql: |
+      PREFIX : <http://ex.org/>
+      SELECT ?d ?e WHERE {
+        ?d a :Document ; :role ?r .
+        ?e a :Document ; :questionsServed ?r .
+      }
+    expected_aql: |-
+      FOR doc1 IN @@c1_documents
+      FILTER HAS(doc1, "role")
+      FOR doc2 IN @@c1_documents
+      FILTER HAS(doc2, "questions_served")
+      FILTER doc1.role IN FLATTEN([doc2.questions_served])
+      RETURN { d: NOT_NULL(doc1._uri, doc1._id), e: NOT_NULL(doc2._uri, doc2._id) }
+    expected_bind_vars:
+      "@c1_documents": "documents"
+
+  - name: join_list_into_scalar_is_equality
+    sparql: |
+      PREFIX : <http://ex.org/>
+      SELECT ?d ?e WHERE {
+        ?d a :Document ; :questionsServed ?q .
+        ?e a :Document ; :role ?q .
+      }
+    expected_aql: |-
+      FOR doc1 IN @@c1_documents
+      FILTER HAS(doc1, "questions_served")
+      FOR lv2 IN FLATTEN([doc1.questions_served])
+      FOR doc3 IN @@c1_documents
+      FILTER HAS(doc3, "role")
+      FILTER doc3.role == lv2
+      RETURN { d: NOT_NULL(doc1._uri, doc1._id), e: NOT_NULL(doc3._uri, doc3._id) }
+    expected_bind_vars:
+      "@c1_documents": "documents"
+
+  - name: optional_list_is_rows
+    sparql: |
+      PREFIX : <http://ex.org/>
+      SELECT ?d ?q WHERE {
+        ?d a :Document .
+        OPTIONAL { ?d :questionsServed ?q }
+      }
+    expected_aql: |-
+      FOR doc1 IN @@c1_documents
+      LET optsub3 = (
+        FOR lv2 IN FLATTEN([doc1.questions_served])
+        FILTER lv2 != null
+        RETURN {f0: lv2}
+      )
+      FOR optrow4 IN (LENGTH(optsub3) > 0 ? optsub3 : [null])
+      RETURN { d: NOT_NULL(doc1._uri, doc1._id), q: optrow4.f0 }
+    expected_bind_vars:
+      "@c1_documents": "documents"
+
+  - name: optional_scalar_keeps_the_fast_path
+    sparql: |
+      PREFIX : <http://ex.org/>
+      SELECT ?d ?r WHERE {
+        ?d a :Document .
+        OPTIONAL { ?d :role ?r }
+      }
+    expected_aql: |-
+      FOR doc1 IN @@c1_documents
+      RETURN { d: NOT_NULL(doc1._uri, doc1._id), r: doc1.role }
+    expected_bind_vars:
+      "@c1_documents": "documents"
+
+  - name: variable_predicate_fans_out_declared_lists
+    sparql: |
+      PREFIX : <http://ex.org/>
+      SELECT ?d ?p ?o WHERE {
+        ?d a :Document ; ?p ?o .
+      }
+    expected_aql: |-
+      FOR doc1 IN @@c1_documents
+      FOR k2 IN ATTRIBUTES(doc1, true)
+      FILTER k2 NOT IN @_p1_sys_attrs
+      LET p3 = @_p2_attr_uris[k2]
+      FILTER p3 != null
+      FOR lv4 IN (k2 IN @_p3_list_attrs ? FLATTEN([doc1[k2]]) : [doc1[k2]])
+      RETURN { d: NOT_NULL(doc1._uri, doc1._id), p: p3, o: lv4 }
+    expected_bind_vars:
+      "@c1_documents": "documents"
+      "_p1_sys_attrs": ["_graph", "_uri"]
+      "_p2_attr_uris": {"questions_served": "http://ex.org/questionsServed", "role": "http://ex.org/role"}
+      "_p3_list_attrs": ["questions_served"]
+
+  - name: variable_predicate_constant
+    sparql: |
+      PREFIX : <http://ex.org/>
+      SELECT ?d ?p WHERE {
+        ?d a :Document ; ?p "Q2" .
+      }
+    expected_aql: |-
+      FOR doc1 IN @@c1_documents
+      FOR k2 IN ATTRIBUTES(doc1, true)
+      FILTER k2 NOT IN @_p1_sys_attrs
+      LET p3 = @_p2_attr_uris[k2]
+      FILTER p3 != null
+      FILTER (k2 IN @_p4_list_attrs ? @_p3_obj IN FLATTEN([doc1[k2]]) : doc1[k2] == @_p3_obj)
+      RETURN { d: NOT_NULL(doc1._uri, doc1._id), p: p3 }
+    expected_bind_vars:
+      "@c1_documents": "documents"
+      "_p1_sys_attrs": ["_graph", "_uri"]
+      "_p2_attr_uris": {"questions_served": "http://ex.org/questionsServed", "role": "http://ex.org/role"}
+      "_p3_obj": "Q2"
+      "_p4_list_attrs": ["questions_served"]
