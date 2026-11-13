@@ -133,7 +133,7 @@ under *Where detailed* — these one-line summaries are the contract.
 | §3.11 | **`arango-ontoextract` integration** — AOE can (a) point its PRD Q7 endpoint at us, (b) `/mapping/export-owl` seeds an AOE library entry, (c) `/mapping/import-owl` accepts a curated OWL push | `tests/integration/test_aoe_roundtrip.py` (Docker-gated; both services live) | §12.2 |
 | §3.12 | **Performance SLOs in §9.4 met** — every budget row passes its `tests/perf/` benchmark within ≤ 25 % of the stated p95 | `tests/perf/test_*.py` (CI-blocking on > 25 % regression) | §9.4 |
 | §3.13 | **Threat-model mitigations enforced** — every row of the §8.6 STRIDE matrix has its asserting test under `tests/security/` | `tests/security/test_*.py` (CI-blocking) | §8.6, §13.1 |
-| §3.14 | **Privacy contract enforced** — no-bodies-in-logs property test passes; `LOG_FORMAT=json` default emits the §9.5 envelope; opt-in toggles for tenant labels behave per §17.2 | `tests/security/test_no_body_in_logs.py`, `tests/test_log_envelope.py` | §17 |
+| §3.14 | **Privacy contract enforced** — no-bodies-in-logs property test passes; `ARANGO_SPARQL_LOG_JSON=1` emits the §9.5 envelope; opt-in toggles for tenant labels behave per §17.2 | `tests/security/test_no_body_in_logs.py`, `tests/test_log_envelope.py` — **not yet written** ([#178](https://github.com/arango-solutions-org/arango-sparql-py/issues/178)) | §17 |
 | §3.15 | **Configuration appendix is normative** — adding a new env var without updating Appendix A fails CI | `tests/test_config_appendix.py` (introspects `arango_sparql/_env.py` against the appendix table) | Appendix A |
 | §3.16 | **Public release readiness** — repo public, CI green on Python 3.11/3.12/3.13 + ArangoDB 3.11/3.12, MIT LICENSE + CONTRIBUTING + SECURITY + Operational runbook published, repeatable `docker compose up` dev loop, SBOM artefact attached to the v1.0 release tag | GitHub releases page; CI history; `docker compose up && curl /health/ready` | §15, §16 |
 
@@ -2196,8 +2196,10 @@ names use the convention `arango_sparql.<phase>` (e.g.,
 `arango_sparql.translate`). W3C `traceparent` headers are honoured on
 inbound requests.
 
-**Structured logs** are JSON-formatted to stdout (one event per line). The
-canonical envelope:
+**Structured logs** go to stdout, one event per line. By default each line
+is plain `key=value` pairs; `ARANGO_SPARQL_LOG_JSON=1` switches to one JSON
+object per line, for log-aggregation pipelines (Datadog / Loki / Splunk).
+The canonical JSON envelope:
 
 ```json
 {
@@ -2218,8 +2220,11 @@ canonical envelope:
 ```
 
 Tenant and session ID inclusion are governed by §17.2 (Privacy). The
-default `LOG_FORMAT=json` may be flipped to `pretty` (human-readable) for
-local development; production deployments MUST use `json`.
+`key=value` default suits local development; production deployments MUST
+set `ARANGO_SPARQL_LOG_JSON=1`. The JSON formatter
+(`arango_sparql/service/observability.py`) does not yet emit every key
+above; reconciling the two is tracked in
+[#178](https://github.com/arango-solutions-org/arango-sparql-py/issues/178).
 
 ### 9.6 Health probes
 
@@ -3077,10 +3082,14 @@ per row in `tests/security/`):
 - **Live-execution harness** (`tests/w3c/test_w3c_live_execution.py`,
   Docker-gated) loads the case's RDF data into a fresh per-test collection
   set, executes the translated AQL against ArangoDB, and compares cursor
-  bindings against the W3C-expected `.srx` / `.srj` / `.ttl` results. A
-  binding mismatch is reported as `xfail` (not `fail`) so the suite stays
-  green during translator catch-up; the xfail reason captures the
-  divergence so it surfaces in `COVERAGE_REPORT.md`.
+  results against the W3C-expected ones. SELECT/ASK bindings are compared
+  against `.srx`, `.srj`, `.tsv` and result-set `.ttl` files (blank nodes
+  up to isomorphism); CONSTRUCT/DESCRIBE output is compared with the
+  expected Turtle graph by RDF isomorphism. A mismatch on a case listed in
+  `EXPECTED_LIVE_PASSES` (known to pass) is a hard failure, so a regression
+  cannot slide back unnoticed; a mismatch on any other case is reported as
+  `xfail`, with the divergence as the reason, so it surfaces in
+  `COVERAGE_REPORT.md`.
 - **Cross-validation harness** (`tests/cross/`) runs the same SPARQL
   against `pyoxigraph` (the W3C-conformant Rust triplestore via Python
   bindings) and against a tiny in-memory AQL-subset interpreter
@@ -4413,6 +4422,9 @@ a literal is flagged.
   * no values from properties that must stay in-tenancy.
 * **Exposing it through the service** would need its own operator setting,
   off by default. Until that setting exists, the routes do not expose it.
+* **Signed off** by Arthur Keen on 2026-11-13, as written. Known caller:
+  `contextual-data-fabric` (M5 FR-24), behind its own `CDF_NL_VALUES`
+  operator setting, off by default.
 
 Operator obligations when enabling NL:
 * Choose a provider whose data-handling policy matches the operator's
@@ -4555,8 +4567,8 @@ Conventions: env var names are `SCREAMING_SNAKE_CASE`; precedence is
 | `WORKER_COUNT` | `1` | no | Uvicorn workers per replica; raise only when scaling vertically (most operators scale via K8s replicas) |
 | `GRACEFUL_TIMEOUT` | `30` | no | Seconds to drain on SIGTERM |
 | `KEEPALIVE` | `5` | no | HTTP keep-alive seconds |
-| `LOG_LEVEL` | `INFO` | no | One of `DEBUG`/`INFO`/`WARNING`/`ERROR` |
-| `LOG_FORMAT` | `json` | no | `json` (production) or `pretty` (dev) |
+| `ARANGO_SPARQL_LOG_LEVEL` | `INFO` | no | Level of the `arango_sparql` logger: one of `DEBUG`/`INFO`/`WARNING`/`ERROR` |
+| `ARANGO_SPARQL_LOG_JSON` | `false` | no | `false`: plain `key=value` lines (dev). `true`: one JSON object per line (§9.5); required in production. Accepts `1`/`true`/`yes`. |
 | `BOOTSTRAP_SCHEMA` | `false` | no | If `true`, `/health/startup` waits for first `schema/introspect` to warm |
 
 ### A.2 Public-mode posture (multitenancy/security)

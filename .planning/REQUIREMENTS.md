@@ -27,7 +27,7 @@
 
 - [ ] **REQ-operational-parity** (PRD §3.8): Operational parity with `arango-cypher-py` — session/connect/public-mode/CORS/rate-limit/SSRF/redaction/startup-guard, one CI test per surface. *Runtime surfaces exist, but the required `tests/parity/test_cypher_py_*.py` per-surface contract is absent.* — acceptance: `tests/parity/test_cypher_py_*.py`
 - [ ] **REQ-threat-model-mitigations** (PRD §3.13): Every §8.6 STRIDE row has its asserting test (CI-blocking). *The required `tests/security/` suite is absent.* — acceptance: `tests/security/test_*.py`
-- [ ] **REQ-privacy-contract** (PRD §3.14): No-bodies-in-logs property test passes; `LOG_FORMAT=json` default emits §9.5 envelope; tenant-label toggles per §17.2. *Observability support is partial: JSON is opt-in through `ARANGO_SPARQL_LOG_JSON`, not the specified `LOG_FORMAT=json` default, and the named tests are absent.* — acceptance: `tests/security/test_no_body_in_logs.py`, `tests/test_log_envelope.py`
+- [ ] **REQ-privacy-contract** (PRD §3.14): No-bodies-in-logs property test passes; `ARANGO_SPARQL_LOG_JSON=1` emits §9.5 envelope; tenant-label toggles per §17.2. *Partial: both formatters exist, but the JSON envelope lacks several §9.5 keys and the named tests are absent (#178).* — acceptance: `tests/security/test_no_body_in_logs.py`, `tests/test_log_envelope.py`
 - [ ] **REQ-config-appendix-normative** (PRD §3.15): Adding a new env var without updating Appendix A fails CI. *The named `tests/test_config_appendix.py` guard is absent.* — acceptance: `tests/test_config_appendix.py`
 
 ### Interoperability & Performance
