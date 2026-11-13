@@ -1,4 +1,7 @@
-"""`scripts/package_arango_manual.sh` bakes ROOT_PATH for a prefixed mount.
+"""`scripts/package_arango_manual.sh` bakes deployment settings into the bundle.
+
+Every bundle's `.env` carries ARANGO_SPARQL_LOG_JSON=1 (PRD §9.5), and ROOT_PATH
+for a prefixed mount.
 
 The Container Manager drops app env at deploy time, so the service's mount
 prefix must be baked into the bundle's `.env` (the FastAPI app reads it via
@@ -139,3 +142,93 @@ def test_sanitized_env_bake_keeps_service_keys_and_strips_the_rest(tmp_path: Pat
         assert leaked not in baked, f"{leaked} must not ship in the bundle"
     # ROOT_PATH still appended alongside the sanitized keys
     assert "ROOT_PATH=/_service/uds/_db/IAM/arango-sparql-py" in baked
+
+
+def _baked_values(baked: str, key: str) -> list[str]:
+    """Every value the baked .env assigns to ``key`` (``export `` prefix allowed)."""
+    values = []
+    for line in baked.splitlines():
+        name, sep, value = line.removeprefix("export ").partition("=")
+        if sep and name.strip() == key:
+            values.append(value)
+    return values
+
+
+@pytest.mark.parametrize("root_path", ["/_service/uds/_db/IAM/arango-sparql-py", None])
+def test_bundle_bakes_json_logging(tmp_path: Path, root_path: str | None) -> None:
+    """PRD §9.5: production deployments MUST log JSON. The service's own default
+    is key=value, and the platform drops app env, so the bundle carries it."""
+    baked = _member(_build(tmp_path, root_path=root_path), ".env")
+    assert baked is not None, "no .env was baked into the bundle"
+    assert _baked_values(baked, "ARANGO_SPARQL_LOG_JSON") == ["1"]
+
+
+@pytest.mark.parametrize("line", ["ARANGO_SPARQL_LOG_JSON=0", "export ARANGO_SPARQL_LOG_JSON=0"])
+def test_env_file_setting_overrides_baked_json_logging(tmp_path: Path, line: str) -> None:
+    """An operator's explicit value is kept, and never followed by a second line
+    that load_dotenv would read instead."""
+    src = tmp_path / "src.env"
+    src.write_text(f"ARANGO_URL=https://h:8529\n{line}\n", encoding="utf-8")
+    tar = _build(tmp_path, root_path="/_service/uds/_db/IAM/arango-sparql-py", include_env_file=src)
+    baked = _member(tar, ".env")
+    assert baked is not None
+    assert _baked_values(baked, "ARANGO_SPARQL_LOG_JSON") == ["0"]
+
+
+def test_baked_json_logging_switches_the_service_formatter(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The baked value is one the service reads as "on" (it accepts 1/true/yes)."""
+    import logging
+
+    from arango_sparql.service import observability
+
+    monkeypatch.setenv("ARANGO_SPARQL_LOG_JSON", "1")
+    root = logging.getLogger("arango_sparql")
+    saved_handlers, saved_filters, saved_level = list(root.handlers), list(root.filters), root.level
+    try:
+        observability.configure_observability(force=True)
+        assert any(isinstance(h.formatter, observability._JsonFormatter) for h in root.handlers)
+    finally:
+        for h in list(root.handlers):
+            root.removeHandler(h)
+        for f in list(root.filters):
+            root.removeFilter(f)
+        for h in saved_handlers:
+            root.addHandler(h)
+        for f in saved_filters:
+            root.addFilter(f)
+        root.setLevel(saved_level)
+
+
+@pytest.mark.parametrize(
+    "line",
+    ["  ARANGO_SPARQL_LOG_JSON=0", "ARANGO_SPARQL_LOG_JSON = 0", "export\tARANGO_SPARQL_LOG_JSON=0"],
+)
+def test_unbakeable_log_json_setting_is_refused_not_overridden(tmp_path: Path, line: str) -> None:
+    """A value the allowlist cannot keep would otherwise be dropped and replaced
+    by the baked 1 — the operator's opt-out lost without a word. Fail instead."""
+    src = tmp_path / "src.env"
+    src.write_text(f"ARANGO_URL=https://h:8529\n{line}\n", encoding="utf-8")
+    env = {
+        "PACKAGE_NO_UI": "1",
+        "PATH": __import__("os").environ.get("PATH", ""),
+        "PACKAGE_INCLUDE_ENV": "1",
+        "PACKAGE_ENV_FILE": str(src),
+    }
+    result = subprocess.run(
+        ["bash", str(_SCRIPT), str(tmp_path / "bundle.tar.gz")],
+        cwd=str(_REPO),
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 1
+    assert "ARANGO_SPARQL_LOG_JSON" in result.stderr
+
+
+def test_commented_log_json_line_does_not_block_the_bake(tmp_path: Path) -> None:
+    src = tmp_path / "src.env"
+    src.write_text("ARANGO_URL=https://h:8529\n# ARANGO_SPARQL_LOG_JSON=0\n", encoding="utf-8")
+    tar = _build(tmp_path, root_path=None, include_env_file=src)
+    baked = _member(tar, ".env")
+    assert baked is not None
+    assert _baked_values(baked, "ARANGO_SPARQL_LOG_JSON") == ["1"]

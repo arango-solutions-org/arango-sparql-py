@@ -48,8 +48,10 @@ bash scripts/package_arango_manual.sh            # -> ./arango-sparql-py.tar.gz
 # Bare API, no UI:
 PACKAGE_NO_UI=1 bash scripts/package_arango_manual.sh
 
-# Bake .env into the tarball (so the service has creds without pasting them into
-# the Container Manager UI). OFF by default — the .env holds secrets:
+# Bake your .env's service keys into the tarball (so the service has creds
+# without pasting them into the Container Manager UI). OFF by default — the .env
+# holds secrets. (Every bundle still carries a .env with the packager's own
+# deployment settings: ARANGO_SPARQL_LOG_JSON=1, and ROOT_PATH when set.)
 PACKAGE_INCLUDE_ENV=1 bash scripts/package_arango_manual.sh
 ```
 
@@ -117,3 +119,12 @@ Beyond the `ARANGO_*` connection vars above: `ARANGO_SPARQL_PUBLIC_MODE`,
 `MAX_SESSIONS`, `OPENAI_API_KEY`/`ANTHROPIC_API_KEY` (NL), `ROOT_PATH` (above),
 and `ARANGO_SPARQL_UI_DIR` (set automatically by `entrypoint` to the bundled
 `ui/dist`; the service serves the SPA only when this points at a real bundle).
+
+**Logging.** The packager bakes `ARANGO_SPARQL_LOG_JSON=1` into every bundle,
+so a deployed service writes one JSON object per log line (PRD §9.5 requires
+JSON in production). The service itself defaults to `key=value` lines for
+local runs. To ship a bundle with `key=value` logs, set
+`ARANGO_SPARQL_LOG_JSON=0` in the env file you bake (`PACKAGE_ENV_FILE`); an
+explicit value there is kept. Write it at the start of a line with no spaces
+around `=`: the packager refuses an env file that sets the variable in a form
+it cannot bake, rather than override it.

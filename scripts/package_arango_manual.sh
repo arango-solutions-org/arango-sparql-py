@@ -14,9 +14,11 @@
 # the bundle works under any Container-Manager path. Set PACKAGE_NO_UI=1 to
 # ship a bare API (deploy with `arango-byoc-deploy --no-ui release`).
 #
-# .env: NOT bundled unless PACKAGE_INCLUDE_ENV=1 — a local .env typically holds
-# OPENAI_API_KEY / ARANGO_PASSWORD etc. that must not leak into a shared tarball.
-# Prefer Container Manager UI env vars for secrets.
+# .env: every bundle carries one with the deployment settings the packager bakes
+# (ARANGO_SPARQL_LOG_JSON=1, and ROOT_PATH when SERVICE_ROOT_PATH is set). Your
+# local .env is NOT copied into it unless PACKAGE_INCLUDE_ENV=1 — it typically
+# holds OPENAI_API_KEY / ARANGO_PASSWORD etc. that must not leak into a shared
+# tarball. Prefer Container Manager UI env vars for secrets.
 #
 # macOS: strip Apple xattrs / AppleDouble so GNU tar on the Linux cluster
 # extracts cleanly.
@@ -110,6 +112,27 @@ else
     echo "==> WARNING: no SERVICE_ROOT_PATH set — /openapi.json, /docs and the API" >&2
     echo "    will resolve at the cluster root, not under the service mount. Pass" >&2
     echo "    SERVICE_ROOT_PATH=/_service/uds/_db/<db>/<instance> to fix it." >&2
+fi
+
+# --- bake JSON logging (PRD §9.5: production deployments MUST log JSON) --------
+# The service defaults to key=value log lines, which suit a developer terminal;
+# a deployed bundle logs one JSON object per line. Baked for the same reason as
+# ROOT_PATH: the platform drops app env at deploy time. An env file that already
+# sets ARANGO_SPARQL_LOG_JSON (either value) wins, so an operator can opt out.
+if grep -qE '^(export +)?ARANGO_SPARQL_LOG_JSON=' "${ROOTDIR}/.env" 2>/dev/null; then
+    echo "==> ARANGO_SPARQL_LOG_JSON already set by the baked env file; leaving it"
+elif [[ "${PACKAGE_INCLUDE_ENV:-0}" == "1" && -f "${ENV_SRC}" ]] \
+        && grep -qE '^[^#]*ARANGO_SPARQL_LOG_JSON' "${ENV_SRC}"; then
+    # The env file sets it in a form the allowlist above does not keep (leading
+    # whitespace, spaces around `=`, a tab after `export`). Baking 1 would
+    # silently override the operator's choice, so refuse instead.
+    echo "ERROR: ${ENV_SRC} sets ARANGO_SPARQL_LOG_JSON in a form the packager" >&2
+    echo "    cannot bake. Write it as ARANGO_SPARQL_LOG_JSON=<value> at the start" >&2
+    echo "    of a line, with no spaces around '='." >&2
+    exit 1
+else
+    printf 'ARANGO_SPARQL_LOG_JSON=1\n' >> "${ROOTDIR}/.env"
+    echo "==> Baked ARANGO_SPARQL_LOG_JSON=1 (JSON log lines, PRD §9.5)"
 fi
 
 # Strip lingering macOS xattrs (provenance/quarantine) that break Linux tar.
