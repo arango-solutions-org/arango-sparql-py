@@ -24,6 +24,7 @@ from ..._env import (
     read_arango_url,
     read_arango_username,
 )
+from ..._privacy import tenant_name
 from ..app import _PUBLIC_MODE, _svc_logger, app
 from ..models import (
     BindGraphRequest,
@@ -107,7 +108,7 @@ def connect(req: ConnectRequest):
         detail = _describe_connect_error(e)
         _svc_logger.warning(
             "connect failed for db=%r user=%r: %s",
-            req.database,
+            tenant_name(req.database),
             req.username,
             detail,
         )
@@ -217,7 +218,7 @@ def connect_platform(req: PlatformConnectRequest, request: Request):
             return open_platform_database(client, name, token)
         except PlatformTokenError as e:
             client.close()
-            _svc_logger.warning("platform connect refused for db=%r: %s", name, e)
+            _svc_logger.warning("platform connect refused for db=%r: %s", tenant_name(name), e)
             raise _fail(
                 401,
                 "platform_login_rejected",
@@ -255,7 +256,9 @@ def connect_platform(req: PlatformConnectRequest, request: Request):
         client.close()
         code = getattr(e, "http_code", None)
         detail = _describe_connect_error(e)
-        _svc_logger.warning("platform connect failed for db=%r (HTTP %s): %s", database, code, detail)
+        _svc_logger.warning(
+            "platform connect failed for db=%r (HTTP %s): %s", tenant_name(database), code, detail
+        )
         if code in (401, 403):
             raise _fail(
                 401,
@@ -396,7 +399,7 @@ def list_graphs(session: _Session = Depends(_get_session)):
     try:
         raw = session.db.graphs()
     except Exception as exc:  # noqa: BLE001 — degrade to "no graphs"
-        _svc_logger.info("graphs() failed for db=%r: %s", getattr(session.db, "name", "?"), exc)
+        _svc_logger.info("graphs() failed for db=%r: %s", tenant_name(getattr(session.db, "name", "?")), exc)
         raw = []
 
     for g in raw or []:
@@ -457,7 +460,7 @@ def bind_session_graph(
         try:
             exists = session.db.has_graph(graph_name)
         except Exception as exc:  # noqa: BLE001 — treat lookup failure as unknown
-            _svc_logger.info("has_graph(%r) failed: %s", graph_name, exc)
+            _svc_logger.info("has_graph(%r) failed: %s", tenant_name(graph_name), exc)
             exists = False
         if not exists:
             log_endpoint_timing(

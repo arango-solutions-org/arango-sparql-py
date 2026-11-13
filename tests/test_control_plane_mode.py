@@ -609,7 +609,7 @@ def test_credentials_in_an_address_never_reach_the_access_log() -> None:
 
     assert redact_query("/?ctx=eyJ.a.b&tab=x") == "/?ctx=[redacted]&tab=x"
     assert redact_query("/sparql?query=ASK&session=tok&%63tx=t2&TOKEN=t3") == (
-        "/sparql?query=ASK&session=[redacted]&%63tx=[redacted]&TOKEN=[redacted]"
+        "/sparql?query=[redacted]&session=[redacted]&%63tx=[redacted]&TOKEN=[redacted]"
     )
     assert redact_query("/graphs") == "/graphs"
     assert redact_query("/?context=keep") == "/?context=keep"

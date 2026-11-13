@@ -29,6 +29,7 @@ from typing import Any
 
 from fastapi import Depends, HTTPException
 
+from ..._privacy import tenant_name
 from ...editor import ARANGODB_KIND, EditorVocabV1, editor_vocab
 from ...schema.acquire import (
     ANALYZER_INSTALL_HINT,
@@ -366,7 +367,7 @@ def _revalidate_or_rebuild(db: Any, *, strategy: Strategy = "auto") -> MappingBu
 
     shape, counts = db_shape_fingerprint(db), db_counts_fingerprint(db)
     if shape is None:
-        logger.info("schema drift check: no live fingerprint for db=%s; re-analyzing", db_name)
+        logger.info("schema drift check: no live fingerprint for db=%s; re-analyzing", tenant_name(db_name))
         return _build_and_cache_full_bundle(db, strategy=strategy, fingerprints=(shape, counts))
     drift = classify_live_drift(
         stored_shape=entry.db_shape,
@@ -374,7 +375,7 @@ def _revalidate_or_rebuild(db: Any, *, strategy: Strategy = "auto") -> MappingBu
         current_shape=shape,
         current_counts=counts,
     )
-    logger.info("schema drift check: db=%s result=%s", db_name, drift.value)
+    logger.info("schema drift check: db=%s result=%s", tenant_name(db_name), drift.value)
     if drift is FingerprintDrift.SHAPE_CHANGED:
         return _build_and_cache_full_bundle(db, strategy=strategy, fingerprints=(shape, counts))
     if drift is FingerprintDrift.UNCHANGED:
@@ -708,7 +709,7 @@ def _editor_vocab_for(bundle: MappingBundle, *, db_name: str) -> EditorVocabV1 |
     try:
         return editor_vocab(bundle, namespace=namespace, source=f"{ARANGODB_KIND}:{db_name}")
     except Exception as exc:  # noqa: BLE001 — enrichment only; the schema still serves
-        logger.warning("editor vocabulary skipped for database %r: %s", db_name, exc)
+        logger.warning("editor vocabulary skipped for database %r: %s", tenant_name(db_name), exc)
         return None
 
 
@@ -892,7 +893,7 @@ def _sample_properties(db: Any, collection_name: str, sample_size: int) -> dict[
         )
         docs = list(cursor)
     except Exception as exc:
-        logger.info("sample failed for collection %r: %s", collection_name, exc)
+        logger.info("sample failed for collection %r: %s", tenant_name(collection_name), exc)
         return {}
 
     if not docs:
@@ -1188,7 +1189,7 @@ def schema_status(
             # flap, but log it so an operator notices.
             logger.info(
                 "schema_status: live or stored fingerprints unavailable; reporting cache as stable for db=%r",
-                db_name,
+                tenant_name(db_name),
             )
             status = "unchanged"
             unchanged = True

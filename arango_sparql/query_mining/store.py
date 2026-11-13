@@ -27,6 +27,8 @@ import os
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from .._privacy import tenant_name
+
 if TYPE_CHECKING:
     from .miner import MinedExample, Outcome
 
@@ -92,7 +94,7 @@ def ensure_collection(db: Any) -> Any:
     name = collection_name()
     if db.has_collection(name):
         return db.collection(name)
-    logger.info("creating examples collection %s in %s", name, db.name)
+    logger.info("creating examples collection %s in %s", name, tenant_name(db.name))
     return db.create_collection(name)
 
 

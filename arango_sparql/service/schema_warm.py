@@ -44,6 +44,7 @@ import threading
 from collections.abc import Callable
 from typing import Any
 
+from .._privacy import tenant_name
 from ..schema.acquire import Strategy
 
 logger = logging.getLogger("arango_sparql.service")
@@ -124,7 +125,10 @@ def schedule_warm(db: Any, *, strategy: Strategy = "auto", revalidate: bool = Fa
 
         try:
             logger.info(
-                "schema warm starting (background): db=%s mode=%s strategy=%s", db_name, mode, strategy
+                "schema warm starting (background): db=%s mode=%s strategy=%s",
+                tenant_name(db_name),
+                mode,
+                strategy,
             )
             if revalidate:
                 _revalidate_or_rebuild(db, strategy=strategy)
@@ -136,11 +140,11 @@ def schedule_warm(db: Any, *, strategy: Strategy = "auto", revalidate: bool = Fa
                 if rebuild:
                     _inflight[db_name] = "rebuild"
             if rebuild:
-                logger.info("schema re-analysis requested during a revalidation: db=%s", db_name)
+                logger.info("schema re-analysis requested during a revalidation: db=%s", tenant_name(db_name))
                 _build_and_cache_full_bundle(db, strategy=strategy)
-            logger.info("schema warm complete: db=%s", db_name)
+            logger.info("schema warm complete: db=%s", tenant_name(db_name))
         except Exception as exc:  # noqa: BLE001 — recorded and surfaced by the next request
-            logger.warning("schema warm failed: db=%s", db_name, exc_info=True)
+            logger.warning("schema warm failed: db=%s", tenant_name(db_name), exc_info=True)
             with _lock:
                 _errors[db_name] = exc
         finally:

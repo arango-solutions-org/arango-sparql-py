@@ -125,6 +125,8 @@ so a deployed service writes one JSON object per log line (PRD §9.5 requires
 JSON in production). The service itself defaults to `key=value` lines for
 local runs. To ship a bundle with `key=value` logs, set
 `ARANGO_SPARQL_LOG_JSON=0` in the env file you bake (`PACKAGE_ENV_FILE`); an
-explicit value there is kept. Write it at the start of a line with no spaces
+explicit value there is kept. Lines name tenants, databases, graphs and collections
+only when `ARANGO_SPARQL_LOG_INCLUDE_TENANT` allows it (off by default when
+`ARANGO_SPARQL_PUBLIC_MODE=true`; PRD §17.2). Write it at the start of a line with no spaces
 around `=`: the packager refuses an env file that sets the variable in a form
 it cannot bake, rather than override it.

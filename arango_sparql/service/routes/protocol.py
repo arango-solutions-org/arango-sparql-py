@@ -69,6 +69,7 @@ from ..._env import (
     read_arango_url,
     read_arango_username,
 )
+from ..._privacy import tenant_name
 from ...api import translate as _translate
 from ...errors import (
     CrossTenantJoinError,
@@ -838,7 +839,7 @@ def _execute_protocol_query(request: Request, query: str) -> Response:
             # A protocol client gets only the count header: log what they were.
             logger.info(
                 "protocol query schema warnings (db=%s): %s",
-                getattr(getattr(session, "db", None), "name", "?"),
+                tenant_name(getattr(getattr(session, "db", None), "name", "?")),
                 ", ".join(f"{w.get('code')} {w.get('iri')}" for w in transpiled.schema_warnings),
             )
     except CrossTenantJoinError as exc:

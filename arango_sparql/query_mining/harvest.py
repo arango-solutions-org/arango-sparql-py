@@ -28,6 +28,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
+from .._privacy import tenant_name
+
 logger = logging.getLogger(__name__)
 
 SAVED_QUERIES = "_queries"
@@ -163,7 +165,10 @@ def harvest_saved_queries(db: Any, *, graph: str | None = None) -> HarvestReport
             _add(_editor_query(doc), f"{EDITOR_SAVED_QUERIES}/{doc.get('_key')}")
 
     logger.info(
-        "harvested %d saved queries from %s (%d skipped)", len(report.queries), db.name, len(report.skipped)
+        "harvested %d saved queries from %s (%d skipped)",
+        len(report.queries),
+        tenant_name(db.name),
+        len(report.skipped),
     )
     return report
 
