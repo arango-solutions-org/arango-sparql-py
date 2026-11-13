@@ -64,7 +64,7 @@ from ..models import (
     OwlExportResponse,
     OwlImportResponse,
 )
-from ..observability import log_endpoint_timing
+from ..observability import hash_session_token, log_endpoint_timing
 from ..security import (
     _check_compute_rate_limit,
     _get_session,
@@ -284,7 +284,9 @@ async def import_owl(
     # Stamp the session-effective ``source_notes`` so a downstream
     # audit log can pin "tenant X imported this OWL at time Y" even
     # when the JSON envelope doesn't carry an explicit notes field.
-    effective_notes = notes or f"imported via /mapping/import-owl by {session.token[:8]}…"
+    effective_notes = (
+        notes or f"imported via /mapping/import-owl by session {hash_session_token(session.token)}"
+    )
 
     try:
         bundle = turtle_to_mapping(turtle, format=negotiated_format, source_notes=effective_notes)
@@ -484,7 +486,6 @@ def export_owl(
         format=export_format if wants_raw else "json",
         triple_count=triple_count,
         bytes=len(serialized.encode("utf-8")),
-        session=session.token[:8] + "…" if session and session.token else "unknown",
     )
 
     if wants_raw:

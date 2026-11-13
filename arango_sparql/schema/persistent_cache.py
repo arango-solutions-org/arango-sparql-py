@@ -52,6 +52,8 @@ from arango_sparql.translate.mapping import (
     mapping_to_wire_dict,
 )
 
+from .._privacy import tenant_name
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_CACHE_KEY: str = "mapping"
@@ -171,7 +173,7 @@ class ArangoSchemaCache:
                 "schema cache: could not create collection %r in database %r; "
                 "the analyzed schema will not survive a restart",
                 self.collection_name,
-                getattr(db, "name", "?"),
+                tenant_name(getattr(db, "name", "?")),
                 exc_info=True,
             )
             return None
@@ -261,7 +263,7 @@ class ArangoSchemaCache:
                 "schema cache: could not write %s/%s in database %r",
                 self.collection_name,
                 self.cache_key,
-                getattr(db, "name", "?"),
+                tenant_name(getattr(db, "name", "?")),
                 exc_info=True,
             )
             return False
@@ -287,7 +289,7 @@ class ArangoSchemaCache:
                 "schema cache: could not re-stamp %s/%s in database %r",
                 self.collection_name,
                 self.cache_key,
-                getattr(db, "name", "?"),
+                tenant_name(getattr(db, "name", "?")),
                 exc_info=True,
             )
             return False
@@ -307,7 +309,7 @@ class ArangoSchemaCache:
                 "schema cache: could not delete %s/%s in database %r",
                 self.collection_name,
                 self.cache_key,
-                getattr(db, "name", "?"),
+                tenant_name(getattr(db, "name", "?")),
                 exc_info=True,
             )
             return False

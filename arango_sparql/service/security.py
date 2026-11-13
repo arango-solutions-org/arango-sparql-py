@@ -39,6 +39,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from .._env import read_arango_password, read_arango_url, read_arango_username
+from .._privacy import tenant_name
 from . import control_plane
 from .app import _PUBLIC_MODE, _svc_logger, app
 from .platform_auth import (
@@ -302,7 +303,7 @@ def _control_plane_session(request: Request) -> _Session:
             db.version()  # python-arango's .db() is lazy: check the credential now
         except Exception as exc:
             reason = _describe_connect_error(exc)
-            _svc_logger.warning("control plane: cannot open database %r: %s", database, reason)
+            _svc_logger.warning("control plane: cannot open database %r: %s", tenant_name(database), reason)
             raise HTTPException(
                 status_code=503, detail=f"Cannot open the project's database: {_sanitize_error(reason)}"
             ) from exc

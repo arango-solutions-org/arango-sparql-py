@@ -27,7 +27,18 @@ helpers the SPARQL service needs today:
 
 Output format defaults to plain ``key=value`` pairs; set
 ``ARANGO_SPARQL_LOG_JSON=1`` to flip to single-line JSON for
-log-aggregation pipelines (Datadog / Loki / Splunk).
+log-aggregation pipelines (Datadog / Loki / Splunk). Either way the lines go
+to **stdout** (PRD §9.5), and uvicorn's access and error loggers are routed
+through the same handler so the stream has one shape.
+
+**Privacy (PRD §17.2).** Inside a request every line carries ``session_id``
+when the caller sent a session token — the first 12 hex characters of
+SHA-256(token) (:func:`hash_session_token`), never the token — and
+``tenant`` when tenant logging is on. Tenant identifiers (the tenant, and
+database / graph / collection names) are logged only when
+``ARANGO_SPARQL_LOG_INCLUDE_TENANT`` allows it: default off in public mode,
+on otherwise. This deviates from ``arango_cypher.service.observability``,
+which has neither field; the PRD's envelope is the contract here (#178).
 
 LLM cost telemetry (:func:`log_llm_call`, :func:`current_llm_provider_and_model`,
 :func:`estimate_llm_cost_usd`) was added in the NL→SPARQL bootstrap —
@@ -42,15 +53,21 @@ fallbacks, but the canonical NL→SPARQL pair is
 from __future__ import annotations
 
 import contextvars
+import hashlib
 import json
 import logging
 import os
 import re
+import sys
 import time
 import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
-from urllib.parse import unquote_plus
+from urllib.parse import parse_qs, unquote_plus
+
+from .. import __version__
+from .._privacy import REDACTED as REDACTED_TENANT
+from .._privacy import TenantName
 
 # ---------------------------------------------------------------------------
 # Correlation ID — contextvar + ASGI middleware + logging filter
@@ -67,6 +84,42 @@ correlation_id_var: contextvars.ContextVar[str] = contextvars.ContextVar("correl
 # being stored — without it, a hostile caller could send a newline-laden
 # value and inject fake records into the log stream.
 _INBOUND_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9-]{1,128}$")
+
+
+#: The hashed session token (:func:`hash_session_token`) of the current request,
+#: or ``None`` outside a request or when the request carries no token.
+session_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar("session_id", default=None)
+#: The current request's tenant (``X-Tenant-Id``, else the default tenant), or ``None``.
+tenant_var: contextvars.ContextVar[str | None] = contextvars.ContextVar("tenant", default=None)
+
+#: Hex characters of SHA-256(token) kept as the log's ``session_id`` (PRD §17.2).
+SESSION_ID_HEX_CHARS = 12
+
+
+def hash_session_token(token: str) -> str:
+    """The loggable stand-in for a session token: the first
+    :data:`SESSION_ID_HEX_CHARS` hex characters of its SHA-256 (PRD §17.2).
+
+    Correlates lines of one session without putting any part of the token —
+    a credential — in a log or a stored document."""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()[:SESSION_ID_HEX_CHARS]
+
+
+def _session_token_from_request(headers: dict[bytes, bytes], query_string: bytes) -> str | None:
+    """The session token as the routes read it: ``X-Arango-Session`` first, else
+    an ``Authorization: Bearer`` value (:func:`.security._get_session`), else
+    ``/sparql``'s ``?session=`` (``routes.protocol``)."""
+    raw = headers.get(b"x-arango-session", b"").decode("latin-1").strip()
+    if raw:
+        return raw
+    auth = headers.get(b"authorization", b"").decode("latin-1")
+    if auth.startswith("Bearer ") and auth[7:].strip():
+        return auth[7:].strip()
+    if query_string:
+        values = parse_qs(query_string.decode("latin-1")).get("session")
+        if values and values[0].strip():
+            return values[0].strip()
+    return None
 
 
 def _normalise_request_id(raw: str | None) -> str:
@@ -94,16 +147,16 @@ class CorrelationIdMiddleware:
             await self.app(scope, receive, send)
             return
 
-        inbound_raw: str | None = None
+        # First occurrence of each header wins, as Starlette's ``Headers.get`` does.
+        headers: dict[bytes, bytes] = {}
         for name, value in scope.get("headers", []):
-            if name == b"x-request-id":
-                try:
-                    inbound_raw = value.decode("latin-1")
-                except UnicodeDecodeError:
-                    inbound_raw = None
-                break
-        request_id = _normalise_request_id(inbound_raw)
+            headers.setdefault(name, value)
+        inbound = headers.get(b"x-request-id")
+        request_id = _normalise_request_id(inbound.decode("latin-1") if inbound is not None else None)
         token = correlation_id_var.set(request_id)
+        session_token = _session_token_from_request(headers, scope.get("query_string", b""))
+        session_reset = session_id_var.set(hash_session_token(session_token) if session_token else None)
+        tenant_reset = tenant_var.set(_tenant_from_headers(headers))
 
         async def _send_with_header(message: dict[str, Any]) -> None:
             if message["type"] == "http.response.start":
@@ -115,7 +168,22 @@ class CorrelationIdMiddleware:
         try:
             await self.app(scope, receive, _send_with_header)
         finally:
+            tenant_var.reset(tenant_reset)
+            session_id_var.reset(session_reset)
             correlation_id_var.reset(token)
+
+
+def _tenant_from_headers(headers: dict[bytes, bytes]) -> str | None:
+    """The tenant :func:`.tenant.resolve_tenant_id` resolves for these headers."""
+    from .tenant import TENANT_DEFAULT_ENV, TENANT_HEADER
+
+    raw = headers.get(TENANT_HEADER.lower().encode("latin-1"))
+    if raw is not None:
+        stripped = raw.decode("latin-1").strip()
+        if stripped:
+            return stripped
+    env_value = (os.environ.get(TENANT_DEFAULT_ENV) or "").strip()
+    return env_value or None
 
 
 class CorrelationIdLogFilter(logging.Filter):
@@ -124,6 +192,71 @@ class CorrelationIdLogFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         record.correlation_id = correlation_id_var.get()
         return True
+
+
+#: Record attributes that name a tenant or its data (PRD §17.1 class B). Dropped
+#: from every line unless tenant logging is on (§17.2).
+TENANT_IDENTIFIER_KEYS = frozenset(
+    {"tenant", "tenant_id", "database", "db", "db_name", "graph", "collection"}
+)
+
+
+class RequestContextLogFilter(logging.Filter):
+    """Add the request's ``session_id`` and, when allowed, its ``tenant``; and
+    strip tenant identifiers from records when tenant logging is off.
+
+    ``include_tenant`` is fixed when the filter is built
+    (:func:`configure_observability`), so one process logs one way."""
+
+    def __init__(self, *, include_tenant: bool) -> None:
+        super().__init__()
+        self.include_tenant = include_tenant
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        session_id = session_id_var.get()
+        if session_id is not None and "session_id" not in record.__dict__:
+            record.session_id = session_id
+        if self.include_tenant:
+            tenant = tenant_var.get()
+            if tenant is not None and "tenant" not in record.__dict__:
+                record.tenant = tenant
+        else:
+            for key in TENANT_IDENTIFIER_KEYS:
+                record.__dict__.pop(key, None)
+            record.args = _redact_tenant_args(record.args)
+        return True
+
+
+def _redact_tenant_args(args: Any) -> Any:
+    """``args`` with every :class:`~arango_sparql._privacy.TenantName` replaced."""
+    if isinstance(args, tuple):
+        return tuple(REDACTED_TENANT if isinstance(a, TenantName) else a for a in args)
+    if isinstance(args, dict):
+        return {k: REDACTED_TENANT if isinstance(v, TenantName) else v for k, v in args.items()}
+    return args
+
+
+_TRUE = frozenset({"1", "true", "yes", "on"})
+_FALSE = frozenset({"0", "false", "no", "off"})
+
+
+def tenant_logging_enabled() -> bool:
+    """``ARANGO_SPARQL_LOG_INCLUDE_TENANT``, defaulting to *not* public mode (PRD §17.2).
+
+    A value that is neither true nor false fails closed: tenants stay out of
+    the logs, and a warning says why."""
+    raw = os.getenv("ARANGO_SPARQL_LOG_INCLUDE_TENANT")
+    if raw is None or not raw.strip():
+        return os.getenv("ARANGO_SPARQL_PUBLIC_MODE", "").strip().lower() not in ("1", "true", "yes")
+    value = raw.strip().lower()
+    if value in _TRUE:
+        return True
+    if value not in _FALSE:
+        logging.getLogger("arango_sparql.service.observability").warning(
+            "ARANGO_SPARQL_LOG_INCLUDE_TENANT=%r is not a boolean; tenant identifiers stay out of the logs",
+            raw,
+        )
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -189,8 +322,17 @@ def _format_kv_value(v: Any) -> str:
     return json.dumps(repr(v), ensure_ascii=False)
 
 
+#: The ``service`` field of every JSON line (PRD §9.5).
+SERVICE_NAME = "arango-sparql-py"
+
+
 class _JsonFormatter(logging.Formatter):
-    """Emit one JSON object per record, stable key order."""
+    """Emit one JSON object per record, stable key order.
+
+    Envelope (PRD §9.5): ``ts``, ``level``, ``logger``, ``correlation_id``,
+    ``msg``, ``service``, ``version``, then the record's own fields
+    (``session_id``, ``tenant``, ``endpoint``, ``elapsed_ms``, …). A record
+    field never overwrites an envelope field."""
 
     _RESERVED = _KeyValueFormatter._RESERVED
 
@@ -203,11 +345,13 @@ class _JsonFormatter(logging.Formatter):
             "logger": record.name,
             "correlation_id": getattr(record, "correlation_id", "-"),
             "msg": record.getMessage(),
+            "service": SERVICE_NAME,
+            "version": __version__,
         }
         for k, v in record.__dict__.items():
             if k in self._RESERVED or k.startswith("_"):
                 continue
-            payload[k] = _json_safe(v)
+            payload.setdefault(k, _json_safe(v))
         if record.exc_info:
             payload["exc_info"] = self.formatException(record.exc_info)
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
@@ -232,23 +376,33 @@ def _json_safe(v: Any) -> Any:
 # ``arango_sparql`` root logger would duplicate every record.
 _CONFIGURED = False
 
+#: uvicorn's loggers routed through the service's handler (PRD §9.5: one stream).
+_UVICORN_LOGGERS = ("uvicorn.access", "uvicorn.error")
+
 
 #: Query parameters that carry a credential: a control plane's context (``ctx``, on a tool's
 #: first link), a session token (``session``, accepted by ``/sparql`` off a control plane),
 #: a ``token``. Their values never reach the access log (PRD §8.6 T1, T18).
 _SECRET_QUERY_KEYS = frozenset({"ctx", "session", "token"})
+#: Query parameters that carry query content: the SPARQL Protocol's ``query`` and
+#: ``update`` (a ``GET /sparql?query=…`` puts the whole query in the address). Query
+#: text never reaches a log (PRD §17.3).
+_CONTENT_QUERY_KEYS = frozenset({"query", "update"})
+
+
+_REDACTED_QUERY_KEYS = _SECRET_QUERY_KEYS | _CONTENT_QUERY_KEYS
 
 
 def redact_query(path: str) -> str:
-    """*path* with the values of credential-carrying query parameters replaced. Keys are
-    compared decoded and case-folded, so ``%63tx=`` or ``CTX=`` are caught too."""
+    """*path* with the values of credential- and query-carrying parameters replaced. Keys
+    are compared decoded and case-folded, so ``%63tx=`` or ``CTX=`` are caught too."""
     base, sep, query = path.partition("?")
     if not sep:
         return path
     parts = []
     for part in query.split("&"):
         key, eq, _ = part.partition("=")
-        if eq and unquote_plus(key).lower() in _SECRET_QUERY_KEYS:
+        if eq and unquote_plus(key).lower() in _REDACTED_QUERY_KEYS:
             part = f"{key}=[redacted]"
         parts.append(part)
     return f"{base}?{'&'.join(parts)}"
@@ -278,8 +432,9 @@ def configure_observability(*, force: bool = False) -> None:
     ``force=True``. Tests pass ``force=True`` to exercise the setup path
     against a freshly-cleared root logger.
 
-    Reads two env vars:
+    Reads three env vars:
 
+    * ``ARANGO_SPARQL_LOG_INCLUDE_TENANT`` — see :func:`tenant_logging_enabled`.
     * ``ARANGO_SPARQL_LOG_LEVEL`` — log level for the ``arango_sparql``
       root logger (default ``INFO``). Endpoint timing lines are emitted
       at ``INFO``; flip to ``WARNING`` to silence them while keeping
@@ -310,10 +465,25 @@ def configure_observability(*, force: bool = False) -> None:
     json_mode = os.getenv("ARANGO_SPARQL_LOG_JSON", "").lower() in ("1", "true", "yes")
     formatter: logging.Formatter = _JsonFormatter() if json_mode else _KeyValueFormatter()
 
-    handler = logging.StreamHandler()
+    # stdout, not StreamHandler's default stderr (PRD §9.5).
+    handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(formatter)
     handler.addFilter(correlation_filter)
     root.addHandler(handler)
+    # Read after the handler is attached, so a warning about the value is written.
+    handler.addFilter(RequestContextLogFilter(include_tenant=tenant_logging_enabled()))
+
+    # uvicorn configures its loggers before it imports the app, so replacing
+    # their handlers here takes effect for the process. The access log keeps
+    # its logger-level redaction filter (_install_access_log_redaction). Its
+    # lines carry correlation_id "-": uvicorn writes them after the request's
+    # context has been reset.
+    for name in _UVICORN_LOGGERS:
+        uv_logger = logging.getLogger(name)
+        for h in list(uv_logger.handlers):
+            uv_logger.removeHandler(h)
+        uv_logger.addHandler(handler)
+        uv_logger.propagate = False
 
     level_name = os.getenv("ARANGO_SPARQL_LOG_LEVEL", "INFO").upper()
     root.setLevel(getattr(logging, level_name, logging.INFO))
@@ -439,7 +609,7 @@ def time_endpoint(endpoint: str, **extras: Any) -> _EndpointTimer:
 
     Pattern::
 
-        with time_endpoint("/foo", session_token=token) as t:
+        with time_endpoint("/foo", form="json") as t:
             result = do_work()
             t.add(rows=len(result))
         return result

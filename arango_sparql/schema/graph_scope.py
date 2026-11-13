@@ -27,6 +27,7 @@ import dataclasses
 import logging
 from typing import Any
 
+from .._privacy import tenant_name
 from ..translate.mapping import MappingBundle
 
 logger = logging.getLogger(__name__)
@@ -83,7 +84,7 @@ def _live_graph_collections(db: Any, graph_name: str) -> tuple[set[str], set[str
             return None
         graph = db.graph(graph_name)
     except Exception as exc:  # noqa: BLE001 — degrade to "unresolved"
-        logger.info("live graph lookup for %r failed: %s", graph_name, exc)
+        logger.info("live graph lookup for %r failed: %s", tenant_name(graph_name), exc)
         return None
 
     vertex: set[str] = set()
@@ -102,7 +103,7 @@ def _live_graph_collections(db: Any, graph_name: str) -> tuple[set[str], set[str
             for v in ed.get("to_vertex_collections") or ed.get("to") or []:
                 vertex.add(v)
     except Exception as exc:  # noqa: BLE001 — partial data is unsafe; bail
-        logger.info("reading collections for graph %r failed: %s", graph_name, exc)
+        logger.info("reading collections for graph %r failed: %s", tenant_name(graph_name), exc)
         return None
 
     return vertex, edges
@@ -184,7 +185,7 @@ def scope_bundle_to_graph(db: Any, bundle: MappingBundle, graph_name: str | None
     if resolved is None:
         logger.warning(
             "could not resolve collections for graph %r; returning unfiltered schema bundle",
-            graph_name,
+            tenant_name(graph_name),
         )
         return bundle
 

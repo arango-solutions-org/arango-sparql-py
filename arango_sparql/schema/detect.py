@@ -65,6 +65,8 @@ from arango_sparql.translate.mapping import (
     mapping_from_wire_dict,
 )
 
+from .._privacy import tenant_name
+
 logger = logging.getLogger(__name__)
 
 # Sentinel for an edge endpoint we could not pin to a single entity.
@@ -702,7 +704,7 @@ def _resolve_edge_handle_labels(
                 "Endpoint inference: failed reading discriminator %r from "
                 "LABEL collection %r; those endpoints stay unresolved.",
                 type_field,
-                coll,
+                tenant_name(coll),
                 exc_info=True,
             )
             continue

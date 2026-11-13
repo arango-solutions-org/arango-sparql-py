@@ -56,6 +56,8 @@ from arango_sparql.schema.fingerprint import (
 from arango_sparql.schema.persistent_cache import ArangoSchemaCache, current_producer
 from arango_sparql.translate.mapping import MappingBundle
 
+from .._privacy import tenant_name
+
 logger = logging.getLogger(__name__)
 
 # PRD Appendix A.5 default. Held here as the single source of truth
@@ -416,7 +418,9 @@ class SchemaCache:
         if persisted is None:
             return None
         logger.info(
-            "schema cache: loaded the stored schema for db=%r (built %s)", db_name, persisted.updated_at
+            "schema cache: loaded the stored schema for db=%r (built %s)",
+            tenant_name(db_name),
+            persisted.updated_at,
         )
         return CachedEntry(
             bundle=persisted.bundle,
@@ -439,7 +443,7 @@ class SchemaCache:
             updated_at=entry.acquired_at,
         )
         if stored:
-            logger.info("schema cache: stored the analyzed schema for db=%r", db_name)
+            logger.info("schema cache: stored the analyzed schema for db=%r", tenant_name(db_name))
         return stored
 
     # ------------------------------------------------------------------

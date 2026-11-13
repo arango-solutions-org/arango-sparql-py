@@ -84,6 +84,8 @@ from arango_sparql.translate.mapping import (
     mapping_from_wire_dict,
 )
 
+from .._privacy import tenant_name
+
 logger = logging.getLogger(__name__)
 
 # PRD line 610: when ``strategy="auto"`` falls back to the heuristic
@@ -303,7 +305,7 @@ def refresh_statistics(db: Any, bundle: MappingBundle) -> MappingBundle:
     except Exception:  # noqa: BLE001 — best-effort; the mapping is still valid
         logger.warning(
             "statistics refresh failed for db=%r; keeping the previous statistics",
-            getattr(db, "name", "?"),
+            tenant_name(getattr(db, "name", "?")),
             exc_info=True,
         )
         return bundle
@@ -952,7 +954,7 @@ def _apply_label_shape_enrichment(db: Any, bundle: MappingBundle, *, when: datet
         try:
             rows = list(db.aql.execute(_LABEL_SHAPE_PROBE, bind_vars={"@coll": collection, "field": field}))
         except Exception as exc:  # noqa: BLE001 — enrichment is best-effort
-            logger.warning("label-shape probe failed for %s.%s: %s", collection, field, exc)
+            logger.warning("label-shape probe failed for %s.%s: %s", tenant_name(collection), field, exc)
             continue
         if not rows or not isinstance(rows[0], bool):
             continue

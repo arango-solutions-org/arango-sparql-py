@@ -25,6 +25,7 @@ from typing import Any
 
 from arango.exceptions import ArangoError
 
+from .._privacy import tenant_name
 from .harvest import SavedQuery, plan_writes
 from .signature import ResultSignature, signature_of
 
@@ -200,7 +201,7 @@ def run_source(
         try:
             starts = _sample_connected_ids(db, collection, defs, STARTS_PER_COLLECTION)
         except ArangoError as exc:
-            logger.warning("start sampling failed in %s: %s", collection, _server_message(exc))
+            logger.warning("start sampling failed in %s: %s", tenant_name(collection), _server_message(exc))
             continue
         for start in starts:
             tried += 1

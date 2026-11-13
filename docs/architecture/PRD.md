@@ -133,7 +133,7 @@ under *Where detailed* — these one-line summaries are the contract.
 | §3.11 | **`arango-ontoextract` integration** — AOE can (a) point its PRD Q7 endpoint at us, (b) `/mapping/export-owl` seeds an AOE library entry, (c) `/mapping/import-owl` accepts a curated OWL push | `tests/integration/test_aoe_roundtrip.py` (Docker-gated; both services live) | §12.2 |
 | §3.12 | **Performance SLOs in §9.4 met** — every budget row passes its `tests/perf/` benchmark within ≤ 25 % of the stated p95 | `tests/perf/test_*.py` (CI-blocking on > 25 % regression) | §9.4 |
 | §3.13 | **Threat-model mitigations enforced** — every row of the §8.6 STRIDE matrix has its asserting test under `tests/security/` | `tests/security/test_*.py` (CI-blocking) | §8.6, §13.1 |
-| §3.14 | **Privacy contract enforced** — no-bodies-in-logs property test passes; `ARANGO_SPARQL_LOG_JSON=1` emits the §9.5 envelope; opt-in toggles for tenant labels behave per §17.2 | `tests/security/test_no_body_in_logs.py`, `tests/test_log_envelope.py` — **not yet written** ([#178](https://github.com/arango-solutions-org/arango-sparql-py/issues/178)) | §17 |
+| §3.14 | **Privacy contract enforced** — no-bodies-in-logs property test passes; `ARANGO_SPARQL_LOG_JSON=1` emits the §9.5 envelope; opt-in toggles for tenant labels behave per §17.2 | `tests/security/test_no_body_in_logs.py`, `tests/test_log_envelope.py` | §17 |
 | §3.15 | **Configuration appendix is normative** — adding a new env var without updating Appendix A fails CI | `tests/test_config_appendix.py` (introspects `arango_sparql/_env.py` against the appendix table) | Appendix A |
 | §3.16 | **Public release readiness** — repo public, CI green on Python 3.11/3.12/3.13 + ArangoDB 3.11/3.12, MIT LICENSE + CONTRIBUTING + SECURITY + Operational runbook published, repeatable `docker compose up` dev loop, SBOM artefact attached to the v1.0 release tag | GitHub releases page; CI history; `docker compose up && curl /health/ready` | §15, §16 |
 
@@ -2199,32 +2199,40 @@ inbound requests.
 **Structured logs** go to stdout, one event per line. By default each line
 is plain `key=value` pairs; `ARANGO_SPARQL_LOG_JSON=1` switches to one JSON
 object per line, for log-aggregation pipelines (Datadog / Loki / Splunk).
-The canonical JSON envelope:
+uvicorn's access and error loggers go through the same handler, so the
+stream has one shape. The JSON envelope
+(`arango_sparql/service/observability.py`, asserted by
+`tests/test_log_envelope.py`):
 
 ```json
 {
   "ts": "2026-05-05T16:11:00.123Z",
   "level": "INFO",
+  "logger": "arango_sparql.service.endpoint",
+  "correlation_id": "<X-Request-Id, or a minted UUID>",
+  "msg": "endpoint_timing",
   "service": "arango-sparql-py",
   "version": "1.0.0",
-  "trace_id": "00-<32hex>-<16hex>-01",
-  "span_id": "<16hex>",
-  "tenant": "<tenant-id-or-omitted>",
-  "session_id": "<sha256-prefix>",
-  "route": "/translate",
+  "session_id": "<sha256-prefix; only when the request carries a session token>",
+  "tenant": "<tenant id; only when tenant logging is on, §17.2>",
+  "endpoint": "/translate",
   "elapsed_ms": 17.4,
   "status": "ok",
-  "msg": "endpoint_timing",
   "...route-specific keys per §9.1": "..."
 }
 ```
 
+`ts` through `version` are on every line; a record's own field never
+overwrites them. `session_id` and `tenant` are on every line written inside a
+request, not only the timing line. The route is named `endpoint`, as in
+`arango-cypher-py`. Trace and span ids are not logged: the service has no
+tracing yet, and the fields arrive with it. uvicorn writes its access line
+after the request's context is gone, so that line's `correlation_id` is `-`;
+its address has credential and query-text parameters redacted (§17.3).
+
 Tenant and session ID inclusion are governed by §17.2 (Privacy). The
 `key=value` default suits local development; production deployments MUST
-set `ARANGO_SPARQL_LOG_JSON=1`. The JSON formatter
-(`arango_sparql/service/observability.py`) does not yet emit every key
-above; reconciling the two is tracked in
-[#178](https://github.com/arango-solutions-org/arango-sparql-py/issues/178).
+set `ARANGO_SPARQL_LOG_JSON=1` (every BYOC bundle bakes it).
 
 ### 9.6 Health probes
 
@@ -4360,12 +4368,19 @@ log-redaction, metric-labelling, and retention rules below.
 
 Default-OFF for both metrics and logs. Operators opt in **per surface**:
 
-* **Logs (JSON envelope, §9.5)**:
-  * `tenant` field — controlled by `LOG_INCLUDE_TENANT` (default `false`
-    in `PUBLIC_MODE`, `true` otherwise).
+* **Logs (both formats, §9.5)**:
+  * Tenant identifiers — the `tenant` field, and database, graph and
+    collection names wherever a line carries them (as a field, or
+    formatted into the message) — controlled by
+    `ARANGO_SPARQL_LOG_INCLUDE_TENANT` (default `false` in `PUBLIC_MODE`,
+    `true` otherwise; a value that is not a boolean counts as `false`).
+    When off, the fields are dropped and a name in a message reads
+    `[tenant]`. A call site that formats a name into its message marks it
+    with `arango_sparql._privacy.tenant_name`.
   * `session_id` field — always the **first 12 hex chars of
-    SHA-256(session_token)**, never the raw token. Provides correlation
-    without a stolen-log-replay risk.
+    SHA-256(session_token)**, never the raw token or any part of it.
+    Provides correlation without a stolen-log-replay risk. The same hash
+    names the importing session in an imported mapping's `source_notes`.
 * **Metrics (Prometheus, §9.5)**:
   * `tenant` label — controlled by `METRICS_LABEL_TENANT` (default
     `false`). Off because Prometheus retention is typically 14d–1y and
@@ -4389,14 +4404,18 @@ config knob:
 * The metric vocabulary (§9.5) has no body-content metrics.
 * `/explain` and `/profile` echo bodies in **responses** (the user
   asked) but never to logs.
-* Property-based test `tests/security/test_no_body_in_logs.py` randomly
-  fuzzes 500 queries through every route and asserts no log line
-  contains the request body.
+* uvicorn's access log redacts the `query` and `update` parameters of
+  an address (`GET /sparql?query=…`), as it does credentials.
+* `tests/security/test_no_body_in_logs.py` plants markers in every place
+  content enters — the SPARQL text (at its start and its end), the
+  ontology, the NL question, the model's answer, returned rows, raw AQL,
+  the password, the session token and the database name — drives every
+  content-taking route with them in both log formats and both modes, and
+  asserts none reaches a line; a seeded batch of 200 generated queries
+  through `/translate` and `/validate` widens the SPARQL inputs.
 
-The single intentional exception: when the operator explicitly enables
-`DEBUG_LOG_QUERY_BODIES=true` (intended for local dev only). This flag
-is rejected at startup if `PUBLIC_MODE=true` — the process refuses to
-boot.
+There is no exception: no setting re-enables body logging. (An earlier
+draft's `DEBUG_LOG_QUERY_BODIES` was never built.)
 
 ### 17.4 NL pipeline data flow to third parties
 
@@ -4569,6 +4588,7 @@ Conventions: env var names are `SCREAMING_SNAKE_CASE`; precedence is
 | `KEEPALIVE` | `5` | no | HTTP keep-alive seconds |
 | `ARANGO_SPARQL_LOG_LEVEL` | `INFO` | no | Level of the `arango_sparql` logger: one of `DEBUG`/`INFO`/`WARNING`/`ERROR` |
 | `ARANGO_SPARQL_LOG_JSON` | `false` | no | `false`: plain `key=value` lines (dev). `true`: one JSON object per line (§9.5); required in production. Accepts `1`/`true`/`yes`. |
+| `ARANGO_SPARQL_LOG_INCLUDE_TENANT` | `true`, or `false` when `ARANGO_SPARQL_PUBLIC_MODE=true` | no | Whether log lines name tenants, databases, graphs and collections (§17.2). A value that is not a boolean counts as `false`. |
 | `BOOTSTRAP_SCHEMA` | `false` | no | If `true`, `/health/startup` waits for first `schema/introspect` to warm |
 
 ### A.2 Public-mode posture (multitenancy/security)

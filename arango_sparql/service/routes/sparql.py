@@ -147,9 +147,10 @@ def translate_endpoint(
     into the inline ontology so a class the user declared but did not
     annotate still resolves to its discovered ``phys:collectionName``.
     """
+    # Sizes only: query text never reaches a log (PRD §17.3).
     logger.info(
-        "translate request: sparql=%r, ontology_ttl_len=%s",
-        req.sparql[:80] if req.sparql else "(empty)",
+        "translate request: sparql_len=%s, ontology_ttl_len=%s",
+        len(req.sparql) if req.sparql else 0,
         len(req.ontology_ttl) if req.ontology_ttl else 0,
     )
     resolver = _resolver_or_422(req, analyzer_bundle=_analyzer_bundle_for_session(session))
