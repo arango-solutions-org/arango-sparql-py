@@ -4422,6 +4422,9 @@ a literal is flagged.
   * no values from properties that must stay in-tenancy.
 * **Exposing it through the service** would need its own operator setting,
   off by default. Until that setting exists, the routes do not expose it.
+* **Signed off** by Arthur Keen on 2026-11-13, as written. Known caller:
+  `contextual-data-fabric` (M5 FR-24), behind its own `CDF_NL_VALUES`
+  operator setting, off by default.
 
 Operator obligations when enabling NL:
 * Choose a provider whose data-handling policy matches the operator's
