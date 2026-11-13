@@ -24,6 +24,10 @@ if __name__ == "__main__":
 
     maybe_bootstrap_configured_database()
 
+    # ``log_config=None``: importing the app above already routed uvicorn's
+    # loggers through the service's handler (stdout, the configured format;
+    # PRD §9.5). uvicorn's default config would put its own formatter back;
+    # with none it only sets the levels.
     uvicorn.run(
         "arango_sparql.service:app",
         host=host,
@@ -31,4 +35,6 @@ if __name__ == "__main__":
         reload=False,
         proxy_headers=True,
         forwarded_allow_ips="*",
+        log_config=None,
+        log_level="info",
     )

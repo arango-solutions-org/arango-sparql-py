@@ -10,9 +10,11 @@ not from ``caplog``, which would bypass the formatter and the filters.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import logging
 import sys
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -87,17 +89,41 @@ def test_default_mode_writes_key_value_lines(monkeypatch) -> None:
 
 
 def test_logs_go_to_stdout(monkeypatch) -> None:
-    monkeypatch.setenv("ARANGO_SPARQL_LOG_JSON", "1")
-    saved = list(logging.getLogger("arango_sparql").handlers)
-    try:
-        observability.configure_observability(force=True)
-        assert service_handler().stream is sys.stdout
-    finally:
-        root = logging.getLogger("arango_sparql")
-        for h in list(root.handlers):
-            root.removeHandler(h)
-        for h in saved:
-            root.addHandler(h)
+    stdout = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", stdout)
+    with captured_service_logs(monkeypatch, json_mode=True, keep_stream=True):
+        assert service_handler().stream is stdout
+        logging.getLogger("arango_sparql.test").info("to stdout")
+        emit_access_line("/health")
+    lines = [json.loads(line) for line in stdout.getvalue().splitlines()]
+    assert [line["logger"] for line in lines] == ["arango_sparql.test", "uvicorn.access"]
+
+
+def test_main_py_keeps_the_service_handler_on_uvicorns_loggers(monkeypatch) -> None:
+    """``main.py`` imports the app before ``uvicorn.run``; uvicorn's default
+    logging config would then put its own formatter back (#181 review). It
+    passes ``log_config=None``, with which uvicorn only sets levels."""
+    import runpy
+
+    import uvicorn
+
+    import arango_sparql.arango_admin as admin
+
+    calls: list[dict] = []
+    monkeypatch.setattr(uvicorn, "run", lambda app, **kwargs: calls.append(kwargs))
+    monkeypatch.setattr(admin, "maybe_bootstrap_configured_database", lambda: None)
+    runpy.run_path(str(Path(__file__).resolve().parent.parent / "main.py"), run_name="__main__")
+    (kwargs,) = calls
+    assert kwargs["log_config"] is None
+
+    with captured_service_logs(monkeypatch, json_mode=True) as buf:
+        ours = service_handler()
+        uvicorn.Config("arango_sparql.service:app", **kwargs)  # runs uvicorn's configure_logging
+        for name in observability._UVICORN_LOGGERS:
+            assert logging.getLogger(name).handlers == [ours], name
+            assert logging.getLogger(name).level == logging.INFO, name
+        emit_access_line("/health")
+    assert json.loads(buf.getvalue())["logger"] == "uvicorn.access"
 
 
 @pytest.mark.parametrize("json_mode", [True, False])
@@ -211,3 +237,30 @@ def test_default_tenant_env_is_used_when_no_header(monkeypatch) -> None:
     with captured_service_logs(monkeypatch, json_mode=True) as buf:
         TestClient(app).post("/translate", json=TRANSLATE_BODY)
     assert _timing(_json_lines(buf), "/translate")["tenant"] == "env-tenant"
+
+
+def test_nested_tenant_names_are_redacted_and_the_shared_record_is_not(monkeypatch) -> None:
+    """Redaction happens on the formatter's copy: a name inside a container
+    argument is caught, and other handlers see the record as it was logged."""
+    seen: list[logging.LogRecord] = []
+
+    class _Keep(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            seen.append(record)
+
+    keep = _Keep()
+    logger = logging.getLogger("arango_sparql.test.nested")
+    with captured_service_logs(monkeypatch, json_mode=True, public_mode=True) as buf:
+        logger.addHandler(keep)
+        try:
+            logger.warning(
+                "dbs=%s", [tenant_name("acme_list_db"), "plain"], extra={"database": "acme_field_db"}
+            )
+        finally:
+            logger.removeHandler(keep)
+    (line,) = _json_lines(buf)
+    assert "acme_list_db" not in line["msg"] and "[tenant]" in line["msg"] and "plain" in line["msg"]
+    assert "database" not in line
+    (record,) = seen
+    assert record.args == (["acme_list_db", "plain"],)
+    assert record.__dict__["database"] == "acme_field_db"

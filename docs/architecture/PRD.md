@@ -2227,8 +2227,11 @@ overwrites them. `session_id` and `tenant` are on every line written inside a
 request, not only the timing line. The route is named `endpoint`, as in
 `arango-cypher-py`. Trace and span ids are not logged: the service has no
 tracing yet, and the fields arrive with it. uvicorn writes its access line
-after the request's context is gone, so that line's `correlation_id` is `-`;
-its address has credential and query-text parameters redacted (§17.3).
+while sending the response, so it carries the request's `correlation_id` and
+`session_id`; its address has credential and query-text parameters redacted
+(§17.3). The service owns uvicorn's access and error loggers: an operator's
+`--log-config` for them does not survive the app's import, and `main.py`
+starts uvicorn with `log_config=None` so uvicorn sets only their levels.
 
 Tenant and session ID inclusion are governed by §17.2 (Privacy). The
 `key=value` default suits local development; production deployments MUST
@@ -4406,13 +4409,21 @@ config knob:
   asked) but never to logs.
 * uvicorn's access log redacts the `query` and `update` parameters of
   an address (`GET /sparql?query=…`), as it does credentials.
+* Error lines log an error's code and class, not its message: a parse
+  error names the offending token and a schema error the IRI. The 422
+  handler logs each failed field's path and error type, never the body
+  or pydantic's `input` (for a missing field, the whole body); the caller
+  still gets the full errors in the response.
 * `tests/security/test_no_body_in_logs.py` plants markers in every place
   content enters — the SPARQL text (at its start and its end), the
   ontology, the NL question, the model's answer, returned rows, raw AQL,
   the password, the session token and the database name — drives every
   content-taking route with them in both log formats and both modes, and
-  asserts none reaches a line; a seeded batch of 200 generated queries
-  through `/translate` and `/validate` widens the SPARQL inputs.
+  asserts none reaches a line. Every route must answer 200, so none
+  passes by failing early. Failing requests are driven too — a parse
+  error on a marker token, a schema error on a marker IRI, a body with a
+  misspelled field — and a seeded batch of 200 generated queries through
+  `/translate` and `/validate` widens the SPARQL inputs.
 
 There is no exception: no setting re-enables body logging. (An earlier
 draft's `DEBUG_LOG_QUERY_BODIES` was never built.)

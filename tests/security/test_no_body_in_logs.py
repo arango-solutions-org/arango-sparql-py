@@ -27,9 +27,12 @@ from fastapi.testclient import TestClient
 import arango_sparql.service as svc
 from arango_sparql.nl2sparql import ScriptedLLMClient
 from arango_sparql.service import _sessions, app
+from arango_sparql.service.routes import schema as _schema
 from arango_sparql.service.routes.nl import _llm_client_factory
+from arango_sparql.translate.owl import turtle_to_mapping
+from tests.helpers.fake_arango import FakeDb
 from tests.helpers.log_capture import captured_service_logs, emit_access_line
-from tests.test_service_nl_routes import ONTOLOGY_TTL, _FakeArangoClient, _FakeDb, _llm, _wrap
+from tests.test_service_nl_routes import ONTOLOGY_TTL, _llm, _wrap
 
 #: Planted content. Each is distinctive enough that finding it in a log line can
 #: only mean the content itself was logged.
@@ -71,18 +74,47 @@ def _isolate_sessions():
     _sessions.clear()
 
 
+class _ServiceDb(FakeDb):
+    """``tests/helpers/fake_arango.FakeDb`` (python-arango's ``AQL.execute`` /
+    ``AQL.explain`` signatures, ``collections()``) plus the two
+    ``StandardDatabase`` calls ``/connect`` makes. Every query returns a row
+    carrying :data:`ROW_MARKER`."""
+
+    def __init__(self, name: str) -> None:
+        super().__init__(
+            {"Person": [{"_key": "1", "name": ROW_MARKER}]},
+            handler=lambda query, bind_vars: [{"s": "Person/1", "n": ROW_MARKER}],
+            name=name,
+        )
+
+    def version(self, details: bool = False) -> str:
+        return "3.12.0"
+
+    def databases(self) -> list[str]:
+        return ["_system", self.name]
+
+
+class _ServiceClient:
+    """``arango.ArangoClient`` as ``/connect`` uses it: ``ArangoClient(hosts=…)``,
+    ``.db(name, username=…, password=…)``, ``.close()``."""
+
+    def __init__(self, hosts: str = "", **_more: Any) -> None:
+        self.hosts = hosts
+        self._dbs: dict[str, _ServiceDb] = {}
+
+    def db(
+        self, name: str = "_system", username: str = "root", password: str = "", **_more: Any
+    ) -> _ServiceDb:
+        return self._dbs.setdefault(name, _ServiceDb(name))
+
+    def close(self) -> None:
+        pass
+
+
 @pytest.fixture(autouse=True)
 def _fake_database(monkeypatch: pytest.MonkeyPatch):
-    """The NL-route tests' fake python-arango stack, returning rows that carry a marker."""
-    _FakeArangoClient.instances.clear()
-    monkeypatch.setattr(svc, "ArangoClient", _FakeArangoClient)
+    monkeypatch.setattr(svc, "ArangoClient", _ServiceClient)
     monkeypatch.setenv("ARANGO_SPARQL_CONNECT_ALLOWED_HOSTS", "localhost,127.0.0.1")
-    original = _FakeDb.__init__
-
-    def _marked(self: _FakeDb, name: str, rows: list[Any] | None = None) -> None:
-        original(self, name, rows if rows is not None else [{"s": "Person/1", "n": ROW_MARKER}])
-
-    monkeypatch.setattr(_FakeDb, "__init__", _marked)
 
 
 @pytest.fixture
@@ -109,6 +141,9 @@ def _connect(client: TestClient) -> str:
         },
     )
     assert resp.status_code == 200, resp.text
+    # ``/sparql`` reads the session's schema; seed it as the protocol tests do,
+    # so the request reaches translation and execution instead of discovery.
+    _schema._resolve_schema_cache().put(DATABASE_MARKER, turtle_to_mapping(ONTOLOGY))
     return resp.json()["token"]
 
 
@@ -121,32 +156,100 @@ def _assert_clean(output: str, *, extra: tuple[str, ...] = ()) -> None:
         )
 
 
+def _ok(resp: Any, route: str) -> None:
+    """A route that fails before its work proves nothing about its logging."""
+    assert resp.status_code == 200, f"{route} answered {resp.status_code}: {resp.text[:300]}"
+
+
 def _drive_every_route(client: TestClient, token: str) -> list[str]:
-    """Call each content-taking route once; return the addresses uvicorn would log."""
+    """Call each content-taking route once, successfully; return the addresses uvicorn would log."""
     session = {"X-Arango-Session": token}
     body = {"sparql": QUERY, "ontology_ttl": ONTOLOGY}
     for path in ("/translate", "/validate"):
-        client.post(path, json=body)
+        _ok(client.post(path, json=body), path)
     for path in ("/execute", "/explain", "/profile"):
-        client.post(path, json={**body, "database": DATABASE_MARKER}, headers=session)
-    client.post(
+        _ok(client.post(path, json={**body, "database": DATABASE_MARKER}, headers=session), path)
+    _ok(
+        client.post(
+            "/execute-aql",
+            json={"aql": f'FOR d IN Person FILTER d.name != "{QUERY_MARKER}" RETURN d', "bind_vars": {}},
+            headers=session,
+        ),
         "/execute-aql",
-        json={"aql": f'FOR d IN Person FILTER d.name != "{QUERY_MARKER}" RETURN d', "bind_vars": {}},
-        headers=session,
     )
     for path in ("/nl-translate", "/nl-execute"):
-        client.post(
+        resp = client.post(
             path,
             json={"nl": f"people not named {QUESTION_MARKER}", "ontology_ttl": ONTOLOGY},
             headers=session,
         )
-    client.post("/mapping/import-owl", content=ONTOLOGY, headers={**session, "Content-Type": "text/turtle"})
-    client.post("/mapping/export-owl", json={"ontology_ttl": ONTOLOGY}, headers=session)
+        _ok(resp, path)
+    _ok(
+        client.post(
+            "/mapping/import-owl", content=ONTOLOGY, headers={**session, "Content-Type": "text/turtle"}
+        ),
+        "/mapping/import-owl",
+    )
+    _ok(
+        client.post("/mapping/export-owl", json={"ontology_ttl": ONTOLOGY}, headers=session),
+        "/mapping/export-owl",
+    )
+    accept = {"Accept": "application/sparql-results+json"}
     get_address = "/sparql?" + urlencode({"query": QUERY, "session": token})
-    client.get(get_address)
-    client.post("/sparql", content=QUERY, headers={**session, "Content-Type": "application/sparql-query"})
-    client.post("/sparql", data={"query": QUERY}, headers=session)
+    _ok(client.get(get_address, headers=accept), "GET /sparql")
+    _ok(
+        client.post(
+            "/sparql",
+            content=QUERY,
+            headers={**session, **accept, "Content-Type": "application/sparql-query"},
+        ),
+        "POST /sparql (query body)",
+    )
+    _ok(client.post("/sparql", data={"query": QUERY}, headers={**session, **accept}), "POST /sparql (form)")
     return [get_address, "/sparql", "/translate"]
+
+
+#: Requests that fail, each with a marker where the failure's own message would
+#: quote it: the token a parse error names, the IRI a schema error names, and a
+#: body the 422 handler sees whole (a misspelled field, so pydantic's ``input``
+#: for the missing one is the entire body).
+_FAILING_REQUESTS = (
+    (
+        "/translate",
+        {"sparql": f"SELECT * WHERE {{ ?s ?p ?o . {QUERY_MARKER} }}", "ontology_ttl": ONTOLOGY},
+        422,
+    ),
+    (
+        "/translate",
+        {"sparql": f"SELECT ?s WHERE {{ ?s a <http://ex.org/{QUERY_MARKER}> }}", "ontology_ttl": ONTOLOGY},
+        422,
+    ),
+    ("/validate", {"sparql": f"ASK {{ {QUERY_MARKER} }}"}, 200),
+    ("/translate", {"sprql": QUERY, "ontology_ttl": ONTOLOGY}, 422),
+    ("/nl-translate", {"question": f"people not named {QUESTION_MARKER}", "ontology_ttl": ONTOLOGY}, 422),
+)
+
+
+@pytest.mark.parametrize("json_mode", [True, False], ids=["json", "key-value"])
+@pytest.mark.parametrize("public_mode", [True, False], ids=["public", "private"])
+def test_failing_requests_do_not_quote_their_content(
+    monkeypatch: pytest.MonkeyPatch, json_mode: bool, public_mode: bool
+) -> None:
+    with captured_service_logs(monkeypatch, json_mode=json_mode, public_mode=public_mode) as buf:
+        client = TestClient(app)
+        token = _connect(client)
+        for path, body, status in _FAILING_REQUESTS:
+            resp = client.post(path, json=body, headers={"X-Arango-Session": token})
+            assert resp.status_code == status, f"{path} {body}: {resp.status_code} {resp.text[:200]}"
+            if path == "/translate" and "sparql" in body and status == 422:
+                for path2 in ("/execute", "/explain", "/profile"):
+                    resp = client.post(
+                        path2, json={**body, "database": DATABASE_MARKER}, headers={"X-Arango-Session": token}
+                    )
+                    assert resp.status_code in (400, 422), f"{path2}: {resp.status_code} {resp.text[:200]}"
+    output = buf.getvalue()
+    _assert_clean(output.replace(DATABASE_MARKER, "") if not public_mode else output, extra=(token,))
+    assert "Pydantic 422" in output and "'loc'" in output.replace('"loc"', "'loc'"), output[-800:]
 
 
 @pytest.mark.parametrize("json_mode", [True, False], ids=["json", "key-value"])

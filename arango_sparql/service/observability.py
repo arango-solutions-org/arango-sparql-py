@@ -53,6 +53,7 @@ fallbacks, but the canonical NL→SPARQL pair is
 from __future__ import annotations
 
 import contextvars
+import copy
 import hashlib
 import json
 import logging
@@ -202,38 +203,55 @@ TENANT_IDENTIFIER_KEYS = frozenset(
 
 
 class RequestContextLogFilter(logging.Filter):
-    """Add the request's ``session_id`` and, when allowed, its ``tenant``; and
-    strip tenant identifiers from records when tenant logging is off.
+    """Add the request's ``session_id`` (hashed) and ``tenant`` to each record.
 
-    ``include_tenant`` is fixed when the filter is built
-    (:func:`configure_observability`), so one process logs one way."""
-
-    def __init__(self, *, include_tenant: bool) -> None:
-        super().__init__()
-        self.include_tenant = include_tenant
+    Whether the tenant is *written* is the formatter's decision
+    (:func:`_for_output`), so this filter never removes anything from a record
+    that other handlers share."""
 
     def filter(self, record: logging.LogRecord) -> bool:
         session_id = session_id_var.get()
         if session_id is not None and "session_id" not in record.__dict__:
             record.session_id = session_id
-        if self.include_tenant:
-            tenant = tenant_var.get()
-            if tenant is not None and "tenant" not in record.__dict__:
-                record.tenant = tenant
-        else:
-            for key in TENANT_IDENTIFIER_KEYS:
-                record.__dict__.pop(key, None)
-            record.args = _redact_tenant_args(record.args)
+        tenant = tenant_var.get()
+        if tenant is not None and "tenant" not in record.__dict__:
+            record.tenant = tenant
         return True
 
 
-def _redact_tenant_args(args: Any) -> Any:
-    """``args`` with every :class:`~arango_sparql._privacy.TenantName` replaced."""
-    if isinstance(args, tuple):
-        return tuple(REDACTED_TENANT if isinstance(a, TenantName) else a for a in args)
-    if isinstance(args, dict):
-        return {k: REDACTED_TENANT if isinstance(v, TenantName) else v for k, v in args.items()}
-    return args
+def _for_output(record: logging.LogRecord, include_tenant: bool) -> logging.LogRecord:
+    """The record a formatter writes: *record* itself when tenant logging is on;
+    otherwise a copy without tenant-identifier fields and with every
+    :class:`~arango_sparql._privacy.TenantName` argument, nested ones included,
+    replaced. The original is never changed: other handlers see it as logged."""
+    if include_tenant:
+        return record
+    has_fields = any(key in record.__dict__ for key in TENANT_IDENTIFIER_KEYS)
+    redacted_args = _redact_tenant_args(record.args)
+    if not has_fields and redacted_args is record.args:
+        return record
+    out = copy.copy(record)
+    for key in TENANT_IDENTIFIER_KEYS:
+        out.__dict__.pop(key, None)
+    out.args = redacted_args
+    return out
+
+
+def _redact_tenant_args(value: Any) -> Any:
+    """*value* with every :class:`TenantName` in it replaced; *value* itself when there is none."""
+    if isinstance(value, TenantName):
+        return REDACTED_TENANT
+    if isinstance(value, (tuple, list, set, frozenset)):
+        items = [_redact_tenant_args(v) for v in value]
+        if all(new is old for new, old in zip(items, value, strict=True)):
+            return value
+        return type(value)(items)
+    if isinstance(value, dict):
+        redacted = {k: _redact_tenant_args(v) for k, v in value.items()}
+        if all(redacted[k] is v for k, v in value.items()):
+            return value
+        return redacted
+    return value
 
 
 _TRUE = frozenset({"1", "true", "yes", "on"})
@@ -265,7 +283,14 @@ def tenant_logging_enabled() -> bool:
 
 
 class _KeyValueFormatter(logging.Formatter):
-    """Emit ``ts level logger correlation_id=… msg=… k=v k=v …`` lines."""
+    """Emit ``ts level logger correlation_id=… msg=… k=v k=v …`` lines.
+
+    ``include_tenant`` is :func:`tenant_logging_enabled` when the handler is
+    built; when false, tenant identifiers are left out (:func:`_for_output`)."""
+
+    def __init__(self, *, include_tenant: bool = True) -> None:
+        super().__init__()
+        self.include_tenant = include_tenant
 
     _RESERVED = frozenset(
         {
@@ -297,6 +322,7 @@ class _KeyValueFormatter(logging.Formatter):
     )
 
     def format(self, record: logging.LogRecord) -> str:
+        record = _for_output(record, self.include_tenant)
         ts = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(record.created))
         ts = f"{ts}.{int(record.msecs):03d}Z"
         cid = getattr(record, "correlation_id", "-")
@@ -336,7 +362,12 @@ class _JsonFormatter(logging.Formatter):
 
     _RESERVED = _KeyValueFormatter._RESERVED
 
+    def __init__(self, *, include_tenant: bool = True) -> None:
+        super().__init__()
+        self.include_tenant = include_tenant
+
     def format(self, record: logging.LogRecord) -> str:
+        record = _for_output(record, self.include_tenant)
         ts = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(record.created))
         ts = f"{ts}.{int(record.msecs):03d}Z"
         payload: dict[str, Any] = {
@@ -463,27 +494,40 @@ def configure_observability(*, force: bool = False) -> None:
     root.addFilter(correlation_filter)
 
     json_mode = os.getenv("ARANGO_SPARQL_LOG_JSON", "").lower() in ("1", "true", "yes")
-    formatter: logging.Formatter = _JsonFormatter() if json_mode else _KeyValueFormatter()
 
     # stdout, not StreamHandler's default stderr (PRD §9.5).
     handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(formatter)
+    handler.setFormatter(_KeyValueFormatter())
     handler.addFilter(correlation_filter)
+    handler.addFilter(RequestContextLogFilter())
     root.addHandler(handler)
-    # Read after the handler is attached, so a warning about the value is written.
-    handler.addFilter(RequestContextLogFilter(include_tenant=tenant_logging_enabled()))
+    # Read once the handler is attached, so a warning about the value is written.
+    include_tenant = tenant_logging_enabled()
+    formatter: logging.Formatter = (
+        _JsonFormatter(include_tenant=include_tenant)
+        if json_mode
+        else _KeyValueFormatter(include_tenant=include_tenant)
+    )
+    handler.setFormatter(formatter)
 
-    # uvicorn configures its loggers before it imports the app, so replacing
-    # their handlers here takes effect for the process. The access log keeps
-    # its logger-level redaction filter (_install_access_log_redaction). Its
-    # lines carry correlation_id "-": uvicorn writes them after the request's
-    # context has been reset.
+    # The service owns uvicorn's loggers: their handlers are replaced by this
+    # one, so an operator's ``--log-config`` for them does not survive import.
+    # ``uvicorn <app>`` configures its loggers before importing the app, so
+    # this runs last; ``main.py``, which imports the app first, starts uvicorn
+    # with ``log_config=None`` so uvicorn sets only their levels. A logger
+    # with no level gets INFO, or access lines would be dropped. The access
+    # log keeps its logger-level redaction filter
+    # (_install_access_log_redaction). uvicorn writes the access line from
+    # inside the response's ``send``, so it carries the request's
+    # correlation_id and session_id.
     for name in _UVICORN_LOGGERS:
         uv_logger = logging.getLogger(name)
         for h in list(uv_logger.handlers):
             uv_logger.removeHandler(h)
         uv_logger.addHandler(handler)
         uv_logger.propagate = False
+        if uv_logger.level == logging.NOTSET:
+            uv_logger.setLevel(logging.INFO)
 
     level_name = os.getenv("ARANGO_SPARQL_LOG_LEVEL", "INFO").upper()
     root.setLevel(getattr(logging, level_name, logging.INFO))

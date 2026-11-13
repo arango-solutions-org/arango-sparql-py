@@ -28,11 +28,14 @@ def captured_service_logs(
     json_mode: bool,
     public_mode: bool = False,
     include_tenant: str | None = None,
+    keep_stream: bool = False,
 ) -> Iterator[io.StringIO]:
     """Yield a buffer receiving every line the service's handler writes.
 
     ``include_tenant`` is the raw ``ARANGO_SPARQL_LOG_INCLUDE_TENANT`` value, or
-    ``None`` to leave it unset (the default follows public mode)."""
+    ``None`` to leave it unset (the default follows public mode). With
+    ``keep_stream`` the handler keeps the stream it was configured with and the
+    yielded buffer stays empty — for a test that checks that stream."""
     monkeypatch.setenv("ARANGO_SPARQL_LOG_JSON", "1" if json_mode else "0")
     monkeypatch.setenv("ARANGO_SPARQL_PUBLIC_MODE", "true" if public_mode else "false")
     monkeypatch.setenv("ARANGO_SPARQL_LOG_LEVEL", "DEBUG")
@@ -58,8 +61,8 @@ def captured_service_logs(
         for name in observability._UVICORN_LOGGERS:
             logging.getLogger(name).setLevel(logging.INFO)
         observability.configure_observability(force=True)
-        handler = service_handler()
-        handler.setStream(buffer)
+        if not keep_stream:
+            service_handler().setStream(buffer)
         yield buffer
     finally:
         for name, (handlers, filters, level, propagate) in saved.items():

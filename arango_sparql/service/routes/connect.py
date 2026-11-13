@@ -218,7 +218,7 @@ def connect_platform(req: PlatformConnectRequest, request: Request):
             return open_platform_database(client, name, token)
         except PlatformTokenError as e:
             client.close()
-            _svc_logger.warning("platform connect refused for db=%r: %s", name, e)
+            _svc_logger.warning("platform connect refused for db=%r: %s", tenant_name(name), e)
             raise _fail(
                 401,
                 "platform_login_rejected",

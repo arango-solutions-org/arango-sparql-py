@@ -659,30 +659,29 @@ def _translate_errors(prefix: str, status_code: int = 500):
 
 @app.exception_handler(RequestValidationError)
 async def _validation_error_handler(request: Request, exc: RequestValidationError):
-    # Body fragments help diagnose UI ↔ service contract drift but they
-    # routinely contain credentials. Always run the same redaction the
-    # error-translator uses, and skip body logging entirely in public
-    # mode where the operator has signalled a hostile audience.
+    # The log names which fields failed and how — enough to diagnose UI ↔
+    # service contract drift — and nothing the caller sent: pydantic's
+    # ``input`` (for a missing field, the whole body) and the body itself
+    # carry query text, questions and credentials (PRD §17.3; #181). The
+    # caller still gets the full errors in the response.
     safe_errors = _sanitize_pydantic_errors(exc.errors())
-    if _PUBLIC_MODE:
-        _svc_logger.warning(
-            "Pydantic 422 on %s %s: %s",
-            request.method,
-            request.url.path,
-            safe_errors,
-        )
-    else:
-        body = await request.body()
-        body_preview = body[:200].decode("utf-8", errors="replace") if body else ""
-        body_preview = _sanitize_error(body_preview) if body_preview else ""
-        _svc_logger.warning(
-            "Pydantic 422 on %s %s: %s | body[:200]=%s",
-            request.method,
-            request.url.path,
-            safe_errors,
-            body_preview,
-        )
+    _svc_logger.warning(
+        "Pydantic 422 on %s %s: %s",
+        request.method,
+        request.url.path,
+        _loggable_validation_errors(exc.errors()),
+    )
     return JSONResponse(status_code=422, content={"detail": safe_errors})
+
+
+def _loggable_validation_errors(errors: Any) -> list[dict[str, Any]]:
+    """Each validation error's field path and error type — no input, message or context."""
+    loggable = []
+    for err in errors or []:
+        if isinstance(err, dict):
+            loc = [part if isinstance(part, int) else str(part) for part in err.get("loc", ())]
+            loggable.append({"loc": loc, "type": str(err.get("type", "?"))})
+    return loggable
 
 
 # ---------------------------------------------------------------------------

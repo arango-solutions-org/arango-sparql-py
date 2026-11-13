@@ -147,7 +147,9 @@ def translate_endpoint(
     into the inline ontology so a class the user declared but did not
     annotate still resolves to its discovered ``phys:collectionName``.
     """
-    # Sizes only: query text never reaches a log (PRD §17.3).
+    # Sizes only: query text never reaches a log (PRD §17.3). The error lines
+    # below log the error's code and class, not its message, which quotes the
+    # query (a parse error names the offending token, a schema error the IRI).
     logger.info(
         "translate request: sparql_len=%s, ontology_ttl_len=%s",
         len(req.sparql) if req.sparql else 0,
@@ -164,7 +166,7 @@ def translate_endpoint(
             tenant_id=tenant_id,
         )
     except CrossTenantJoinError as exc:
-        logger.warning("translate %s: %s", exc.code, exc)
+        logger.warning("translate %s (%s)", exc.code, type(exc).__name__)
         log_endpoint_timing(
             "/translate",
             round((time.perf_counter() - t0) * 1000, 1),
@@ -177,7 +179,7 @@ def translate_endpoint(
             detail={"error": _sanitize_error(str(exc)), "code": exc.code},
         ) from exc
     except SparqlError as exc:
-        logger.warning("translate %s: %s", exc.code, exc)
+        logger.warning("translate %s (%s)", exc.code, type(exc).__name__)
         log_endpoint_timing(
             "/translate",
             round((time.perf_counter() - t0) * 1000, 1),
@@ -266,7 +268,7 @@ def execute_endpoint(
         )
         translate_ms = round((time.perf_counter() - t_translate) * 1000, 1)
     except CrossTenantJoinError as exc:
-        logger.warning("execute %s: %s", exc.code, exc)
+        logger.warning("execute %s (%s)", exc.code, type(exc).__name__)
         log_endpoint_timing(
             "/execute",
             round((time.perf_counter() - t_translate) * 1000, 1),
@@ -279,7 +281,7 @@ def execute_endpoint(
             detail={"error": _sanitize_error(str(exc)), "code": exc.code},
         ) from exc
     except SparqlError as exc:
-        logger.warning("execute translate %s: %s", exc.code, exc)
+        logger.warning("execute translate %s (%s)", exc.code, type(exc).__name__)
         log_endpoint_timing(
             "/execute",
             round((time.perf_counter() - t_translate) * 1000, 1),
@@ -424,7 +426,7 @@ def explain_endpoint(
         )
         translate_ms = round((time.perf_counter() - t_translate) * 1000, 1)
     except CrossTenantJoinError as exc:
-        logger.warning("explain %s: %s", exc.code, exc)
+        logger.warning("explain %s (%s)", exc.code, type(exc).__name__)
         log_endpoint_timing(
             "/explain",
             round((time.perf_counter() - t_translate) * 1000, 1),
@@ -437,7 +439,7 @@ def explain_endpoint(
             detail={"error": _sanitize_error(str(exc)), "code": exc.code},
         ) from exc
     except SparqlError as exc:
-        logger.warning("explain translate %s: %s", exc.code, exc)
+        logger.warning("explain translate %s (%s)", exc.code, type(exc).__name__)
         log_endpoint_timing(
             "/explain",
             round((time.perf_counter() - t_translate) * 1000, 1),
@@ -508,7 +510,7 @@ def profile_endpoint(
         )
         translate_ms = round((time.perf_counter() - t_translate) * 1000, 1)
     except CrossTenantJoinError as exc:
-        logger.warning("profile %s: %s", exc.code, exc)
+        logger.warning("profile %s (%s)", exc.code, type(exc).__name__)
         log_endpoint_timing(
             "/profile",
             round((time.perf_counter() - t_translate) * 1000, 1),
@@ -521,7 +523,7 @@ def profile_endpoint(
             detail={"error": _sanitize_error(str(exc)), "code": exc.code},
         ) from exc
     except SparqlError as exc:
-        logger.warning("profile translate %s: %s", exc.code, exc)
+        logger.warning("profile translate %s (%s)", exc.code, type(exc).__name__)
         log_endpoint_timing(
             "/profile",
             round((time.perf_counter() - t_translate) * 1000, 1),

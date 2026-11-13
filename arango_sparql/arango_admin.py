@@ -26,6 +26,7 @@ from ._env import (
     read_arango_url,
     read_arango_username,
 )
+from ._privacy import tenant_name
 
 _logger = logging.getLogger("arango_sparql")
 
@@ -142,7 +143,7 @@ def ensure_configured_database(
             "(%s: %s). The service will still serve translation-only requests; "
             "create the database manually or check ArangoDB connectivity before "
             "using /connect or /execute.",
-            name,
+            tenant_name(name),
             url,
             type(exc).__name__,
             exc,
@@ -150,9 +151,9 @@ def ensure_configured_database(
         return None
 
     if created:
-        log.info("ensure_configured_database: created database %r at %s", name, url)
+        log.info("ensure_configured_database: created database %r at %s", tenant_name(name), url)
         return "created"
-    log.info("ensure_configured_database: database %r already exists at %s", name, url)
+    log.info("ensure_configured_database: database %r already exists at %s", tenant_name(name), url)
     return "exists"
 
 
