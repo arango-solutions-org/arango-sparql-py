@@ -1,4 +1,7 @@
-"""`scripts/package_arango_manual.sh` bakes ROOT_PATH for a prefixed mount.
+"""`scripts/package_arango_manual.sh` bakes deployment settings into the bundle.
+
+Every bundle's `.env` carries ARANGO_SPARQL_LOG_JSON=1 (PRD §9.5), and ROOT_PATH
+for a prefixed mount.
 
 The Container Manager drops app env at deploy time, so the service's mount
 prefix must be baked into the bundle's `.env` (the FastAPI app reads it via
@@ -194,3 +197,38 @@ def test_baked_json_logging_switches_the_service_formatter(monkeypatch: pytest.M
         for f in saved_filters:
             root.addFilter(f)
         root.setLevel(saved_level)
+
+
+@pytest.mark.parametrize(
+    "line",
+    ["  ARANGO_SPARQL_LOG_JSON=0", "ARANGO_SPARQL_LOG_JSON = 0", "export\tARANGO_SPARQL_LOG_JSON=0"],
+)
+def test_unbakeable_log_json_setting_is_refused_not_overridden(tmp_path: Path, line: str) -> None:
+    """A value the allowlist cannot keep would otherwise be dropped and replaced
+    by the baked 1 — the operator's opt-out lost without a word. Fail instead."""
+    src = tmp_path / "src.env"
+    src.write_text(f"ARANGO_URL=https://h:8529\n{line}\n", encoding="utf-8")
+    env = {
+        "PACKAGE_NO_UI": "1",
+        "PATH": __import__("os").environ.get("PATH", ""),
+        "PACKAGE_INCLUDE_ENV": "1",
+        "PACKAGE_ENV_FILE": str(src),
+    }
+    result = subprocess.run(
+        ["bash", str(_SCRIPT), str(tmp_path / "bundle.tar.gz")],
+        cwd=str(_REPO),
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 1
+    assert "ARANGO_SPARQL_LOG_JSON" in result.stderr
+
+
+def test_commented_log_json_line_does_not_block_the_bake(tmp_path: Path) -> None:
+    src = tmp_path / "src.env"
+    src.write_text("ARANGO_URL=https://h:8529\n# ARANGO_SPARQL_LOG_JSON=0\n", encoding="utf-8")
+    tar = _build(tmp_path, root_path=None, include_env_file=src)
+    baked = _member(tar, ".env")
+    assert baked is not None
+    assert _baked_values(baked, "ARANGO_SPARQL_LOG_JSON") == ["1"]
