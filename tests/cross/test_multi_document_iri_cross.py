@@ -581,6 +581,25 @@ UNION_LIST_COPIES = Store(
     resolver_kwargs={"fan_out_list_values": True},
 )
 
+#: As UNION_LIST_COPIES, with ``:tag`` declared multi-valued
+#: (``phys:multiValued``, CDF #220) instead of the global flag: a declared list
+#: is read from every copy, its distinct elements, so "b" is one triple (#170).
+UNION_LIST_COPIES_DECLARED = Store(
+    ontology=UNION_LIST_COPIES.ontology.replace(
+        ":tag a owl:DatatypeProperty ;", ':tag a owl:DatatypeProperty ; phys:multiValued "true" ;'
+    ),
+    docs=UNION_LIST_COPIES.docs,
+    data=UNION_LIST_COPIES.data,
+)
+
+#: Both: the global flag, and ``:tag`` declared multi-valued.
+UNION_LIST_COPIES_BOTH = Store(
+    ontology=UNION_LIST_COPIES_DECLARED.ontology,
+    docs=UNION_LIST_COPIES.docs,
+    data=UNION_LIST_COPIES.data,
+    resolver_kwargs={"fan_out_list_values": True},
+)
+
 #: Review of #171: ``:salary`` declares the domain Org ∪ Employee, but the
 #: Person copies hold it (a value outside its domain is still a triple).
 UNION_OFF_DOMAIN = Store(
@@ -932,6 +951,21 @@ _CASES: list[tuple[str, Store, str, str | None]] = [
             ("attribute", "SELECT ?s ?t WHERE { ?s a :Agent ; :tag ?t }", "#170"),
             ("optional", "SELECT ?s ?t WHERE { ?s a :Agent OPTIONAL { ?s :tag ?t } }", None),
             ("constant", 'SELECT ?s WHERE { ?s a :Agent OPTIONAL { ?s :tag ?t } FILTER(?t = "c") }', None),
+        ]
+    ],
+    *[
+        (f"{prefix}_{name}", store, query, None)
+        for prefix, store in (
+            ("union_list_declared", UNION_LIST_COPIES_DECLARED),
+            ("union_list_both", UNION_LIST_COPIES_BOTH),
+        )
+        for name, query in [
+            # #170 does not apply to a declared list: it is never compared
+            # whole, but read from every copy (CDF #220).
+            ("attribute", "SELECT ?s ?t WHERE { ?s a :Agent ; :tag ?t }"),
+            ("constant_object", 'SELECT ?s WHERE { ?s a :Agent ; :tag "b" }'),
+            ("count", "SELECT (COUNT(?t) AS ?n) WHERE { ?s a :Agent ; :tag ?t }"),
+            ("optional", "SELECT ?s ?t WHERE { ?s a :Agent OPTIONAL { ?s :tag ?t } }"),
         ]
     ],
     *[
@@ -1523,6 +1557,8 @@ _LIVE_ONLY = {
     "union_wide_domain_optional",
     "union_list_copies_optional",
     "union_list_copies_constant",
+    "union_list_declared_optional",
+    "union_list_both_optional",
     "ng_strict_optional",
     "ng_strict_optional_class_walk",
     "graph_outside_optional",

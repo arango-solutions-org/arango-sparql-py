@@ -33,6 +33,7 @@ from ..errors import AqlEmitError, UnsupportedSparqlError
 from .builder import attribute_ref, subject_ref
 
 if TYPE_CHECKING:
+    from .builder import AqlQueryBuilder
     from .resolver import ResolvedProperty
     from .visitor import AlgebraVisitor
 
@@ -281,27 +282,32 @@ def _emit_attributes_branch(
     # triple gets the equality-FILTER join. Under
     # ``fan_out_list_values`` a list-valued attribute is N triples:
     # unbound ``?o`` fans out per element, and comparisons become
-    # membership tests (mirrors Case 2 exactly).
+    # membership tests (mirrors Case 2 exactly). Without it, only the
+    # attributes declared multi-valued do, decided per key at run time
+    # (:func:`_list_test`, CDF #220).
     value_expr = f"{subject_alias}[{key_alias}]"
     if isinstance(obj, Variable):
         o_name = str(obj)
         existing = visitor.state.var_to_expr.get(o_name)
         if existing is None:
-            if visitor.resolver.fan_out_list_values:
+            lists = _list_test(visitor, visitor.builder, key_alias)
+            if visitor.resolver.fan_out_list_values or lists is not None:
                 value_alias = visitor.builder.fresh_alias(prefix="lv")
-                visitor.builder.for_inline(value_alias, visitor._fan_out_source(value_expr))
+                visitor.builder.for_inline(value_alias, _value_source(visitor, value_expr, lists))
                 visitor._record_var_expr(obj, value_alias)
             else:
                 visitor._record_var_expr(obj, value_expr)
         elif existing != value_expr:
-            visitor.builder.filter_raw(visitor._value_match_expr(value_expr, existing))
+            lists = _list_test(visitor, visitor.builder, key_alias)
+            visitor.builder.filter_raw(_value_match(visitor, value_expr, existing, lists))
         return
     if isinstance(obj, (Literal, URIRef)):
         from .visitor import _term_to_python
 
         obj_bind = visitor.builder.bind(_term_to_python(obj), hint="obj")
-        if visitor.resolver.fan_out_list_values:
-            visitor.builder.filter_raw(visitor._value_match_expr(value_expr, obj_bind))
+        lists = _list_test(visitor, visitor.builder, key_alias)
+        if visitor.resolver.fan_out_list_values or lists is not None:
+            visitor.builder.filter_raw(_value_match(visitor, value_expr, obj_bind, lists))
         else:
             visitor.builder.filter_eq(value_expr, obj_bind)
         return
@@ -381,9 +387,10 @@ def _build_attribute_arm(visitor: AlgebraVisitor, subject_alias: str) -> str:
         predicate_expr = key_alias
 
     value_expr = f"{subject_alias}[{key_alias}]"
-    if visitor.resolver.fan_out_list_values:
+    lists = _list_test(visitor, child, key_alias)
+    if visitor.resolver.fan_out_list_values or lists is not None:
         value_alias = child.fresh_alias(prefix="lv")
-        child.for_inline(value_alias, visitor._fan_out_source(value_expr))
+        child.for_inline(value_alias, _value_source(visitor, value_expr, lists))
         value_expr = value_alias
     child.return_object(
         [
@@ -425,3 +432,34 @@ def _bind_union_object(
         f"variable-predicate triple object term type "
         f"{type(obj).__name__!r} is not supported (triple {triple!r})"
     )
+
+
+def _list_test(visitor: AlgebraVisitor, builder: AqlQueryBuilder, key_alias: str) -> str | None:
+    """``<key> IN @lists`` when only some attributes fan out: the attributes
+    the mapping declares multi-valued (CDF #220), bound once. ``None`` when
+    every attribute fans out (``fan_out_list_values``) or none does."""
+    if visitor.resolver.fan_out_list_values:
+        return None
+    attributes = visitor.resolver.multi_valued_attributes()
+    if not attributes:
+        return None
+    lists_bind = builder.bind(list(attributes), hint="list_attrs")
+    return f"{key_alias} IN {lists_bind}"
+
+
+def _value_source(visitor: AlgebraVisitor, value_expr: str, lists: str | None) -> str:
+    """What the per-value FOR iterates: the elements of a list attribute,
+    ``[value]`` for any other (a list there is one value)."""
+    if lists is None:
+        return visitor._fan_out_source(value_expr)
+    return f"({lists} ? {visitor._fan_out_source(value_expr)} : [{value_expr}])"
+
+
+def _value_match(visitor: AlgebraVisitor, value_expr: str, other: str, lists: str | None) -> str:
+    """*other* is a value of the attribute: one of its elements for a list
+    attribute, the whole value for any other."""
+    if lists is None:
+        return visitor._value_match_expr(value_expr, other, fan_out=visitor.resolver.fan_out_list_values)
+    member = visitor._value_match_expr(value_expr, other, fan_out=True)
+    whole = visitor._value_match_expr(value_expr, other, fan_out=False)
+    return f"({lists} ? {member} : {whole})"
