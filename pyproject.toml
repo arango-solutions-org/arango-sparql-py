@@ -1,6 +1,6 @@
 [project]
 name = "arango-sparql-py"
-version = "0.8.0"
+version = "0.8.1"
 description = "Python-native SPARQL 1.1 to AQL transpiler for ArangoDB."
 readme = "README.md"
 license = "MIT"
@@ -61,9 +61,17 @@ analyzer = [
   # classical and irregular plurals and `-s` singulars: `warehouses` ->
   # `Warehouse`, was `Warehous`); no API this package calls changed, and the
   # fast suite is green on 0.17.0. The floor stays 0.14.1, so an install may
-  # name such a class either way until it is raised.
+  # name such a class either way until it is raised. Ceiling <0.21.0
+  # (2026-11-18, raised together with arango-cypher-py): 0.18 adds CSI 1.1
+  # `path` and the opt-in LABELS entity style, and its `to_csi` renames an
+  # unknown property-mapping key to `x-<key>`; 0.19 adds opt-in per-field
+  # redaction of values sent to an LLM; 0.20 marks a list-valued attribute
+  # `multiValued` (CSI 1.2, `phys:multiValued` in OWL), which this package
+  # reads since 0.8.0 (#182), so on 0.20 an acquired mapping reads such an
+  # attribute one value per element. No API this package calls changed
+  # (signatures checked on 0.20.0), and the fast suite is green on 0.20.0.
   # tests/test_analyzer_band_parity.py enforces the shared ceiling.
-  "arangodb-schema-analyzer[anthropic,openai]>=0.14.1,<0.18.0",
+  "arangodb-schema-analyzer[anthropic,openai]>=0.14.1,<0.21.0",
 ]
 service = [
   "arango-sparql-py[analyzer]",

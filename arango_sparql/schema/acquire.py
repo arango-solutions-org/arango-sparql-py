@@ -5,7 +5,7 @@ Three tiers, in priority order:
 1. **Analyzer (canonical).** Wraps
    :class:`schema_analyzer.AgenticSchemaAnalyzer` (the optional
    ``arangodb-schema-analyzer`` package, version pin
-   ``>=0.14.1,<0.18.0``, matching pyproject.toml). Produces a :class:`MappingBundle` that mirrors
+   ``>=0.14.1,<0.21.0``, matching pyproject.toml). Produces a :class:`MappingBundle` that mirrors
    the wire shape PRD §6.2 specifies.
 2. **Heuristic (fallback).** Calls
    :func:`arango_sparql.schema.detect.build_heuristic_mapping` (Slice
@@ -117,7 +117,7 @@ W_SCHEMA_HEURISTIC_FALLBACK: str = "W_SCHEMA_HEURISTIC_FALLBACK"
 
 # Pin matches pyproject.toml extras and the README install hint.
 # When this gets bumped, update both call sites in lockstep.
-ANALYZER_VERSION_RANGE: str = ">=0.14.1,<0.18.0"
+ANALYZER_VERSION_RANGE: str = ">=0.14.1,<0.21.0"
 ANALYZER_INSTALL_HINT: str = f"pip install 'arangodb-schema-analyzer{ANALYZER_VERSION_RANGE}'"
 
 Strategy = Literal["auto", "analyzer", "heuristic"]
