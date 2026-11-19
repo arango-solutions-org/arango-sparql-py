@@ -139,6 +139,16 @@ def emit_rpt_cross_subject_optional(visitor: AlgebraVisitor, triple: tuple[Any, 
         f"{attribute_ref(triples_alias, rpt_class.object_value_column)})"
     )
     new_bindings.append((str(obj), object_expr))
+    for var_name, _source in new_bindings:
+        if var_name in visitor.state.var_to_expr:
+            # The emitter installs each variable as a fresh binding; one the
+            # required side (or, in a MINUS probe, the outer query) already
+            # binds would be overwritten, not compared, and the answer would
+            # be silently wrong (review of #189). Refuse, as the inline
+            # emitter refuses a re-bind (ADR-0002 Problem 2).
+            raise UnsupportedSparqlError(
+                f"OPTIONAL over a triples table re-binds variable ?{var_name} that is already bound"
+            )
 
     field_names = [f"f{i}" for i in range(len(new_bindings))]
     projection = ", ".join(

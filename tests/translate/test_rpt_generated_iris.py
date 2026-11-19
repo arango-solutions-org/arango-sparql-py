@@ -157,6 +157,27 @@ def test_a_shared_optional_binding_on_a_triples_subject_inside_minus_is_refused(
         translate(query, resolver=SchemaResolver.from_turtle(_RPT_OWL))
 
 
+@pytest.mark.parametrize(
+    "where",
+    [
+        # Inside MINUS the probe's OPTIONAL on the shared ?s re-binds the outer ?o:
+        # it overwrote it instead of comparing, and answered [] (pyoxigraph: 2 rows).
+        pytest.param(
+            f"?s a <{_EX}Person> . ?u a <{_EX}Person> ; <{_EX}knows> ?o "
+            f"MINUS {{ ?s a <{_EX}Person> OPTIONAL {{ ?s <{_EX}knows> ?o }} }}",
+            id="minus_shared",
+        ),
+        # Outside MINUS the same overwrite replaced ?o with the email.
+        pytest.param(
+            f"?s a <{_EX}Person> ; <{_EX}knows> ?o . OPTIONAL {{ ?o <{_EX}email> ?o }}", id="rebind"
+        ),
+    ],
+)
+def test_a_cross_subject_optional_that_re_binds_a_variable_is_refused(where: str) -> None:
+    with pytest.raises(UnsupportedSparqlError, match="re-binds variable \\?o that is already bound"):
+        translate(f"SELECT ?s WHERE {{ {where} }}", resolver=SchemaResolver.from_turtle(_RPT_OWL))
+
+
 def test_the_data_s_own_predicate_still_reads_the_triples_table() -> None:
     result = translate(f"SELECT ?s ?o WHERE {{ ?s <{_EX}knows> ?o }}", resolver=_detected())
 

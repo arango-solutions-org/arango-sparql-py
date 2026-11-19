@@ -121,6 +121,12 @@ CASES = [
         "SELECT ?s ?o ?email WHERE { ?s a :Person . OPTIONAL { ?s :knows ?o . ?o :email ?email } }",
         id="same_subject_two_triples",
     ),
+    # Inside MINUS an unshared OPTIONAL variable, filtered or not, cannot
+    # change the result (a refusal of the filtered case was over-broad).
+    pytest.param(
+        'SELECT ?s WHERE { ?s a :Person MINUS { ?t a :Person ; :knows ?s OPTIONAL { ?t :email ?m FILTER(?m = "bob@x.org") } } }',
+        id="minus_unshared_filtered",
+    ),
 ]
 
 

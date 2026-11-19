@@ -881,20 +881,17 @@ class AlgebraVisitor:
                 raise UnsupportedSparqlError(
                     f"OPTIONAL re-binds variable ?{o_name} that's already bound by the required side"
                 )
-            inner_filter = (
-                getattr(node.expr, "name", "TrueFilter") != "TrueFilter" if node.expr is not None else False
-            )
-            if str(s) in self.state.var_to_rpt_class and (is_rebind or inner_filter):
+            if str(s) in self.state.var_to_rpt_class and is_rebind:
                 # Reached only inside a MINUS probe (elsewhere the subquery
                 # emitter takes a triples-table subject): the reads below are
                 # document attribute paths, which cannot read a triples-table
-                # row's properties and always come back null. Where that value
-                # decides the probe (a re-bound shared variable, or an inner
-                # FILTER), refuse rather than answer wrongly; an unshared
-                # optional variable cannot change a MINUS result.
+                # row's properties and always come back null. A re-bound shared
+                # variable decides the probe, so refuse rather than answer
+                # wrongly; an unshared one, filtered or not, cannot change a
+                # MINUS result.
                 raise UnsupportedSparqlError(
                     f"OPTIONAL binding ?{o_name} on a subject read from a triples table (RPT) "
-                    f"is not supported inside MINUS when the binding is shared or filtered"
+                    f"is not supported inside MINUS when the binding is shared"
                 )
             prop = self.resolver.resolve_property(p)
             subject_alias = self.state.var_to_doc_alias[str(s)]

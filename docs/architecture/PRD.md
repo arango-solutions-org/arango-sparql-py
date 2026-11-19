@@ -1052,9 +1052,12 @@ The data's own predicate IRIs read the triples table as before, and
 pattern opened from a triples table runs as a correlated subquery over
 the table (`translate/optional_subquery.py`). It used to read a document
 attribute (`doc.<name>`), which no triples row has, so every such
-OPTIONAL bound nothing (found in the review of #189). Inside MINUS,
-where the OPTIONAL stays inline, a binding that is shared with the outer
-query or filtered is refused (`E_SPARQL_UNSUPPORTED`). Tested against
+OPTIONAL bound nothing (found in the review of #189). An OPTIONAL over a
+triples table that would re-bind a variable already bound (by the
+required side, or inside MINUS by the outer query) is refused
+(`E_SPARQL_UNSUPPORTED`). It overwrote the binding instead of comparing
+it. An unshared OPTIONAL variable inside MINUS, filtered or not, cannot
+change the result and is translated. Tested against
 pyoxigraph in `tests/cross/test_optional_crosssubject_cross.py` and live
 in `tests/integration/test_optional_triples_live.py`. Emitting one class per stored
 `rdf:type` instead is a possible later change; it would need
