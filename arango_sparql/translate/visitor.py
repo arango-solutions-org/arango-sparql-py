@@ -52,7 +52,7 @@ from .optional_subquery import emit_optional_subquery
 from .optional_subquery import needs_subquery as needs_optional_subquery
 from .paths import emit_path_triple
 from .predicates import LoopEmitter, LoopPlan, PredicateCall, extract_predicate_calls, resolve_call
-from .resolver import ResolvedClass, ResolvedProperty, SchemaResolver
+from .resolver import ResolvedClass, ResolvedProperty, SchemaResolver, is_synthetic_iri
 from .subselect import emit_to_multiset
 from .union_paths import emit_union
 from .variable_predicates import emit_variable_predicate_triple
@@ -1919,6 +1919,7 @@ class AlgebraVisitor:
         if isinstance(p, URIRef) and p == RDF.type and isinstance(o, URIRef):
             resolved = self.resolver.resolve_class(o)
             if resolved.style == "RPT":
+                self._refuse_generated_iri_on_triples(o, resolved.collection, role="class")
                 self._emit_rpt_type_pattern(s, o, resolved)
                 return
             if resolved.style == "UNION":
@@ -2444,6 +2445,34 @@ class AlgebraVisitor:
             self.state.tenant_bind_placeholder,
         )
 
+    @staticmethod
+    def _refuse_generated_iri_on_triples(iri: Any, table: str, *, role: str) -> None:
+        """Refuse a class or predicate IRI the mapping invented
+        (``urn:arango-sparql:concept#…``) where a triples table would compare it.
+
+        A triples table stores the data's own IRIs in its predicate and
+        ``rdf:type`` rows, never one :class:`SchemaResolver` generated for a
+        mapping label, so the FILTER could only ever return no rows: a silent
+        wrong answer (AGENTS.md, "never emit silently wrong AQL"). Schema
+        detection without an ontology describes a triple store per table, with
+        no classes or properties of its own (PRD §6.3.2).
+        """
+        if not is_synthetic_iri(iri):
+            return
+        if role == "class":
+            advice = (
+                "To query it by class, supply an ontology that declares the data's class "
+                'IRIs with phys:mappingStyle "RPT"'
+            )
+        else:
+            advice = "Use the predicate IRI the data stores"
+        raise SchemaResolutionError(
+            f"{role} {str(iri)!r} is an IRI generated from the mapping, which the triples "
+            f"table {table!r} never stores, so it would match no rows: a schema detected "
+            f"without an ontology describes a triple store per table, with no classes or "
+            f"properties of its own (PRD §6.3.2). {advice}"
+        )
+
     def _emit_rpt_type_pattern(
         self,
         subject: Any,
@@ -2572,6 +2601,7 @@ class AlgebraVisitor:
             rpt_class = known
         else:
             rpt_class = self.state.var_to_rpt_class[str(subject)]
+        self._refuse_generated_iri_on_triples(predicate, rpt_class.collection, role="predicate")
         triples_alias = self._open_collection(rpt_class.collection, resolved=rpt_class)
         # Record the per-class metadata so the OBJECT variable, if
         # bound here, joins through the same column overrides the

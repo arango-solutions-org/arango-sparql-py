@@ -1017,6 +1017,34 @@ and attach `metadata.warnings = [{"code": "ANALYZER_NOT_INSTALLED"}]`.
 Explicit `strategy="heuristic"` skips analyzer; explicit
 `strategy="analyzer"` raises if missing.
 
+**A detected triple store has no classes of its own.** Both strategies
+describe an RPT store per *triples table* (one entity named after the
+table, plus its `RPT_EDGE` relationships), never per `rdf:type` class;
+the analyzer's OWL export leaves the table out. Querying it by class
+therefore needs an ontology that declares the data's class IRIs with
+`phys:mappingStyle "RPT"` and the table's `phys:triplesCollection`.
+Without one, translation refuses rather than answering nothing, with
+`E_SCHEMA_RESOLVE` in both cases below.
+
+- A **generated IRI** (`urn:arango-sparql:concept#…`, which
+  `SchemaResolver.from_mapping_bundle` gives a bundle without OWL), used
+  as a class or a predicate on a triples table, is refused. No row
+  stores one, so the FILTER could only return no rows; before this
+  rule it did, silently. The refusal names the table.
+- A **class IRI the ontology does not declare** is refused as before.
+  When the schema has a triples table no declared class reads, the
+  message names the table and says what to declare.
+
+The data's own predicate IRIs read the triples table as before, and
+`?s a ?class` binds the stored types. Emitting one class per stored
+`rdf:type` instead is a possible later change; it would need
+cross-validation against pyoxigraph, since a wrong match returns wrong
+rows without an error. Implemented in
+`translate/visitor.py::_refuse_generated_iri_on_triples` and
+`translate/resolver.py::triples_tables_without_classes`. Tested by
+`tests/translate/test_rpt_generated_iris.py`, and live on both strategies
+by `tests/integration/test_schema_live.py::test_a_detected_triple_store_is_queried_by_class_only_through_an_ontology`.
+
 #### 6.3.3 Caching and drift detection
 
 Module: `arango_sparql.schema.cache`
@@ -3240,11 +3268,15 @@ multi-model cross-validation slice):
    collection — across PG (`@@<collection>`), LPG (shared collection +
    `typeField` discriminator), RPT (`triplesCollection`), the three
    RPT/PG/LPG hybrids, multitenant (tenant-scoped `FOR`, threaded with
-   a tenant context), and sharded (cross-shard `WITH`).
+   a tenant context), and sharded (cross-shard `WITH`). An RPT entity's
+   generated IRI is refused instead (§6.3.2); its type pattern is emitted
+   for a data class IRI declared with the entity's physical mapping.
 4. For RPT fixtures (including `sharded`), the emitted AQL references
    the fixture's declared `triplesCollection` and the legacy Foxx
    column overrides (`subject_uri` / `predicate` / `object_uri`), read
-   from the fixture's own physical spec rather than hard-coded.
+   from the fixture's own physical spec rather than hard-coded. The
+   query names a data class IRI declared with that spec, as an ontology
+   for a triple store would (§6.3.2).
 
 ### 13.4 Legacy Foxx round-trip regression — RETIRED
 

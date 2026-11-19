@@ -129,6 +129,7 @@ def emit_rpt_cross_subject_optional(visitor: AlgebraVisitor, triple: tuple[Any, 
     if isinstance(predicate, Variable):
         new_bindings.append((str(predicate), attribute_ref(triples_alias, rpt_class.predicate_column)))
     elif isinstance(predicate, URIRef):
+        visitor._refuse_generated_iri_on_triples(predicate, rpt_class.collection, role="predicate")
         pred_bind = child.bind(str(predicate), hint="pred")
         child.filter_eq(attribute_ref(triples_alias, rpt_class.predicate_column), pred_bind)
     else:

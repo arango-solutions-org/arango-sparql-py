@@ -53,6 +53,7 @@ from ..translate.resolver import (
     SchemaResolver,
     analyze_uri_indexes,
     local_name,
+    triples_tables,
 )
 
 # ---------------------------------------------------------------------------
@@ -229,5 +230,9 @@ def _resolver_from_request(req: Any, *, analyzer_bundle: MappingBundle | None = 
     # ``FOR doc IN @@…_Document`` that dies later on ``ERR 1203`` (AGENTS.md
     # hard-rule #5). The translation-only / W3C harness leave this off.
     return SchemaResolver(
-        ontology=graph, strict_subject_resolution=True, uri_indexes=analyze_uri_indexes(analyzer_bundle)
+        ontology=graph,
+        strict_subject_resolution=True,
+        uri_indexes=analyze_uri_indexes(analyzer_bundle),
+        # A refused class query on a detected triple store says what to supply.
+        detected_triples_tables=triples_tables(analyzer_bundle),
     )
