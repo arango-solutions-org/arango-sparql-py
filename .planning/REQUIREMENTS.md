@@ -15,8 +15,8 @@
 
 - [x] **REQ-w3c-coverage** (PRD §3.1): W3C DAWG translation coverage ≥ 25%, no single XFAIL bucket > 30% of remaining failures. *Current: 96.4% query-eval; 30%-clause consciously accepted (dominant bucket = deferred SERVICE).* — acceptance: `tests/w3c/COVERAGE_REPORT.md`, `analyze_coverage.py --write`
 - [x] **REQ-physical-model-coverage** (PRD §3.3): Correct AQL against every §6.1 shape — PG (`COLLECTION`), LPG (`LABEL`), RPT (`_triples`), plain `DOCUMENT`, PG+LPG and PG+RPT hybrids, both edge styles. — acceptance: `tests/translate/{bgp_select,hybrid,rpt}.yml`, `tests/cross/test_multimodel_cross.py`, `tests/cross/test_edge_traversal_cross.py`
-- [x] **REQ-hybrid-bgp-translation** (PRD §3.4): One BGP touching ≥ 2 physical models → single AQL query joined on shared subject URI. — acceptance: `tests/translate/hybrid.yml`, `tests/cross/test_hybrid_cross.py`, `tests/cross/test_multimodel_cross.py`
-- [x] **REQ-schema-detection** (PRD §3.5): Both detectors ship (heuristic + analyzer-backed); analyzer wins on `strategy="auto"`; zero false negatives on fixture corpus. — acceptance: `tests/schema/test_classify.py`, `test_acquire.py`
+- [x] **REQ-hybrid-bgp-translation** (PRD §3.4): One BGP touching ≥ 2 physical models → single AQL query joined on shared subject URI. — acceptance: `tests/translate/hybrid.yml`, `tests/cross/test_multimodel_cross.py`
+- [x] **REQ-schema-detection** (PRD §3.5): Both detectors ship (heuristic + analyzer-backed); analyzer wins on `strategy="auto"`; zero false negatives on fixture corpus. — acceptance: `tests/schema/test_detect.py`, `test_acquire.py`
 
 ### Protocol & HTTP Surface
 
