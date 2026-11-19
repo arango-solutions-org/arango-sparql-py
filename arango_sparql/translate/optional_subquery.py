@@ -162,6 +162,13 @@ def needs_subquery(visitor: AlgebraVisitor, p2: Any) -> bool:
     for s, p, o in triples:
         if not (isinstance(s, Variable) and str(s) in visitor.state.var_to_doc_alias):
             return True
+        if str(s) in visitor.state.var_to_rpt_class:
+            # A subject read from a triples table (RPT) is a row, not a
+            # document: its properties are other rows, which the inline
+            # emitter's attribute paths (``doc.<local name>``) cannot read; it
+            # answered every such OPTIONAL with nothing. The subquery runs the
+            # body through the triples-table reader instead.
+            return True
         if (
             visitor.state.var_to_doc_alias[str(s)] in visitor.state.copy_members
             and isinstance(o, Variable)

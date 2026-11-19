@@ -110,6 +110,17 @@ CASES = [
         "SELECT ?s ?o ?email WHERE { ?s a :Person ; :knows ?o . OPTIONAL { ?o :email ?email } }",
         id="fixed_predicate",
     ),
+    # Same-subject: the subject was opened by the type pattern as a triples
+    # row, and the OPTIONAL read ``doc.knows`` off it (always unbound; review
+    # of #189). It now runs as a correlated subquery over the table.
+    pytest.param(
+        "SELECT ?s ?o WHERE { ?s a :Person . OPTIONAL { ?s :knows ?o } }",
+        id="same_subject",
+    ),
+    pytest.param(
+        "SELECT ?s ?o ?email WHERE { ?s a :Person . OPTIONAL { ?s :knows ?o . ?o :email ?email } }",
+        id="same_subject_two_triples",
+    ),
 ]
 
 

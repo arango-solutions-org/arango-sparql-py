@@ -21,7 +21,7 @@ from typing import Any
 import pytest
 
 from arango_sparql.api import translate
-from arango_sparql.errors import SchemaResolutionError
+from arango_sparql.errors import SchemaResolutionError, UnsupportedSparqlError
 from arango_sparql.service.mapping import _resolver_from_request
 from arango_sparql.translate.mapping import MappingBundle, MappingSource
 from arango_sparql.translate.resolver import SchemaResolver, triples_tables
@@ -123,6 +123,40 @@ def test_a_generated_predicate_in_a_cross_subject_optional_is_refused() -> None:
         translate(query, resolver=resolver)
 
 
+@pytest.mark.parametrize(
+    "required",
+    [pytest.param(f"?s <{_EX}knows> ?o", id="detected"), pytest.param(f"?s a <{_EX}Person>", id="declared")],
+)
+def test_a_generated_predicate_in_a_same_subject_optional_is_refused(required: str) -> None:
+    # The OPTIONAL read ``doc.name`` off the triples row and bound nothing,
+    # with no error (review of #189); it now runs through the triples reader.
+    resolver = _detected() if "knows" in required else SchemaResolver.from_turtle(_RPT_OWL)
+
+    with pytest.raises(SchemaResolutionError, match="generated from the mapping"):
+        translate(f"SELECT ?s ?x WHERE {{ {required} OPTIONAL {{ ?s <{_C}name> ?x }} }}", resolver=resolver)
+
+
+def test_a_same_subject_optional_on_a_triples_table_reads_the_table() -> None:
+    query = f"SELECT ?s ?x WHERE {{ ?s a <{_EX}Person> OPTIONAL {{ ?s <{_EX}knows> ?x }} }}"
+    result = translate(query, resolver=SchemaResolver.from_turtle(_RPT_OWL))
+
+    rows = run_aql_subset(result.aql, result.bind_vars, _TRIPLES)
+
+    assert sorted((r["s"], r["x"]) for r in rows) == [(f"{_EX}a", f"{_EX}b"), (f"{_EX}b", None)]
+
+
+def test_a_shared_optional_binding_on_a_triples_subject_inside_minus_is_refused() -> None:
+    # Inside MINUS the OPTIONAL stays inline (conditional-add, SPARQL
+    # §18.2.5.2), whose document attribute read cannot see a triples row.
+    query = (
+        f"SELECT ?s WHERE {{ ?s a <{_EX}Person> ; <{_EX}knows> ?o "
+        f"MINUS {{ ?t a <{_EX}Person> OPTIONAL {{ ?t <{_EX}knows> ?o }} }} }}"
+    )
+
+    with pytest.raises(UnsupportedSparqlError, match="inside MINUS when the binding is shared"):
+        translate(query, resolver=SchemaResolver.from_turtle(_RPT_OWL))
+
+
 def test_the_data_s_own_predicate_still_reads_the_triples_table() -> None:
     result = translate(f"SELECT ?s ?o WHERE {{ ?s <{_EX}knows> ?o }}", resolver=_detected())
 
@@ -155,12 +189,12 @@ def test_an_undeclared_class_on_a_detected_triple_store_names_the_table() -> Non
 
     message = str(err.value)
     assert message.startswith(f"class IRI '{_EX}Person' is not declared owl:Class in the ontology. ")
-    assert "keeps RDF triples in '_triples'" in message
+    assert "keeps triples in '_triples'" in message
     assert 'phys:mappingStyle "RPT"' in message
 
 
 def test_the_service_resolver_names_the_detected_triples_table() -> None:
-    with pytest.raises(SchemaResolutionError, match="keeps RDF triples in '_triples'"):
+    with pytest.raises(SchemaResolutionError, match="keeps triples in '_triples'"):
         translate(f"SELECT ?s WHERE {{ ?s a <{_EX}Person> }}", resolver=_service(None, _DETECTED_RPT))
 
 

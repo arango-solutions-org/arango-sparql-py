@@ -1279,10 +1279,10 @@ class SchemaResolver(AdvisoryLog):
         if not tables:
             return message
         return (
-            f"{message}. This database keeps RDF triples in "
-            f"{', '.join(repr(t) for t in tables)}, and a schema detected without an "
-            f"ontology describes them per table, with no classes (PRD §6.3.2): to query "
-            f"them by class, supply an ontology that declares the class with "
+            f"{message}. If the class is stored as RDF triples: this database keeps "
+            f"triples in {', '.join(repr(t) for t in tables)}, which a schema detected "
+            f"without an ontology describes per table, with no classes (PRD §6.3.2), so "
+            f"supply an ontology that declares the class with "
             f'phys:mappingStyle "RPT" and its phys:triplesCollection'
         )
 

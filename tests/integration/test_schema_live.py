@@ -418,7 +418,7 @@ def test_a_detected_triple_store_is_queried_by_class_only_through_an_ontology(
         SchemaResolver.from_mapping_bundle(bundle),
         _resolver_from_request(SimpleNamespace(ontology_ttl=None, mapping=None), analyzer_bundle=bundle),
     ):
-        with pytest.raises(SchemaResolutionError, match="keeps RDF triples in '_triples'"):
+        with pytest.raises(SchemaResolutionError, match="keeps triples in '_triples'"):
             translate(f"SELECT ?s WHERE {{ ?s a <{person}> }}", resolver=resolver)
 
     declared = _run(
