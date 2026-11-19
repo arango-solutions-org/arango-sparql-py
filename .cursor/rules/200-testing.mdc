@@ -36,10 +36,13 @@ globs:
 - The in-memory AQL interpreter (`tests/helpers/aql_interp.py`) used by
   `tests/cross/` must evaluate AQL **as ArangoDB 3.12 does, never as
   SPARQL would**. Where they differ, follow measured ArangoDB behaviour
-  and pin it in `tests/helpers/test_aql_interp_aggregates.py`; an
+  and pin it in a `tests/helpers/test_aql_interp_*.py` test; an
   interpreter with SPARQL semantics passes wrong AQL (#39, #46, #47, #48).
-  A translation fix also lands a live ArangoDB-vs-pyoxigraph test under
-  `tests/integration/` (PRD §13.2).
+  A translation fix also lands a live test on a real ArangoDB under
+  `tests/integration/`: compared with pyoxigraph when the fix changes
+  results (or with expected rows written out by hand where pyoxigraph
+  cannot express the case), or checking that ArangoDB accepts and runs
+  the AQL when it fixes a syntax or naming error (PRD §13.2).
 
 ## W3C DAWG harness (mirror `tests/tck/`)
 - Vendor the W3C SPARQL 1.1 Evaluation tests under

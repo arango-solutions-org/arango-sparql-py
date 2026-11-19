@@ -2980,8 +2980,9 @@ Already covered in §6.3; restated here for the integration map:
   declared band by `tests/test_service_startup_guard.py`.
 - **The deployed version is the locked one**: the BYOC bundle ships
   `uv.lock` (`scripts/package_arango_manual.sh`) and the platform installs
-  from it. Raising the band only *admits* a version; production moves to it
-  when `uv lock --upgrade-package arangodb-schema-analyzer` lands and the
+  from it (its entrypoint runs `uv sync`, as recorded in #36). Raising the
+  band only *admits* a version; production moves to it when
+  `uv lock --upgrade-package arangodb-schema-analyzer` lands and the
   service is redeployed (observed 2026-10-16: #34 raised the band to admit
   0.15, and production stayed on the locked 0.15.0 until #36 locked 0.15.1).
 - **Consumed contracts**:
@@ -3123,10 +3124,13 @@ per row in `tests/security/`):
   (`tests/helpers/aql_interp.py`) that consumes our translator output.
   The interpreter evaluates AQL as ArangoDB 3.12 does, never as SPARQL
   would: where the two differ it follows measured ArangoDB behaviour,
-  pinned by `tests/helpers/test_aql_interp_aggregates.py`, because an
+  pinned by the `tests/helpers/test_aql_interp_*.py` tests, because an
   interpreter that applies SPARQL semantics passes wrong AQL (#39, #46,
-  #47, #48). A translation fix also lands a live ArangoDB-vs-pyoxigraph
-  test under `tests/integration/`.
+  #47, #48). A translation fix also lands a live test on a real ArangoDB
+  under `tests/integration/`: compared with pyoxigraph when the fix
+  changes results (or with expected rows written out by hand where
+  pyoxigraph cannot express the case), or checking that ArangoDB accepts
+  and runs the AQL when it fixes a syntax or naming error.
   Bindings must match by bag (or by order, for `ORDER BY` cases). This
   is the fastest way to catch a translator bug — every visitor change
   should land with at least one cross case. The harness runs in six
