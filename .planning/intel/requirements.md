@@ -46,14 +46,13 @@ and PG+RPT hybrids and both edge styles (`DEDICATED_COLLECTION`,
 ## REQ-hybrid-bgp-translation (§3.4)
 One SPARQL BGP whose triples touch ≥ 2 physical models translates to a single
 AQL query (not rejected, not split), joined on shared subject URI.
-- acceptance: `tests/translate/hybrid.yml`, `tests/cross/test_hybrid_cross.py`.
-- additional mixed-model binding parity: `tests/cross/test_multimodel_cross.py`.
+- acceptance: `tests/translate/hybrid.yml`, `tests/cross/test_multimodel_cross.py`.
 
 ## REQ-schema-detection (§3.5)
 Both schema detectors ship (algorithmic heuristic + analyzer-backed); analyzer
 wins on `strategy="auto"`; classifies the sister project's mapping-fixture
 corpus + this project's RPT fixtures with zero false negatives.
-- acceptance: `tests/schema/test_classify.py`, `tests/schema/test_acquire.py`, `tests/schema/fixtures/*.export.json`.
+- acceptance: `tests/schema/test_detect.py`, `tests/schema/test_acquire.py`, `tests/schema/fixtures/*.export.json`.
 
 ## REQ-schema-http-parity (§3.6)
 All 9 schema/mapping HTTP routes exist with documented response shapes, matching
