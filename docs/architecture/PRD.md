@@ -2978,13 +2978,16 @@ Already covered in §6.3; restated here for the integration map:
   GitHub, and fails on a differing ceiling or non-overlapping bands (issue #8).
   The startup guard's install hint (`ANALYZER_VERSION_RANGE`) is pinned to the
   declared band by `tests/test_service_startup_guard.py`.
-- **The deployed version is the locked one**: the BYOC bundle ships
-  `uv.lock` (`scripts/package_arango_manual.sh`) and the platform installs
-  from it (its entrypoint runs `uv sync`, as recorded in #36). Raising the
-  band only *admits* a version; production moves to it when
-  `uv lock --upgrade-package arangodb-schema-analyzer` lands and the
-  service is redeployed (observed 2026-10-16: #34 raised the band to admit
-  0.15, and production stayed on the locked 0.15.0 until #36 locked 0.15.1).
+- **The deployed version is the locked one when `uv` is present**: the
+  BYOC bundle ships `uv.lock` (`scripts/package_arango_manual.sh`), and the
+  bundle's `entrypoint` runs `uv sync --frozen` from it whenever `uv` is on
+  the pod. Raising the band then only *admits* a version; production moves
+  to it when `uv lock --upgrade-package arangodb-schema-analyzer` lands and
+  the service is redeployed (observed 2026-10-16: #34 raised the band to
+  admit 0.15, and production stayed on the locked 0.15.0 until #36 locked
+  0.15.1). Without `uv`, `entrypoint` falls back to `pip install -e`, and
+  the Docker image (`Dockerfile`) installs with pip too; both ignore the
+  lock and resolve the newest version the band admits.
 - **Consumed contracts**:
   - `AgenticSchemaAnalyzer.analyze_physical_schema(db, ...)` →
     canonical `AnalysisResult`.
@@ -3123,14 +3126,18 @@ per row in `tests/security/`):
   bindings) and against a tiny in-memory AQL-subset interpreter
   (`tests/helpers/aql_interp.py`) that consumes our translator output.
   The interpreter evaluates AQL as ArangoDB 3.12 does, never as SPARQL
-  would: where the two differ it follows measured ArangoDB behaviour,
-  pinned by the `tests/helpers/test_aql_interp_*.py` tests, because an
-  interpreter that applies SPARQL semantics passes wrong AQL (#39, #46,
-  #47, #48). A translation fix also lands a live test on a real ArangoDB
-  under `tests/integration/`: compared with pyoxigraph when the fix
-  changes results (or with expected rows written out by hand where
-  pyoxigraph cannot express the case), or checking that ArangoDB accepts
-  and runs the AQL when it fixes a syntax or naming error.
+  would: where the two differ it follows behaviour measured on a live
+  ArangoDB and pinned in `tests/helpers/test_aql_interp_aggregates.py`
+  (the other `test_aql_interp_*.py` files test what the interpreter can
+  run), because an interpreter that applies SPARQL semantics passes wrong
+  AQL (#39, #46, #47, #48). A translation fix also lands a live test on a
+  real ArangoDB under `tests/integration/`. When the fix changes results,
+  the test compares with pyoxigraph, or with expected rows written out by
+  hand only where pyoxigraph cannot express the case. When the fix is for
+  a syntax or naming error, the test checks that ArangoDB accepts and runs
+  the AQL. Some earlier fixes predate this rule: `test_label_arrays_live.py`
+  compares with hand-written rows, and #146, #171 and #175 have no live
+  test.
   Bindings must match by bag (or by order, for `ORDER BY` cases). This
   is the fastest way to catch a translator bug — every visitor change
   should land with at least one cross case. The harness runs in six
