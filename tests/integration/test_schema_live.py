@@ -47,13 +47,16 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from urllib.parse import quote
 
 import pytest
 
 from arango_sparql.api import translate
+from arango_sparql.errors import SchemaResolutionError
 from arango_sparql.schema.acquire import (
     acquire_mapping_bundle,
     analyzer_available,
@@ -62,6 +65,7 @@ from arango_sparql.schema.acquire import (
     service_collections,
 )
 from arango_sparql.schema.detect import classify_schema
+from arango_sparql.service.mapping import _resolver_from_request
 from arango_sparql.translate.mapping import MappingBundle
 from arango_sparql.translate.resolver import SchemaResolver
 from tests.integration.conftest import (
@@ -72,6 +76,7 @@ from tests.integration.conftest import (
     integration_enabled,
     try_boot_arangodb_via_compose,
 )
+from tests.integration.schema_live_seeds import NS as SEED_NS
 from tests.integration.schema_live_seeds import SEEDS
 
 pytestmark = [pytest.mark.integration, pytest.mark.schema_live]
@@ -364,10 +369,9 @@ def _expected_entity_rows(db: Any, spec: dict[str, Any]) -> int:
 
 @pytest.mark.parametrize("strategy", STRATEGIES)
 def test_every_pg_and_lpg_entity_returns_its_seeded_rows(seeded: tuple[str, Any], strategy: str) -> None:
-    """RPT entities are excluded: a type query compares ``object_uri`` against
-    the class IRI in the query, and a detected bundle only carries synthetic
-    ``urn:`` IRIs — querying RPT in the data's namespace needs an ontology
-    (``bundle.owl_turtle``), which ``tests/cross/`` covers.
+    """RPT entities are excluded: a detected triple store has no classes of its
+    own (PRD §6.3.2), so its generated IRI is refused — see
+    :func:`test_a_detected_triple_store_is_queried_by_class_only_through_an_ontology`.
     """
     _model, db = seeded
     bundle = _acquire(db, strategy)
@@ -378,6 +382,56 @@ def test_every_pg_and_lpg_entity_returns_its_seeded_rows(seeded: tuple[str, Any]
     counts = {k: len(_run(db, bundle, f"SELECT ?s WHERE {{ ?s a <{_iri(k)}> }}")) for k in entities}
 
     assert counts == {k: _expected_entity_rows(db, v) for k, v in entities.items()}
+
+
+_RPT_ONTOLOGY = f"""
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix phys: <https://arango.solutions/phys#> .
+<{SEED_NS}Person> a owl:Class ; phys:mappingStyle "RPT" ; phys:triplesCollection "_triples" .
+"""
+
+
+@pytest.mark.parametrize("strategy", STRATEGIES)
+def test_a_detected_triple_store_is_queried_by_class_only_through_an_ontology(
+    scratch_db: Any, strategy: str
+) -> None:
+    """A triple store detected without an ontology has no classes (PRD §6.3.2).
+
+    Its generated class and predicate IRIs are refused rather than run: no row
+    stores them, so they could only answer nothing, and they used to return 0
+    rows with no error. The data's own class IRI is refused with the table
+    named; once an ontology declares it, it returns every subject the seed
+    typed with it, on the library and the service resolver alike.
+    """
+    SEEDS["rpt"](scratch_db)
+    bundle = _acquire(scratch_db, strategy)
+    person = f"{SEED_NS}Person"
+    people = sorted(f"{SEED_NS}person{i}" for i in range(3))
+
+    for generated in (
+        f"SELECT ?s WHERE {{ ?s a <{_iri('_triples')}> }}",
+        f"SELECT ?s ?o WHERE {{ ?s <{_iri('KNOWS')}> ?o }}",
+    ):
+        with pytest.raises(SchemaResolutionError, match="generated from the mapping"):
+            _run(scratch_db, bundle, generated)
+    for resolver in (
+        SchemaResolver.from_mapping_bundle(bundle),
+        _resolver_from_request(SimpleNamespace(ontology_ttl=None, mapping=None), analyzer_bundle=bundle),
+    ):
+        with pytest.raises(SchemaResolutionError, match="keeps triples in '_triples'"):
+            translate(f"SELECT ?s WHERE {{ ?s a <{person}> }}", resolver=resolver)
+
+    declared = _run(
+        scratch_db, replace(bundle, owl_turtle=_RPT_ONTOLOGY), f"SELECT ?s WHERE {{ ?s a <{person}> }}"
+    )
+    service = _resolver_from_request(
+        SimpleNamespace(ontology_ttl=_RPT_ONTOLOGY, mapping=None), analyzer_bundle=bundle
+    )
+    result = translate(f"SELECT ?s WHERE {{ ?s a <{person}> }}", resolver=service)
+    served = list(scratch_db.aql.execute(result.aql, bind_vars=result.bind_vars))
+
+    assert sorted(r["s"] for r in declared) == people
+    assert sorted(r["s"] for r in served) == people
 
 
 def _expected_edge_rows(db: Any, spec: dict[str, Any]) -> int:

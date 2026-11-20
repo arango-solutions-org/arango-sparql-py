@@ -96,6 +96,30 @@ def _synthetic_iri(label: str) -> str:
     return f"urn:arango-sparql:concept#{quote(label, safe='')}"
 
 
+#: Namespace for the class IRIs a fixture's data would store in ``rdf:type``.
+_DATA_NS = "http://example.org/fixture#"
+
+
+def _declare_data_class(resolver: SchemaResolver, label: str) -> str:
+    """Declare the data's own class IRI for *label*, with the physical mapping
+    the bundle gave its generated IRI, and return it.
+
+    This is what an ontology for a triple store supplies (PRD §6.3.2): on a
+    triples table a generated ``urn:arango-sparql:concept#`` IRI is refused,
+    because no ``rdf:type`` row holds one. Copying the generated class's
+    ``phys:*`` annotations keeps the fixture's own physical spec (table and
+    column overrides) the thing under test.
+    """
+
+    from rdflib import URIRef
+
+    generated = URIRef(_synthetic_iri(label))
+    data = URIRef(_DATA_NS + quote(label, safe=""))
+    for predicate, value in list(resolver.ontology.predicate_objects(generated)):
+        resolver.ontology.add((data, predicate, value))
+    return str(data)
+
+
 # ---------------------------------------------------------------------------
 # Corpus completeness
 # ---------------------------------------------------------------------------
@@ -489,6 +513,10 @@ def test_translator_emits_aql_per_entity_in_every_fixture(name: str) -> None:
     emitted AQL — which holds across all of those shapes because the
     shard-suffixed and discriminated forms still contain the base
     collection token as a substring.
+
+    An RPT entity's generated IRI is refused (no ``rdf:type`` row stores
+    one, so it could only match nothing; PRD §6.3.2); its type pattern is
+    emitted for the data's own class IRI, declared with the same mapping.
     """
 
     raw = _load_fixture(name)
@@ -503,6 +531,10 @@ def test_translator_emits_aql_per_entity_in_every_fixture(name: str) -> None:
         ename = entity["name"]
         iri = _synthetic_iri(ename)
         resolved = resolver.resolve_class(iri)
+        if resolved.style == "RPT":
+            with pytest.raises(SchemaResolutionError, match="generated from the mapping"):
+                translate(f"SELECT ?s WHERE {{ ?s a <{iri}> }}", resolver=resolver, tenant_id=tenant_id)
+            iri = _declare_data_class(resolver, ename)
         sparql = f"SELECT ?s WHERE {{ ?s a <{iri}> }}"
         result = translate(sparql, resolver=resolver, tenant_id=tenant_id)
 
@@ -546,7 +578,7 @@ def test_rpt_translator_references_legacy_columns_in_emitted_aql(name: str) -> N
     assert rpt_entities, f"Fixture {name!r} is in RPT_FIXTURE_NAMES but declares no RPT entity"
 
     for label, spec in rpt_entities:
-        iri = _synthetic_iri(label)
+        iri = _declare_data_class(resolver, label)
         result = translate(
             f"SELECT ?s WHERE {{ ?s a <{iri}> }}",
             resolver=resolver,

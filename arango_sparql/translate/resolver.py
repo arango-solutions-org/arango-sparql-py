@@ -353,6 +353,14 @@ class SchemaResolver(AdvisoryLog):
     translation error. The warning surface preserves the diagnostic
     so operators can see what fell back."""
 
+    detected_triples_tables: tuple[str, ...] = ()
+    """The triples tables (RPT) of the schema this resolver was built from
+    (:func:`triples_tables`). Schema detection describes a triple store per
+    table, never per ``rdf:type`` class (PRD §6.3.2), so a class query on a
+    table no declared class reads cannot be answered; :meth:`resolve_class`
+    names these tables when it refuses one, so the caller knows to supply an
+    ontology rather than guess at the class IRI."""
+
     default_graph_includes_named: bool = True
     """Whether queries outside any ``GRAPH`` wrapper see *all*
     documents (lax, default) or only documents in the default
@@ -530,7 +538,9 @@ class SchemaResolver(AdvisoryLog):
         Callers that need IRIs in their own namespace (e.g. SPARQL
         queries using ``http://customer.example/onto#``) should supply
         an OWL ontology via ``bundle.owl_turtle`` rather than rely on
-        the synthetic ``urn:`` namespace.
+        the synthetic ``urn:`` namespace. On a triples table (RPT) a
+        synthetic IRI is refused as a class or predicate, since no row
+        stores one (PRD §6.3.2).
         """
 
         shard_families = _project_shard_families(bundle.physical_mapping)
@@ -538,15 +548,8 @@ class SchemaResolver(AdvisoryLog):
         if bundle.owl_turtle:
             graph = Graph()
             graph.parse(data=bundle.owl_turtle, format="turtle")
-            return cls(
-                ontology=graph,
-                default_collection=default_collection,
-                shard_families=shard_families,
-                permissive_class_resolution=permissive_class_resolution,
-                predicates=dict(predicates or {}),
-                uri_indexes=uri_indexes,
-            )
-        graph = _synthesize_graph_from_bundle(bundle)
+        else:
+            graph = _synthesize_graph_from_bundle(bundle)
         return cls(
             ontology=graph,
             default_collection=default_collection,
@@ -554,6 +557,7 @@ class SchemaResolver(AdvisoryLog):
             permissive_class_resolution=permissive_class_resolution,
             predicates=dict(predicates or {}),
             uri_indexes=uri_indexes,
+            detected_triples_tables=triples_tables(bundle),
         )
 
     # ------------------------------------------------------------------
@@ -609,7 +613,7 @@ class SchemaResolver(AdvisoryLog):
         ref = URIRef(key)
         if (ref, RDF.type, OWL.Class) not in self.ontology:
             if not self.permissive_class_resolution:
-                raise SchemaResolutionError(f"class IRI {key!r} is not declared owl:Class in the ontology")
+                raise SchemaResolutionError(self._undeclared_class_message(key))
             # Permissive mode (opt-in): degrade to the default
             # document collection — same shape that
             # :meth:`resolve_property` already uses for unmapped
@@ -1243,6 +1247,45 @@ class SchemaResolver(AdvisoryLog):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+    def triples_tables_without_classes(self) -> tuple[str, ...]:
+        """The :attr:`detected_triples_tables` no declared class reads.
+
+        A table counts as read only by a class with a real IRI: the classes
+        :func:`_synthesize_graph_from_bundle` invents
+        (``urn:arango-sparql:concept#…``) name the table or a mapping entity,
+        never an ``rdf:type`` the data stores, so they cannot answer a class
+        query either (PRD §6.3.2).
+        """
+        if not self.detected_triples_tables:
+            return ()
+        served: set[str] = set()
+        for cls in self.ontology.subjects(RDF.type, OWL.Class):
+            if not isinstance(cls, URIRef) or is_synthetic_iri(cls):
+                continue
+            if self._physical_string(cls, "mappingStyle") != "RPT":
+                continue
+            served.add(
+                self._physical_string(cls, "collectionName")
+                or self._physical_string(cls, "triplesCollection")
+                or "_triples"
+            )
+        return tuple(t for t in self.detected_triples_tables if t not in served)
+
+    def _undeclared_class_message(self, key: str) -> str:
+        """The refusal for a class IRI the ontology does not declare; when the
+        database holds triples no declared class reads, say what to supply."""
+        message = f"class IRI {key!r} is not declared owl:Class in the ontology"
+        tables = self.triples_tables_without_classes()
+        if not tables:
+            return message
+        return (
+            f"{message}. If the class is stored as RDF triples: this database keeps "
+            f"triples in {', '.join(repr(t) for t in tables)}, which a schema detected "
+            f"without an ontology describes per table, with no classes (PRD §6.3.2), so "
+            f"supply an ontology that declares the class with "
+            f'phys:mappingStyle "RPT" and its phys:triplesCollection'
+        )
+
     def _physical_string(self, subject: URIRef, predicate_local: str) -> str | None:
         """Return the literal value of ``phys:<predicate_local>`` on
         ``subject``, regardless of which physical-IRI spelling the
@@ -1455,6 +1498,28 @@ def _project_shard_families(
             families.append(members)
     families.sort(key=lambda f: (f[0], f))
     return tuple(families)
+
+
+def is_synthetic_iri(iri: URIRef | str) -> bool:
+    """Whether *iri* is one :func:`_synthetic_iri` invents for a mapping label."""
+    return str(iri).startswith(str(_SYNTHETIC_CONCEPT_NS))
+
+
+def triples_tables(bundle: MappingBundle | None) -> tuple[str, ...]:
+    """The triples tables of *bundle*'s RPT entities, sorted, each once.
+
+    An RPT entity reads its ``collectionName`` when it has one, else its
+    ``triplesCollection``, else the legacy ``_triples`` (the same order
+    :func:`_synthesize_graph_from_bundle` applies).
+    """
+    if bundle is None:
+        return ()
+    tables = {
+        str(spec.get("collectionName") or spec.get("triplesCollection") or "_triples")
+        for spec in bundle.entities().values()
+        if isinstance(spec, dict) and spec.get("style") == "RPT"
+    }
+    return tuple(sorted(tables))
 
 
 def _synthetic_iri(label: str) -> URIRef:

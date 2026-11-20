@@ -1017,6 +1017,57 @@ and attach `metadata.warnings = [{"code": "ANALYZER_NOT_INSTALLED"}]`.
 Explicit `strategy="heuristic"` skips analyzer; explicit
 `strategy="analyzer"` raises if missing.
 
+**A detected triple store has no classes of its own.** Both strategies
+describe an RPT store per *triples table* (one entity named after the
+table, plus its `RPT_EDGE` relationships), never per `rdf:type` class;
+the analyzer's OWL export leaves the table out. Querying it by class
+therefore needs an ontology that declares the data's class IRIs with
+`phys:mappingStyle "RPT"` and the table's `phys:triplesCollection`.
+Without one, translation refuses rather than answering nothing, with
+`E_SCHEMA_RESOLVE` in both cases below.
+
+- A **generated IRI** (`urn:arango-sparql:concept#…`, which
+  `SchemaResolver.from_mapping_bundle` gives a bundle without OWL),
+  written as the class of a type pattern (`?s a <…>`) or as the
+  predicate of a triple pattern (an OPTIONAL's too) on a triples table,
+  is refused, since the mapping resolves it to that table but no row
+  stores it. The FILTER could only return no rows, and before this rule
+  it did so silently. The refusal names the table.
+- A **class IRI the ontology does not declare** is refused as before.
+  When the schema has a triples table no declared class reads, the
+  message says that if the class is stored as triples, the named table
+  needs an ontology declaring it.
+
+Where a generated IRI is only a **value compared with stored data**
+(a `VALUES` row, a `FILTER` or `BIND` constant reaching `?s a ?c`, an
+object constant, `DESCRIBE <…>`), the empty answer is the correct SPARQL
+answer, since no stored triple holds it, and it is not refused. Some
+shapes fail at execution instead of being refused: on the library's
+non-strict resolver an untyped subject, or a variable predicate,
+opens the default `Document` collection (ERR 1203). That is loud, not
+silent.
+
+The data's own predicate IRIs read the triples table as before, and
+`?s a ?class` binds the stored types. An OPTIONAL on a subject a type
+pattern opened from a triples table runs as a correlated subquery over
+the table (`translate/optional_subquery.py`). It used to read a document
+attribute (`doc.<name>`), which no triples row has, so every such
+OPTIONAL bound nothing (found in the review of #189). An OPTIONAL over a
+triples table that would re-bind a variable already bound (by the
+required side, or inside MINUS by the outer query) is refused
+(`E_SPARQL_UNSUPPORTED`). It overwrote the binding instead of comparing
+it. An unshared OPTIONAL variable inside MINUS, filtered or not, cannot
+change the result and is translated. Tested against
+pyoxigraph in `tests/cross/test_optional_crosssubject_cross.py` and live
+in `tests/integration/test_optional_triples_live.py`. Emitting one class per stored
+`rdf:type` instead is a possible later change; it would need
+cross-validation against pyoxigraph, since a wrong match returns wrong
+rows without an error. Implemented in
+`translate/visitor.py::_refuse_generated_iri_on_triples` and
+`translate/resolver.py::triples_tables_without_classes`. Tested by
+`tests/translate/test_rpt_generated_iris.py`, and live on both strategies
+by `tests/integration/test_schema_live.py::test_a_detected_triple_store_is_queried_by_class_only_through_an_ontology`.
+
 #### 6.3.3 Caching and drift detection
 
 Module: `arango_sparql.schema.cache`
@@ -1380,7 +1431,7 @@ deployments.
 | **Nested property paths** (issue #72) — `phys:attributePath` / CSI `path` reads a value inside a nested object, with an existence check on the same path; `phys:attributeName` / CSI `field` stays one literal name. Required, OPTIONAL, constant-object and join triples; `?s ?p ?o` and negated paths refuse while any property is nested (§6.2) | ✅ shipped | `tests/translate/nested_paths.yml` + `tests/translate/test_translate_nested_paths_goldens.py`; `tests/translate/test_nested_field_paths.py` (mapping validation, refusals); **binding parity** vs pyoxigraph live on ArangoDB in `tests/integration/test_nested_field_paths_live.py` (both shapes, both on one document, list / string / empty object where the object should be) |
 | **PG `DEDICATED_COLLECTION` edges** — OWL `ObjectProperty` resolves to a `phys:edgeCollectionName`; SPARQL traversal lowers to `FOR v, e IN OUTBOUND <s> @@edgeColl`, binding the target vertex's `_uri` to the SPARQL object (so a follow-up `?o a :Person` / `?o :name ?n` joins on `_uri` automatically). Implemented in `visitor.py::_emit_edge_triple` (BGP) and `visit_LeftJoin` (OPTIONAL: the block's matches are a correlated subquery the outer query iterates, padded with one `null` row, so every matching edge is its own solution — `_emit_optional_rows`; it followed the first edge only until issue #48). An OPTIONAL body evaluated as a sub-query shares with the outer pattern only the variables it binds itself (SPARQL 1.1 §18.5): a BIND, a nested group's FILTER or a sub-select in it does not read a variable only the outer pattern binds; its top-level FILTER, the left join's condition, does (#125). | ✅ shipped | `tests/translate/edge_traversal.yml` + `tests/translate/test_translate_edge_traversal_goldens.py`; **binding parity** vs pyoxigraph in `tests/cross/test_edge_traversal_cross.py` (`pg_dedicated_edge` arm; OPTIONAL over a multi-edge subject in `OPTIONAL_CASES`) and live on ArangoDB in `tests/integration/test_optional_edges_live.py` |
 | **LPG `GENERIC_WITH_TYPE` edges** — typed-edge traversal with discriminator FILTER (`FILTER e.<typeField> == @<typeValue>`) so multiple relationship types sharing one edge collection stay separated | ✅ shipped | `tests/translate/edge_traversal.yml` (DEDICATED + GENERIC arms exercised in both BGP and OPTIONAL); **binding parity** vs pyoxigraph in `tests/cross/test_edge_traversal_cross.py` (`lpg_generic_edge` arm) |
-| **RPT (`_triples` triple-store)** — read subject/predicate/object rows, `NOT_NULL(object_uri, object_value)` for objects (object properties read the `object_uri` column in the same triples table — no separate edge traversal), `STARTS_WITH(_, "_:")` heuristic for blank nodes | ✅ shipped | `tests/translate/rpt.yml` (type patterns + datatype/object property reads); cross-model binding parity in `tests/cross/test_multimodel_cross.py` (RPT arm + cross-class joins) |
+| **RPT (`_triples` triple-store)** — read subject/predicate/object rows, `NOT_NULL(object_uri, object_value)` for objects (object properties read the `object_uri` column in the same triples table — no separate edge traversal), `STARTS_WITH(_, "_:")` heuristic for blank nodes. An OPTIONAL on a triples-table subject reads the table through a correlated subquery (§6.3.2; it bound nothing until the review of #189) | ✅ shipped | `tests/translate/rpt.yml` (type patterns + datatype/object property reads); cross-model binding parity in `tests/cross/test_multimodel_cross.py` (RPT arm + cross-class joins); OPTIONAL in `tests/cross/test_optional_crosssubject_cross.py` and live in `tests/integration/test_optional_triples_live.py` |
 | **Mixed-model BGP** (RPT + PG, RPT + LPG, PG + LPG, all three) | 🟡 v1.0 | Criterion §3.4; fixture corpus `tests/translate/hybrid.yml` |
 | **Property-path expansion** — `SequencePath` (`:p/:q`) and `InvPath` (`^:p`) ship in v1 as pure desugarings via `arango_sparql/translate/paths.py`; `MulPath` (`:p*`, `:p+`, `:p?`), `AlternativePath` (`:p\|:q`), and `NegatedPath` (`!:p`) remain v1.1 deliverables. | 🟡 v1 partial / v1.1 full | `tests/translate/property_paths.yml`; remaining buckets tracked in `COVERAGE_REPORT.md` under per-operator XFAIL rows (`:p+`, `:p*`, `:p\|:q`) |
 | **Variable predicates (`?s ?p ?o`)** — RPT subject projects the predicate column directly and is W3C-spec-correct; PG/LPG/default-collection subject fans out via `FOR k IN ATTRIBUTES(doc, true)`. When the ontology declares `owl:DatatypeProperty` terms, the resolver's reverse index (`SchemaResolver.attribute_uri_map`) is bound into the query (`LET p = @attr_uris[k] FILTER p != null`) and `?p` binds to the **predicate IRI** — the W3C-spec-correct shape; local-name collisions resolve deterministically (lexically-smallest IRI) with a `W_SCHEMA_AMBIGUOUS_ATTRIBUTE` advisory. RESIDUAL CARVE-OUT (empty-ontology fallback only): with no declared datatype properties `?p` binds to the attribute **name** string. An attribute declared multi-valued (`phys:multiValued`, CDF #220) is one `?o` per element: the declared list attributes are bound once (`@list_attrs`) and each key decides at run time (`k IN @list_attrs ? FLATTEN([doc[k]]) : [doc[k]]`, membership vs `==` for a bound or constant object); under `fan_out_list_values` every attribute fans out. | ✅ shipped (v1.1 "resolver-driven URI mapping" slice landed; string fallback only when the ontology declares no properties) | `tests/translate/variable_predicate.yml` (11 cases incl. `bare_spo_with_declared_datatype_properties`); `tests/translate/multi_valued.yml`; live `tests/integration/test_multi_valued_live.py`; `tests/translate/test_attribute_uri_map.py`; live W3C aggregates/bind/functions cases now in `tests/w3c/test_w3c_live_execution.py::EXPECTED_LIVE_PASSES` |
@@ -3240,11 +3291,15 @@ multi-model cross-validation slice):
    collection — across PG (`@@<collection>`), LPG (shared collection +
    `typeField` discriminator), RPT (`triplesCollection`), the three
    RPT/PG/LPG hybrids, multitenant (tenant-scoped `FOR`, threaded with
-   a tenant context), and sharded (cross-shard `WITH`).
+   a tenant context), and sharded (cross-shard `WITH`). An RPT entity's
+   generated IRI is refused instead (§6.3.2); its type pattern is emitted
+   for a data class IRI declared with the entity's physical mapping.
 4. For RPT fixtures (including `sharded`), the emitted AQL references
    the fixture's declared `triplesCollection` and the legacy Foxx
    column overrides (`subject_uri` / `predicate` / `object_uri`), read
-   from the fixture's own physical spec rather than hard-coded.
+   from the fixture's own physical spec rather than hard-coded. The
+   query names a data class IRI declared with that spec, as an ontology
+   for a triple store would (§6.3.2).
 
 ### 13.4 Legacy Foxx round-trip regression — RETIRED
 
