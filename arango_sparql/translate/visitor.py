@@ -822,13 +822,15 @@ class AlgebraVisitor:
             untracked = [name for name, value in own.items() if value is None]
             if untracked:
                 # The required side binds it in only some solutions in a way
-                # whose own value is not recorded (a UNION arm, or in a MINUS
-                # probe an OPTIONAL its inline conditional add lowered), so the
-                # padding test has nothing to compare with: refuse, not guess.
+                # whose own value is not recorded (a UNION arm, a VALUES column
+                # with UNDEF, a sub-select column, or in a MINUS probe an
+                # OPTIONAL its inline conditional add lowered), so the padding
+                # test has nothing to compare with: refuse, not guess.
                 raise UnsupportedSparqlError(
                     f"OPTIONAL binding ?{untracked[0]}, which the surrounding pattern binds and this "
-                    f"group's required side binds in only some solutions (through a UNION arm, or "
-                    f"inside MINUS through an OPTIONAL read inline), is not supported (#194)"
+                    f"group's required side binds in only some solutions (through a UNION arm, a VALUES "
+                    f"column with UNDEF, a sub-select column, or inside MINUS an OPTIONAL read inline), "
+                    f"is not supported (#194)"
                 )
             emit_optional_subquery(self, node, loose={name: value for name, value in own.items() if value})
             return

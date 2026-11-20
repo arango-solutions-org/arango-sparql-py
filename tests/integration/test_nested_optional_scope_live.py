@@ -24,6 +24,7 @@ import pytest
 import rdflib
 
 from arango_sparql.api import translate
+from arango_sparql.errors import UnsupportedSparqlError
 from arango_sparql.translate.resolver import SchemaResolver
 from tests.helpers.oxi import drop_null_bindings, normalize_oxi_row, oxi_bindings
 from tests.integration.conftest import (
@@ -171,6 +172,13 @@ def _multiset(rows: list[dict[str, Any]]) -> list[str]:
             "SELECT ?s ?x WHERE { ?s a :Person ; :knows ?x MINUS { ?s :name ?n OPTIONAL { ?x :email ?m } } }",
             id="minus",
         ),
+        # Control: a sub-select column its own pattern always binds is
+        # substituted as before (review of #197).
+        pytest.param(
+            "SELECT ?s ?x ?n ?m WHERE { ?s :knows ?x OPTIONAL { ?s :name ?n "
+            "{ SELECT ?s ?x WHERE { ?s :likes ?x } } OPTIONAL { ?x :email ?m } } }",
+            id="subselect_bound_column",
+        ),
         # The group's ?x comes from an earlier OPTIONAL in it (review of #197):
         # g likes nobody, so (g, c) keeps ?n unbound. Main refused it.
         pytest.param(
@@ -215,3 +223,35 @@ def test_issue_194_keeps_the_name_unbound_when_no_contact_is_compatible(db: Any)
             {"s": EX + "a", "x": EX + "c"},
             {"s": EX + "g", "x": EX + "c"},
         ], mapping
+
+
+@pytest.mark.parametrize("mapping", sorted(_ONTOLOGIES))
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param(
+            "SELECT ?s ?x ?n ?m WHERE { ?s :knows ?x OPTIONAL { ?s :name ?n VALUES ?x { UNDEF } OPTIONAL { ?x :email ?m } } }",
+            id="values_undef",
+        ),
+        pytest.param(
+            "SELECT ?s ?x ?n ?m WHERE { ?s :knows ?x OPTIONAL { ?s :name ?n "
+            "{ SELECT ?s ?x WHERE { ?s :name ?nn OPTIONAL { ?s :likes ?x } } } OPTIONAL { ?x :email ?m } } }",
+            id="subselect_optional_column",
+        ),
+    ],
+)
+def test_untracked_group_value_is_refused_or_answered_correctly(
+    db: Any, oxi_store: Any, mapping: str, body: str
+) -> None:
+    """VALUES with UNDEF or a sub-select in the group's required side (review of #197).
+
+    Translation refuses these today. Should they be answered later, the answer
+    must match pyoxigraph: main and the first fix bound ?n for (a, c) and (g, c).
+    """
+    try:
+        res = translate(_PREFIX + body, resolver=SchemaResolver.from_turtle(_ONTOLOGIES[mapping]))
+    except UnsupportedSparqlError:
+        return
+    actual = [drop_null_bindings(r) for r in db.aql.execute(res.aql, bind_vars=res.bind_vars)]
+    expected = [normalize_oxi_row(r) for r in oxi_bindings(oxi_store, _PREFIX + body)]
+    assert _multiset(actual) == _multiset(expected)

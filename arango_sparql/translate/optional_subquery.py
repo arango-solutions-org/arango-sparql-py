@@ -78,11 +78,12 @@ def group_scoped_variables(visitor: AlgebraVisitor, scope_before: set[str], node
 def certain_variables(node: Any) -> set[str]:
     """The variables a graph pattern binds in every solution.
 
-    An OPTIONAL's side, a MINUS's right side and a variable only some UNION
-    arms bind can be unbound. A BIND target counts as bound (a BIND onto an
-    outer variable is refused), as does every variable of a pattern this
-    does not look inside (VALUES, sub-select, aggregate): those keep the
-    sequential translation they had before #194.
+    An OPTIONAL's side, a MINUS's right side, a variable only some UNION
+    arms bind, a VALUES column with an ``UNDEF`` cell and a sub-select
+    column its own pattern can leave unbound can each be unbound. A BIND
+    target counts as bound (a BIND onto an outer variable is refused), as
+    does every variable of a pattern this does not look inside: those keep
+    the sequential translation they had before #194.
     """
     if node is None:
         return set()
@@ -93,8 +94,23 @@ def certain_variables(node: Any) -> set[str]:
         return certain_variables(node.p1) | certain_variables(node.p2)
     if name in ("LeftJoin", "Minus"):
         return certain_variables(node.p1)
-    if name == "Filter":
+    if name in ("Filter", "ToMultiSet", "Distinct", "Reduced", "OrderBy", "Slice", "Group", "AggregateJoin"):
+        # An aggregate's result can be unbound (SAMPLE, MIN over nothing):
+        # only the grouped pattern's own variables count (review of #197).
         return certain_variables(node.p)
+    if name in ("Project", "SelectQuery"):
+        # A sub-select's column is bound in every row only if its own
+        # pattern binds it in every solution (review of #197).
+        return {str(v) for v in node.get("PV") or []} & certain_variables(node.p)
+    if name == "values":
+        # A column with an ``UNDEF`` cell (or a row without it) can be unbound.
+        rows = node.get("res") or []
+        columns = {str(var) for row in rows for var in row}
+        return {
+            column
+            for column in columns
+            if all(row.get(Variable(column)) not in (None, "UNDEF") for row in rows)
+        }
     if name == "Union":
         return certain_variables(node.p1) & certain_variables(node.p2)
     if name == "Extend":
@@ -109,8 +125,8 @@ def group_own_value(visitor: AlgebraVisitor, node: Any, name: str) -> str | None
     """The value the visited pattern *node* gave *name* itself, without the outer one.
 
     ``"null"`` when it does not bind the variable; ``None`` when it binds it
-    only in some solutions in a way this does not track (a UNION arm, say):
-    the caller refuses then. A group-scoped OPTIONAL records its own value
+    only in some solutions in a way this does not track (a UNION arm, a
+    VALUES column with ``UNDEF``, a sub-select): the caller refuses then. A group-scoped OPTIONAL records its own value
     (:func:`emit_optional_subquery`); a join combines its sides'.
     """
     if name not in bound_variables(node):

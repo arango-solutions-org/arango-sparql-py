@@ -280,6 +280,69 @@ def test_minus_whose_group_binds_x_through_an_earlier_optional_is_refused_on_doc
         )
 
 
+# A required side that binds ?x in only some solutions through VALUES with
+# UNDEF or a sub-select (review of #197): the value it gave ?x is not tracked,
+# so the padding test has nothing to compare with, and the query is refused.
+# Main and the first fix counted those columns as always bound and bound ?n
+# for (a, c) and (g, c) instead of leaving it unbound.
+UNTRACKED_CASES = [
+    pytest.param(
+        "SELECT ?s ?x ?n ?m WHERE { ?s :knows ?x OPTIONAL { ?s :name ?n VALUES ?x { UNDEF } OPTIONAL { ?x :email ?m } } }",
+        id="values_undef",
+    ),
+    pytest.param(
+        "SELECT ?s ?x ?n ?m WHERE { ?s :knows ?x "
+        "OPTIONAL { ?s :name ?n VALUES ?x { :b UNDEF } OPTIONAL { ?x :email ?m } } }",
+        id="values_some_undef",
+    ),
+    pytest.param(
+        "SELECT ?s ?x ?n ?m WHERE { ?s :knows ?x "
+        "OPTIONAL { ?s :name ?n VALUES (?s ?x) { (:g UNDEF) (:a :b) } OPTIONAL { ?x :email ?m } } }",
+        id="values_pair_undef",
+    ),
+    pytest.param(
+        "SELECT ?s ?x ?n ?m WHERE { ?s :knows ?x { ?s :name ?n VALUES ?x { UNDEF } OPTIONAL { ?x :email ?m } } }",
+        id="values_undef_required_group",
+    ),
+    pytest.param(
+        "SELECT ?s ?x ?n ?m WHERE { ?s :knows ?x OPTIONAL { ?s :name ?n "
+        "{ SELECT ?s ?x WHERE { ?s :name ?nn OPTIONAL { ?s :likes ?x } } } OPTIONAL { ?x :email ?m } } }",
+        id="subselect_optional_column",
+    ),
+]
+
+
+@pytest.mark.cross
+@pytest.mark.parametrize("ontology_ttl,docs_factory", MODELS)
+@pytest.mark.parametrize("where", UNTRACKED_CASES)
+def test_group_scoped_variable_from_values_undef_or_subselect_is_refused(
+    ontology_ttl: str, docs_factory: Any, where: str
+) -> None:
+    with pytest.raises(UnsupportedSparqlError, match="binds in only some solutions"):
+        translate(f"PREFIX : <{EX}> " + where, resolver=SchemaResolver.from_turtle(ontology_ttl))
+
+
+@pytest.mark.cross
+@pytest.mark.parametrize(
+    "where",
+    [
+        # Control: a VALUES column every row binds is substituted as before and
+        # matches pyoxigraph. (The sub-select control runs live: the in-memory
+        # interpreter does not run a sub-select's COLLECT inside a subquery.)
+        pytest.param(
+            "SELECT ?s ?x ?n ?m WHERE { ?s :knows ?x OPTIONAL { ?s :name ?n VALUES ?x { :b :c } OPTIONAL { ?x :email ?m } } }",
+            id="values_all_bound",
+        ),
+    ],
+)
+@pytest.mark.parametrize("ontology_ttl,docs_factory", MODELS)
+def test_always_bound_values_or_subselect_column_matches_oxigraph(
+    ontology_ttl: str, docs_factory: Any, where: str
+) -> None:
+    expected, actual = _run(ontology_ttl, docs_factory, where)
+    assert_bindings_equal(expected, actual)
+
+
 # The probe's disjoint-domain guard (§8.3.4) for a group-scoped variable,
 # which the emitter records in the probe's sink: ?t shares nothing with the
 # outer row, so only a ?t that likes the outer ?x removes it. d and e know e,
