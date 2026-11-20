@@ -244,6 +244,13 @@ class _BindingState:
     earlier OPTIONAL outside had left it unbound (review of #198), since
     the group is evaluated once per named graph."""
 
+    graph_vars_open_on_entry: set[str] = field(default_factory=set)
+    """The ``GRAPH ?g`` variables of the active scopes that were bound but
+    could be unbound when their GRAPH group began (an OPTIONAL or VALUES
+    ``UNDEF`` outside it). A required pattern of the group may fill one
+    (SPARQL 1.1 §18.3); an OPTIONAL of the group before that is refused
+    (recheck of #198)."""
+
     optional_rebind_sink: list[tuple[str, str, str]] | None = None
     """Probe-mode collector for ``OPTIONAL`` triples that re-bind an
     already-bound variable. ``None`` outside a MINUS probe (the default),
@@ -808,7 +815,20 @@ class AlgebraVisitor:
         # Visit the required side first so every alias / variable that
         # the optional side references is in scope.
         self.visit(node.p1)
+        # A GRAPH variable that could be unbound when its group began (an
+        # OPTIONAL or VALUES UNDEF outside the GRAPH), and that no required
+        # pattern of the group has bound yet: on a row where it is unbound
+        # the group is evaluated once per named graph, so this OPTIONAL would
+        # have to be matched in each graph and the rest of the group in the
+        # same one. Reading it against "any graph" instead mixed graphs
+        # (recheck of #198); refuse.
+        for name in sorted(self.state.graph_vars_open_on_entry):
+            if name in self.state.maybe_unbound:
+                self._refuse_graph_var_without_documents(name)
+        self._emit_optional_side(node)
 
+    def _emit_optional_side(self, node: Any) -> None:
+        """Emit the OPTIONAL side of ``LeftJoin(p1, p2, expr)``, ``p1`` visited."""
         p2 = node.p2
 
         # RPT-native cross-subject OPTIONAL (ADR-0002 Problem 1, Option
@@ -1683,6 +1703,9 @@ class AlgebraVisitor:
         outer_unbound_on_entry = self.state.graph_vars_unbound_on_entry
         if graph_var is not None and not bound_before:
             self.state.graph_vars_unbound_on_entry = outer_unbound_on_entry | {graph_var}
+        outer_open_on_entry = self.state.graph_vars_open_on_entry
+        if graph_var is not None and bound_before and graph_var in self.state.maybe_unbound:
+            self.state.graph_vars_open_on_entry = outer_open_on_entry | {graph_var}
         try:
             self.visit(node.p)
             if (
@@ -1705,6 +1728,7 @@ class AlgebraVisitor:
             self.state.var_to_doc_alias, self.state.const_subject_alias = outer_docs, outer_consts
             self.state.outer_subject_homes = outer_homes
             self.state.graph_vars_unbound_on_entry = outer_unbound_on_entry
+            self.state.graph_vars_open_on_entry = outer_open_on_entry
 
     @staticmethod
     def _refuse_graph_var_without_documents(graph_var: str) -> None:

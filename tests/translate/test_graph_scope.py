@@ -78,6 +78,26 @@ def test_a_bound_graph_variable_is_joined_without_a_null_test(store: Store) -> N
             _PER_GRAPH,
             id="optional_first_then_subselect",
         ),
+        # Inside a sub-SELECT first in the group, ?g is the sub-SELECT's graph
+        # column, bound first by the OPTIONAL just the same (recheck of #198).
+        pytest.param(
+            "SELECT ?g ?s ?x WHERE { GRAPH ?g { { SELECT ?s ?x WHERE { OPTIONAL { ?s :knows ?x } ?s :email ?e } } } }",
+            _PER_GRAPH,
+            id="optional_first_in_subselect",
+        ),
+        # ?g can be unbound on entry (VALUES UNDEF, an OPTIONAL outside): an
+        # OPTIONAL before a required pattern binds it is refused too.
+        pytest.param(
+            "SELECT ?g ?s ?x WHERE { VALUES ?g { UNDEF } GRAPH ?g { OPTIONAL { ?s :knows ?x } ?s :email ?e } }",
+            _PER_GRAPH,
+            id="optional_first_after_values_undef",
+        ),
+        pytest.param(
+            "SELECT ?s ?g ?x WHERE { ?s :name ?n0 OPTIONAL { GRAPH ?g { ?s :email ?e0 } } "
+            "GRAPH ?g { OPTIONAL { ?s :knows ?x } ?s a :Person } }",
+            _PER_GRAPH,
+            id="optional_first_after_outer_optional",
+        ),
         # A nested GRAPH <iri> reads nothing of ?g's graph.
         pytest.param(
             "SELECT DISTINCT ?s WHERE { GRAPH ?g { GRAPH :g1 { ?s :name ?n } } }",

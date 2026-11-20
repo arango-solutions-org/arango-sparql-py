@@ -388,6 +388,23 @@ _SHAPES: list[tuple[str, dict[str, Store], str, str]] = [
         "SELECT ?g ?s ?n WHERE { GRAPH ?g { ?s :email ?e OPTIONAL { SELECT ?s ?n WHERE { ?s :name ?n } } } }",
         "rdflib",
     ),
+    # An OPTIONAL first in a sub-SELECT correlated with the outer row's
+    # graph is matched in that graph (recheck of #198).
+    (
+        "subselect_optional_first_after",
+        SPLIT,
+        "SELECT ?g ?t ?s ?x WHERE { GRAPH ?g { ?t :name ?nn "
+        "{ SELECT ?s ?x WHERE { OPTIONAL { ?s :knows ?x } ?s :email ?e } } } }",
+        "rdflib",
+    ),
+    # ?g unbound on entry, bound by the group's required pattern before its
+    # OPTIONAL: answered (SPARQL 1.1 §18.3).
+    (
+        "values_undef_then_optional",
+        SPLIT,
+        "SELECT ?g ?s ?x WHERE { VALUES ?g { UNDEF :g2 } GRAPH ?g { ?s :email ?e OPTIONAL { ?s :knows ?x } } }",
+        "pyoxigraph",
+    ),
     # #144: an aggregated sub-SELECT in GRAPH <iri> under the strict default
     # graph read the default graph instead of :g1.
     (

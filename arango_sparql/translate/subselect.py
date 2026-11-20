@@ -249,6 +249,10 @@ def _inherit_graph_scope(visitor: AlgebraVisitor, child_visitor: AlgebraVisitor,
             f"the GRAPH group binds ?{name}, is not supported (it is evaluated once per named graph); "
             f"put a triple pattern before the sub-SELECT"
         )
+    child_visitor.state.graph_vars_unbound_on_entry = {
+        *child_visitor.state.graph_vars_unbound_on_entry,
+        column,
+    }
     child_visitor.explicit_projection = [*(child_visitor.explicit_projection or []), Variable(column)]
     return column
 
