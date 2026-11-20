@@ -255,6 +255,12 @@ def _translate_probe(
     # subquery) carries the same state.
     child_visitor.state.var_to_rpt_class = dict(visitor.state.var_to_rpt_class)
     child_visitor.state.const_subject_rpt_class = dict(visitor.state.const_subject_rpt_class)
+    # Inside ``GRAPH <g>`` / ``GRAPH ?g`` the probe's pattern is matched in
+    # the same graph (SPARQL 1.1 §18.6: the active graph is the scope's).
+    # Without the scope the probe read every graph, so ``GRAPH ?g { ?s :p ?o
+    # FILTER EXISTS { ?s :q ?v } }`` passed on ``:q`` in the default graph
+    # (#195). ``_spawn_child`` (UNION, OPTIONAL subquery) carries it too.
+    child_visitor.state.graph_scope = list(visitor.state.graph_scope)
     if substitute:
         # EXISTS substitutes the outer row into its pattern (§18.6): those
         # variables are constants throughout it, inside an OPTIONAL body too,

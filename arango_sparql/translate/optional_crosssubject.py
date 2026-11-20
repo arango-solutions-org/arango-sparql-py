@@ -130,6 +130,24 @@ def emit_rpt_cross_subject_optional(visitor: AlgebraVisitor, triple: tuple[Any, 
         child.filter_raw(f"({subject_value_expr} == null || {subject_column} == {subject_value_expr})")
     else:
         child.filter_raw(f"{subject_column} == {subject_value_expr}")
+    # Inside a GRAPH scope only that graph's triples match, as for every
+    # other read of the table (``_open_collection``); this scan read every
+    # graph's, so an OPTIONAL under ``GRAPH ?g`` bound values stored in the
+    # default graph (#195). A ``GRAPH ?g`` no pattern has bound yet would
+    # need this scan to bind it per triple; refuse rather than leave it unbound.
+    graph_scope = visitor.state.graph_scope
+    if (
+        graph_scope
+        and isinstance(graph_scope[-1], Variable)
+        and str(graph_scope[-1]) not in visitor.state.var_to_expr
+    ):
+        raise UnsupportedSparqlError(
+            f"OPTIONAL over a triples table inside GRAPH ?{graph_scope[-1]} before any pattern binds "
+            f"?{graph_scope[-1]} is not supported; put a pattern inside the GRAPH before the OPTIONAL"
+        )
+    scope = visitor._graph_scope_test(triples_alias)
+    if scope is not None:
+        child.filter_raw(scope)
 
     # One projection field per *new* variable (predicate if it's a
     # variable, plus the object). Fields are positional (``f0``, ``f1``)

@@ -90,15 +90,18 @@ cases:
 
   - name: graph_variable_single_triple
     # ``GRAPH ?g { ?s :name ?n }`` — ?g is the variable. The
-    # only FOR in the scope is the canonical binding for ?g,
-    # so no FILTER is emitted; ?g flows into the projection
-    # as ``doc1._graph``. This is the load-bearing shape for
-    # the SPARQL "expose the graph IRI" idiom.
+    # only FOR in the scope is the canonical binding for ?g;
+    # ?g flows into the projection as ``doc1._graph``. This is
+    # the load-bearing shape for the SPARQL "expose the graph
+    # IRI" idiom. ``?g`` ranges over named graphs only, so a
+    # document in the default graph (``_graph`` null) is
+    # filtered out (#195); it used to match with ?g unbound.
     sparql: |
       PREFIX : <http://ex.org/>
       SELECT ?g ?n WHERE { GRAPH ?g { ?s :name ?n } }
     expected_aql: |-
       FOR doc1 IN @@c1_Document
+      FILTER doc1._graph != null
       FILTER HAS(doc1, "name")
       RETURN { g: doc1._graph, n: doc1.name }
     expected_bind_vars:
@@ -123,8 +126,10 @@ cases:
       }
     expected_aql: |-
       FOR doc1 IN @@c1_Document
+      FILTER doc1._graph != null
       FILTER HAS(doc1, "name")
       FOR doc2 IN @@c1_Document
+      FILTER doc2._graph != null
       FILTER doc2._graph == doc1._graph
       FILTER HAS(doc2, "age")
       RETURN { g: doc1._graph, n: doc1.name, a: doc2.age }
@@ -151,6 +156,7 @@ cases:
       FOR doc1 IN @@c1_Document
       FILTER HAS(doc1, "tag")
       FOR doc2 IN @@c1_Document
+      FILTER doc2._graph != null
       FILTER HAS(doc2, "name")
       RETURN { g: doc2._graph, s: NOT_NULL(doc1._uri, doc1._id), n: doc2.name }
     expected_bind_vars:
@@ -172,6 +178,7 @@ cases:
     expected_aql: |-
       FOR row3 IN (
         FOR doc1 IN @@c1_Document
+        FILTER doc1._graph != null
         FOR k2 IN ATTRIBUTES(doc1, true)
         FILTER k2 NOT IN @_p1_sys_attrs
         RETURN { g: doc1._graph }
@@ -209,11 +216,13 @@ cases:
       FOR row3 IN UNION_DISTINCT(
       (
         FOR doc1 IN @@c1_Document
+        FILTER doc1._graph != null
         FILTER HAS(doc1, "p")
         RETURN { g: doc1._graph, o: doc1.p, s: NOT_NULL(doc1._uri, doc1._id) }
       ),
       (
         FOR doc2 IN @@c2_Document
+        FILTER doc2._graph != null
         FILTER HAS(doc2, "q")
         RETURN { g: doc2._graph, o: doc2.q, s: NOT_NULL(doc2._uri, doc2._id) }
       )
@@ -244,6 +253,7 @@ cases:
       SELECT ?g ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } }
     expected_aql: |-
       FOR doc1 IN @@c1_Document
+      FILTER doc1._graph != null
       FOR k2 IN ATTRIBUTES(doc1, true)
       FILTER k2 NOT IN @_p1_sys_attrs
       RETURN { g: doc1._graph, s: NOT_NULL(doc1._uri, doc1._id), p: k2, o: doc1[k2] }

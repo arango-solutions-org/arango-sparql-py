@@ -1671,8 +1671,26 @@ class AlgebraVisitor:
                 homes[key] = (resolved.collection, resolved)
         self.state.outer_subject_homes = homes
         self.state.var_to_doc_alias, self.state.const_subject_alias = {}, {}
+        graph_var = str(term) if isinstance(term, Variable) else None
+        bound_before = graph_var is not None and graph_var in self.state.var_to_expr
         try:
             self.visit(node.p)
+            if (
+                graph_var is not None
+                and not bound_before
+                and (graph_var not in self.state.var_to_expr or graph_var in self.state.maybe_unbound)
+            ):
+                # The group is evaluated once per named graph (SPARQL 1.1
+                # §18.6): a graph where an OPTIONAL body has no match still
+                # gives a row, with ?g bound to it. ?g comes from the
+                # documents a required pattern reads, and the translation
+                # has no list of the named graphs to bind it from otherwise,
+                # so it answered with ?g unbound or with the wrong rows (#195).
+                raise UnsupportedSparqlError(
+                    f"GRAPH ?{graph_var} needs a pattern outside OPTIONAL in its group that binds "
+                    f"?{graph_var} (a triple pattern); a group with only OPTIONAL, FILTER or BIND "
+                    f"would be evaluated once per named graph, which is not supported"
+                )
         finally:
             # Pop in finally so an exception in the inner pattern
             # doesn't leave the scope stack corrupted for any
@@ -2215,7 +2233,8 @@ class AlgebraVisitor:
         binding anything; ``None`` when there is none to apply.
 
         As :meth:`_apply_graph_scope`, except that a GRAPH variable not bound
-        yet is left free (whatever document binds it applies the scope).
+        yet is not bound here (whatever document binds it applies the scope);
+        the document must still be in some named graph (#195).
         """
         lhs = attribute_ref(alias, self.resolver.graph_field)
         if not self.state.graph_scope:
@@ -2224,7 +2243,11 @@ class AlgebraVisitor:
         if isinstance(graph_term, URIRef):
             return f"{lhs} == {self.builder.bind(str(graph_term), hint='graph')}"
         existing = self.state.var_to_expr.get(str(graph_term))
-        return None if existing is None else f"{lhs} == {existing}"
+        if existing is None:
+            return f"{lhs} != null"
+        if str(graph_term) in self.state.maybe_unbound:
+            return f"{lhs} != null && ({existing} == null || {lhs} == {existing})"
+        return f"{lhs} == {existing}"
 
     def _refuse_tenant_scoped_triples(self, collection: str) -> None:
         """Refuse reading a triples table a tenant-scoped RPT class uses.
@@ -2275,6 +2298,15 @@ class AlgebraVisitor:
            the canonical binding and we record
            ``var_to_expr[?g] = alias.<graph_field>`` for downstream
            SELECT / FILTER / additional FORs to reuse.
+
+           ``GRAPH ?g`` ranges over the *named* graphs only (SPARQL 1.1
+           §13.3): a document whose graph field is null is in the default
+           graph, so it is filtered out (``alias.<graph_field> != null``).
+           Without that FILTER the default graph's documents matched with
+           ``?g`` unbound (#195). A ``?g`` an earlier OPTIONAL or VALUES
+           ``UNDEF`` can leave unbound joins any named graph and takes it
+           (SPARQL 1.1 §18.3), as a VALUES join does
+           (:func:`.subselect._bind_outer_scope`).
         """
         graph_field = self.resolver.graph_field
         lhs = attribute_ref(alias, graph_field)
@@ -2293,9 +2325,17 @@ class AlgebraVisitor:
             self.builder.filter_eq(lhs, bind)
             return
 
-        # graph_term is a Variable (validated in visit_Graph).
+        # graph_term is a Variable (validated in visit_Graph). Only a named
+        # graph's documents are in scope (#195).
+        self.builder.filter_raw(f"{lhs} != null")
         var_name = str(graph_term)
         existing = self.state.var_to_expr.get(var_name)
+        if existing is not None and var_name in self.state.maybe_unbound:
+            # Unbound on this row: compatible with any graph, and takes it.
+            self.builder.filter_raw(f"({existing} == null || {lhs} == {existing})")
+            self.state.var_to_expr[var_name] = f"NOT_NULL({existing}, {lhs})"
+            self.state.maybe_unbound.discard(var_name)
+            return
         if existing is None:
             # First FOR inside this scope: this alias's graph_field
             # is the canonical binding for ?g. Downstream sibling FORs
