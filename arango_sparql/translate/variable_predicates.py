@@ -134,6 +134,17 @@ def emit_variable_predicate_triple(
         _emit_rpt_branch(visitor, subject, predicate, obj, triple)
         return
 
+    # ---- A subject the query never placed, in a mapping with several
+    # stores: its triples are read from each store that can hold them
+    # (#191), not from the default collection. (Imported here: the module
+    # reads this one's document arms.)
+    from .mixed_store import emit_routed_triple, route_subject
+
+    route = route_subject(visitor, subject, predicate)
+    if route is not None:
+        emit_routed_triple(visitor, route, subject, predicate, obj, triple)
+        return
+
     # ---- PG / LPG / default-collection branch -------------------------
     refuse_nested_attribute_scan(visitor, "a variable predicate (?s ?p ?o)")
     _emit_attributes_branch(visitor, subject, predicate, obj, triple)
@@ -326,6 +337,21 @@ def _emit_document_edge_union(
     edge_properties: tuple[ResolvedProperty, ...],
 ) -> None:
     """Merge datatype-attribute and object-edge triples for one subject."""
+    arm_aqls = document_triple_arms(visitor, subject_alias, edge_properties)
+    triple_alias = visitor.builder.fresh_alias(prefix="triple")
+    visitor.builder.for_union(triple_alias, arm_aqls)
+    _bind_union_term(visitor, predicate, f"{triple_alias}.predicate")
+    _bind_union_object(visitor, obj, f"{triple_alias}.object", triple)
+
+
+def document_triple_arms(
+    visitor: AlgebraVisitor,
+    subject_alias: str,
+    edge_properties: tuple[ResolvedProperty, ...],
+) -> list[str]:
+    """The sub-queries returning ``{predicate, object}`` for every triple of
+    the document at *subject_alias*: its attributes, then one walk per
+    edge-backed object property. Also read by :mod:`.mixed_store` (#191)."""
     arm_aqls = [_build_attribute_arm(visitor, subject_alias)]
     for prop in edge_properties:
         edge_collection = prop.edge_collection
@@ -361,37 +387,13 @@ def _emit_document_edge_union(
             ]
         )
         arm_aqls.append(visitor.builder.absorb_child(child))
-
-    triple_alias = visitor.builder.fresh_alias(prefix="triple")
-    visitor.builder.for_union(triple_alias, arm_aqls)
-    _bind_union_term(visitor, predicate, f"{triple_alias}.predicate")
-    _bind_union_object(visitor, obj, f"{triple_alias}.object", triple)
+    return arm_aqls
 
 
 def _build_attribute_arm(visitor: AlgebraVisitor, subject_alias: str) -> str:
     """Build the correlated document-attribute arm of a triple UNION."""
     child = visitor.builder.create_child()
-    key_alias = child.fresh_alias(prefix="k")
-    child.for_attributes(key_alias, subject_alias)
-    skip_list = sorted({*SYSTEM_ATTRIBUTES_TO_SKIP, visitor.resolver.graph_field})
-    sys_bind = child.bind(skip_list, hint="sys_attrs")
-    child.filter_raw(f"{key_alias} NOT IN {sys_bind}")
-
-    attr_uri_map = visitor.resolver.attribute_uri_map()
-    if attr_uri_map:
-        map_bind = child.bind(attr_uri_map, hint="attr_uris")
-        predicate_expr = child.fresh_alias(prefix="p")
-        child.let(predicate_expr, f"{map_bind}[{key_alias}]")
-        child.filter_raw(f"{predicate_expr} != null")
-    else:
-        predicate_expr = key_alias
-
-    value_expr = f"{subject_alias}[{key_alias}]"
-    lists = _list_test(visitor, child, key_alias)
-    if visitor.resolver.fan_out_list_values or lists is not None:
-        value_alias = child.fresh_alias(prefix="lv")
-        child.for_inline(value_alias, _value_source(visitor, value_expr, lists))
-        value_expr = value_alias
+    predicate_expr, value_expr = attribute_triple_loop(visitor, child, subject_alias)
     child.return_object(
         [
             ("predicate", predicate_expr),
@@ -399,6 +401,37 @@ def _build_attribute_arm(visitor: AlgebraVisitor, subject_alias: str) -> str:
         ]
     )
     return visitor.builder.absorb_child(child)
+
+
+def attribute_triple_loop(
+    visitor: AlgebraVisitor, builder: AqlQueryBuilder, subject_alias: str
+) -> tuple[str, str]:
+    """Iterate, in *builder*, the attributes of the document at
+    *subject_alias* as triples; return their ``(predicate, object)``
+    expressions (one row per element of an attribute that fans out). Also
+    read by :mod:`.mixed_store` (#191)."""
+    key_alias = builder.fresh_alias(prefix="k")
+    builder.for_attributes(key_alias, subject_alias)
+    skip_list = sorted({*SYSTEM_ATTRIBUTES_TO_SKIP, visitor.resolver.graph_field})
+    sys_bind = builder.bind(skip_list, hint="sys_attrs")
+    builder.filter_raw(f"{key_alias} NOT IN {sys_bind}")
+
+    attr_uri_map = visitor.resolver.attribute_uri_map()
+    if attr_uri_map:
+        map_bind = builder.bind(attr_uri_map, hint="attr_uris")
+        predicate_expr = builder.fresh_alias(prefix="p")
+        builder.let(predicate_expr, f"{map_bind}[{key_alias}]")
+        builder.filter_raw(f"{predicate_expr} != null")
+    else:
+        predicate_expr = key_alias
+
+    value_expr = f"{subject_alias}[{key_alias}]"
+    lists = _list_test(visitor, builder, key_alias)
+    if visitor.resolver.fan_out_list_values or lists is not None:
+        value_alias = builder.fresh_alias(prefix="lv")
+        builder.for_inline(value_alias, _value_source(visitor, value_expr, lists))
+        value_expr = value_alias
+    return predicate_expr, value_expr
 
 
 def _bind_union_term(

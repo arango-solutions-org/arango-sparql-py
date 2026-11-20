@@ -18,9 +18,11 @@ column — no ``ATTRIBUTES`` fan-out, no ``_uri → collection`` ambiguity.
 This module implements **only** that RPT path; PG / LPG / default-
 ``Document`` cross-subject OPTIONALs still raise the structured
 ``UnsupportedSparqlError`` in ``visit_LeftJoin`` (ADR-0002 Options B/C,
-deferred). Detection therefore gates on ``state.var_to_rpt_class`` being
-populated — i.e. some subject in the query resolved to an RPT class, so
-we know the triples collection (and its column overrides) to scan.
+deferred). Detection therefore gates on knowing the one triples table
+the subject's triple is in: some subject in a single triple store resolved
+to an RPT class, or, in a mapping that also has documents, the subject's
+store routes to one table (:mod:`.mixed_store`, #191). A subject that may
+be a document is the OPTIONAL sub-query's, which reads every store.
 
 Emitted shape (the ADR's Option A idiom)::
 
@@ -48,6 +50,8 @@ from rdflib import URIRef, Variable
 
 from ..errors import UnsupportedSparqlError
 from .builder import attribute_ref
+from .mixed_store import route_subject
+from .resolver import ResolvedClass
 
 if TYPE_CHECKING:
     from .visitor import AlgebraVisitor
@@ -61,8 +65,11 @@ def is_rpt_cross_subject_optional(visitor: AlgebraVisitor, p2: Any, node: Any) -
     ``visit_LeftJoin``'s existing same-subject handling or its
     structured rejection):
 
-    * RPT mode — ``state.var_to_rpt_class`` is non-empty, so a triples
-      collection + column overrides are known.
+    * RPT mode — in a mapping that is one triple store, some subject in
+      scope is a triples row (``state.var_to_rpt_class``), so the table and
+      its column overrides are known; in a mapping with several stores, the
+      subject's triple can only be in one triples table
+      (:func:`.mixed_store.route_subject`, #191).
     * The OPTIONAL body is a single BGP triple (multi-triple / filtered
       cross-subject OPTIONAL is deferred — it needs an inner join inside
       the subquery).
@@ -72,19 +79,34 @@ def is_rpt_cross_subject_optional(visitor: AlgebraVisitor, p2: Any, node: Any) -
       (not in ``var_to_doc_alias``) — the defining trait of
       cross-subject.
     """
-    if not visitor.state.var_to_rpt_class:
-        return False
     triples = getattr(p2, "triples", []) or []
     if len(triples) != 1:
         return False
     expr = getattr(node, "expr", None)
     if expr is not None and getattr(expr, "name", "") != "TrueFilter":
         return False
-    subject = triples[0][0]
+    subject, predicate = triples[0][0], triples[0][1]
     if not isinstance(subject, Variable):
         return False
     name = str(subject)
-    return name in visitor.state.var_to_expr and name not in visitor.state.var_to_doc_alias
+    if name not in visitor.state.var_to_expr or name in visitor.state.var_to_doc_alias:
+        return False
+    if visitor.resolver.triple_store_class() is not None:
+        return bool(visitor.state.var_to_rpt_class)
+    # A mapping with several stores: only a subject whose triple can be in
+    # one triples table alone is this emitter's. One that can be a document
+    # too is read from every store by the OPTIONAL sub-query (#191: this
+    # emitter scanned the table whenever any table class was in scope, and
+    # answered ``OPTIONAL { ?c :cname ?n }`` on a document with nothing).
+    return _table_for(visitor, subject, predicate) is not None
+
+
+def _table_for(visitor: AlgebraVisitor, subject: Variable, predicate: Any) -> ResolvedClass | None:
+    """The one triples table that holds *subject*'s *predicate* triples."""
+    if str(subject) in visitor.state.var_to_rpt_class:
+        return visitor.state.var_to_rpt_class[str(subject)]
+    route = route_subject(visitor, subject, predicate)
+    return route.one_table if route is not None else None
 
 
 def emit_rpt_cross_subject_optional(visitor: AlgebraVisitor, triple: tuple[Any, Any, Any], node: Any) -> None:
@@ -104,7 +126,10 @@ def emit_rpt_cross_subject_optional(visitor: AlgebraVisitor, triple: tuple[Any, 
     # Any RPT class gives us the triples collection + column overrides;
     # a pure-RPT dataset keeps every triple in one collection, so the
     # subject's class (or any in scope) names the right table.
-    rpt_class = next(iter(visitor.state.var_to_rpt_class.values()))
+    routed = (
+        _table_for(visitor, subject, predicate) if visitor.resolver.triple_store_class() is None else None
+    )
+    rpt_class = routed or next(iter(visitor.state.var_to_rpt_class.values()))
     subject_value_expr = visitor.state.var_to_expr[str(subject)]
 
     child = visitor.builder.create_child()

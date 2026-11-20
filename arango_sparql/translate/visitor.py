@@ -44,6 +44,7 @@ from .date_arithmetic import compare_instants, date_shift, instant, is_date_shif
 from .expression_errors import certainly_error, unbound_variables
 from .filter_builtins import translate_builtin, translate_function
 from .minus_exists import emit_minus
+from .mixed_store import emit_routed_triple, route_subject
 from .optional_crosssubject import (
     emit_rpt_cross_subject_optional,
     is_rpt_cross_subject_optional,
@@ -2072,6 +2073,17 @@ class AlgebraVisitor:
             if self._routes_to_triples(s):
                 self._emit_rpt_property_triple(s, p, o, triple)
                 return
+            # A subject the query never placed, in a mapping with several
+            # stores, is read where its triples can be (#191): one triples
+            # table, or every store. Document-only routes fall through to
+            # the domain routing below.
+            route = route_subject(self, s, p)
+            if route is not None:
+                if route.one_table is not None:
+                    self._emit_rpt_property_triple(s, p, o, triple, rpt_class=route.one_table)
+                else:
+                    emit_routed_triple(self, route, s, p, o, triple)
+                return
             prop = self.resolver.resolve_property(p)
             if prop.edge_target_of:
                 self._emit_edge_exit(s, prop, o)
@@ -2720,8 +2732,16 @@ class AlgebraVisitor:
         predicate: URIRef,
         obj: Any,
         triple: tuple[Any, Any, Any],
+        *,
+        rpt_class: ResolvedClass | None = None,
     ) -> None:
         """Emit the AQL for ``?s :p ?o`` where ``?s`` is RPT-bound.
+
+        *rpt_class* is the table :func:`.mixed_store.route_subject` chose for
+        a subject the query never placed (#191). That choice is this triple's
+        only: the subject's next triple may be in another store, so it is
+        not recorded as the subject's class, and a subject first seen here
+        is bound to its value, not opened as a triples row.
 
         Opens a fresh FOR over the same triples table, FILTERs by the
         predicate IRI and joins on the subject URI captured in
@@ -2739,14 +2759,15 @@ class AlgebraVisitor:
         * Literal object → equality FILTER on ``object_value`` only,
           since RDF literals never live in the URI column.
         """
-        if isinstance(subject, URIRef):
+        routed = rpt_class is not None
+        if rpt_class is None and isinstance(subject, URIRef):
             known = self.state.const_subject_rpt_class.get(str(subject)) or self.resolver.triple_store_class()
             if known is None:
                 raise AqlEmitError(
                     f"RPT property triple on constant subject {subject} outside a triple store"
                 )
             rpt_class = known
-        else:
+        elif rpt_class is None:
             rpt_class = self.state.var_to_rpt_class[str(subject)]
         self._refuse_generated_iri_on_triples(predicate, rpt_class.collection, role="predicate")
         triples_alias = self._open_collection(rpt_class.collection, resolved=rpt_class)
@@ -2767,9 +2788,10 @@ class AlgebraVisitor:
             # way the type pattern emitter binds it.
             subj_expr = self.state.var_to_expr.get(str(subject))
             if subj_expr is None:
-                if self.resolver.triple_store_class() is None:
+                if not routed and self.resolver.triple_store_class() is None:
                     raise AqlEmitError(f"RPT property triple references unbound subject ?{subject}")
-                self.state.var_to_doc_alias[str(subject)] = triples_alias
+                if not routed:
+                    self.state.var_to_doc_alias[str(subject)] = triples_alias
                 self.state.var_to_expr[str(subject)] = new_subj_expr
             elif subj_expr != new_subj_expr and not self._join_maybe_unbound(
                 # An earlier OPTIONAL can leave the subject unbound (SPARQL 1.1

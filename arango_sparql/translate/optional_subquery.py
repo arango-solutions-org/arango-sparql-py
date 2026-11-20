@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING, Any
 from rdflib import Variable
 
 from .builder import attribute_ref
+from .mixed_store import route_subject
 from .union_paths import _spawn_child
 
 if TYPE_CHECKING:
@@ -186,8 +187,14 @@ def needs_subquery(visitor: AlgebraVisitor, p2: Any) -> bool:
     if any(isinstance(p, Variable) for _s, p, _o in triples):
         # A variable predicate in an OPTIONAL is ADR-0002 Option B, which was
         # deferred: without declared properties ``?p`` binds attribute names,
-        # not IRIs. Keep refusing it rather than change that decision here.
-        return False
+        # not IRIs. Keep refusing it rather than change that decision here —
+        # except on a subject the query never placed, in a mapping with
+        # several stores (#191): the sub-query reads its triples from each
+        # store, and the reader refuses when a document's ``?p`` would be a
+        # name (:func:`.mixed_store.emit_routed_triple`).
+        return any(
+            isinstance(p, Variable) and route_subject(visitor, s, p) is not None for s, p, _o in triples
+        )
     for s, p, o in triples:
         if not (isinstance(s, Variable) and str(s) in visitor.state.var_to_doc_alias):
             return True
