@@ -12,12 +12,20 @@ suite (``RUN_INTEGRATION=1``).
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from typing import Any
 
 import pytest
 
-from tests.cross.test_multi_document_iri_cross import Store, case_params, oracle_rows, translate_case
+from tests.cross.test_multi_document_iri_cross import (
+    UNBOUND_INTO_COPIES,
+    UNION_COPIES,
+    Store,
+    case_params,
+    oracle_rows,
+    translate_case,
+)
 from tests.helpers.oxi import assert_bindings_equal, drop_null_bindings
 from tests.integration.conftest import (
     DEFAULT_ARANGO_DB,
@@ -71,3 +79,25 @@ def test_arangodb_agrees_with_pyoxigraph(db: Any, store: Store, query: str) -> N
             if db.has_collection(name):
                 db.delete_collection(name)
     assert_bindings_equal(oracle_rows(store, query), rows)
+
+
+def test_an_unbound_join_into_copies_that_differ_repeats_no_row(db: Any) -> None:
+    # Recheck of #196: joining a possibly-unbound ?x into :Agent, whose copies
+    # are not interchangeable, returned :s, :d and :m once per copy on
+    # 7b5d7be (:d knows nobody, so every row is an unbound one). It is a value
+    # join now, as on main: no row comes back twice; the rows where ?x is
+    # unbound are missing (#210, the strict xfail in the cross module). A
+    # bound ?x still repeats per copy, as on main (#210).
+    query = UNBOUND_INTO_COPIES[0].values[0]
+    _load(db, UNION_COPIES)
+    try:
+        result = translate_case(UNION_COPIES, query)
+        rows = [drop_null_bindings(r) for r in db.aql.execute(result.aql, bind_vars=result.bind_vars)]
+    finally:
+        for name in UNION_COPIES.docs:
+            if db.has_collection(name):
+                db.delete_collection(name)
+    keys = [json.dumps(row, sort_keys=True) for row in rows]
+    expected = {json.dumps(row, sort_keys=True) for row in oracle_rows(UNION_COPIES, query)}
+    assert len(keys) == len(set(keys)), f"a row repeats: {keys}"
+    assert set(keys) <= expected

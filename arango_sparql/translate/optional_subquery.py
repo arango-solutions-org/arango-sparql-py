@@ -61,10 +61,16 @@ def emit_optional_subquery(visitor: AlgebraVisitor, node: Any) -> None:
     graph_vars = {str(t) for t in visitor.state.graph_scope if isinstance(t, Variable)}
     hidden = _hide_unshared(child, outer - bound_variables(node.p2) - visitor.state.substituted - graph_vars)
     child.state.hidden_outer = {**visitor.state.hidden_outer, **hidden}
+    child.state.hidden_outer_unbound = visitor.state.hidden_outer_unbound | (
+        set(hidden) & visitor.state.maybe_unbound
+    )
     child.visit(node.p2)
     expr = getattr(node, "expr", None)
     if expr is not None and getattr(expr, "name", "") != "TrueFilter":
         child.state.var_to_expr.update(hidden)
+        # ...and knows which of them an earlier OPTIONAL can leave unbound, so
+        # an EXISTS in it leaves such a variable free (§18.3; review of #196).
+        child.state.maybe_unbound |= set(hidden) & visitor.state.maybe_unbound
         child.builder.filter_raw(child._translate_expr(expr))
     if not child.builder.has_for_clause():
         # A body that binds nothing from a collection (``OPTIONAL { BIND(…) }``):
@@ -184,6 +190,11 @@ def needs_subquery(visitor: AlgebraVisitor, p2: Any) -> bool:
         return False
     for s, p, o in triples:
         if not (isinstance(s, Variable) and str(s) in visitor.state.var_to_doc_alias):
+            return True
+        if isinstance(o, Variable) and str(o) in visitor.state.maybe_unbound:
+            # An earlier OPTIONAL can leave the object unbound: the body joins
+            # it (SPARQL 1.1 §18.3) rather than binding it afresh, which the
+            # inline emitter would refuse as a re-bind (review of #196).
             return True
         if str(s) in visitor.state.var_to_rpt_class:
             # A subject read from a triples table (RPT) is a row, not a

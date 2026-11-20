@@ -317,6 +317,14 @@ def emit_attribute_across_copies(
             value = builder.fresh_alias(prefix="lv")
             builder.for_inline(value, elements)
             visitor._record_var_expr(obj, value)
+        elif str(obj) in visitor.state.maybe_unbound:
+            # An earlier OPTIONAL can leave it unbound (SPARQL 1.1 §18.3):
+            # each distinct value joins where it is null, the equal one where
+            # it is bound, and the variable takes it. A membership FILTER
+            # never bound it (review of #196).
+            value = builder.fresh_alias(prefix="lv")
+            builder.for_inline(value, elements)
+            visitor._join_maybe_unbound(str(obj), existing, value, f"{value} == {existing}")
         else:
             builder.filter_raw(f"{existing} IN {elements}")
         return True

@@ -207,6 +207,12 @@ CASES = [
         "SELECT ?n ?fn WHERE { ?p :firstName ?n . OPTIONAL { ?p :directKnows/:firstName ?fn } }",
         id="path_inside_optional",
     ),
+    # #100: the people whose OPTIONAL ?f is unbound join every message's
+    # creator (SPARQL 1.1 §18.3); 1 row of pyoxigraph's 13 before #193.
+    pytest.param(
+        "SELECT ?p ?m WHERE { ?p :firstName ?n OPTIONAL { ?p :directKnows ?f FILTER(?f = :dan) } ?m :hasCreator ?f }",
+        id="edge_joins_an_unbound_optional_variable",
+    ),
 ]
 
 
