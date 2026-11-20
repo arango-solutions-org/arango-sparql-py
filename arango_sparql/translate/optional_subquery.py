@@ -206,8 +206,17 @@ def _translate_body(
     # ``OPTIONAL { ?p :age ?a BIND(CONCAT(?n, "!") AS ?v) }`` bound ``?v``).
     # The OPTIONAL's own condition (``expr``, its top-level FILTER) is the
     # left join's, evaluated on the joined row, so it sees them all.
-    hidden = _hide_unshared(child, ((outer - bound_variables(node.p2)) | hide) - visitor.state.substituted)
+    # The active GRAPH variables are not hidden: the body is matched in the
+    # scope's graph (SPARQL 1.1 §18.6), the outer row's. Hidden, ``?g`` left
+    # the body free to read any named graph (review of #198).
+    graph_vars = {str(t) for t in visitor.state.graph_scope if isinstance(t, Variable)}
+    hidden = _hide_unshared(
+        child, ((outer - bound_variables(node.p2)) | hide) - visitor.state.substituted - graph_vars
+    )
     child.state.hidden_outer = {**visitor.state.hidden_outer, **hidden}
+    child.state.hidden_outer_unbound = visitor.state.hidden_outer_unbound | (
+        set(hidden) & visitor.state.maybe_unbound
+    )
     child.visit(node.p2)
     for name, target in compare.items():
         if name in child.state.var_to_expr:
@@ -221,6 +230,10 @@ def _translate_body(
         child.state.var_to_expr.update({name: value for name, value in hidden.items() if name not in own})
         for name, own_value in own.items():
             child.state.var_to_expr[name] = _coalesce(own_value, child.state.var_to_expr.get(name, "null"))
+        # ...and knows which of them an earlier OPTIONAL can leave unbound, so
+        # an EXISTS in it leaves such a variable free (§18.3; review of #196).
+        # A group-scoped variable's value there can be unbound too (#194).
+        child.state.maybe_unbound |= (set(hidden) & visitor.state.maybe_unbound) | set(own)
         child.builder.filter_raw(child._translate_expr(expr))
     if not child.builder.has_for_clause():
         # A body that binds nothing from a collection (``OPTIONAL { BIND(…) }``):
@@ -417,6 +430,11 @@ def needs_subquery(visitor: AlgebraVisitor, p2: Any) -> bool:
         return False
     for s, p, o in triples:
         if not (isinstance(s, Variable) and str(s) in visitor.state.var_to_doc_alias):
+            return True
+        if isinstance(o, Variable) and str(o) in visitor.state.maybe_unbound:
+            # An earlier OPTIONAL can leave the object unbound: the body joins
+            # it (SPARQL 1.1 §18.3) rather than binding it afresh, which the
+            # inline emitter would refuse as a re-bind (review of #196).
             return True
         if str(s) in visitor.state.var_to_rpt_class:
             # A subject read from a triples table (RPT) is a row, not a

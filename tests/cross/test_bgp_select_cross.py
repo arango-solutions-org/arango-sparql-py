@@ -585,11 +585,8 @@ VALUES_CASES = [
     ),
     pytest.param(
         "PREFIX : <http://ex.org/> SELECT ?s ?n WHERE { VALUES ?s { :alice UNDEF } ?s a :Person ; :name ?n }",
+        # #100, fixed by #193: the UNDEF row joins every person.
         id="undef_subject_before_the_pattern",
-        marks=pytest.mark.xfail(
-            strict=True,
-            reason="#100: a later triple joined on a variable that can be unbound drops the UNDEF row",
-        ),
     ),
 ]
 

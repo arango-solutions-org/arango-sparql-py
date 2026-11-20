@@ -111,11 +111,28 @@ def emit_minus(visitor: AlgebraVisitor, node: Any) -> None:
         # whenever the inner matches even one row.
         return
 
+    shared_names = {str(v) for v in shared}
+    # An outer variable an earlier OPTIONAL can leave unbound is outside the
+    # row's domain where it is unbound: it constrains nothing, and the row is
+    # removed only through another shared variable bound on both sides
+    # (§8.3.4), which must hold per inner solution. It is exact in two cases:
+    # a shared variable bound on both sides in every solution (an anchor)
+    # makes the overlap certain, and a body that binds every shared variable
+    # in every solution overlaps exactly where the outer row binds one
+    # (the guard in ``_translate_probe``). Otherwise — the overlap would
+    # depend on which UNION arm, VALUES row, OPTIONAL or sub-select column
+    # bound what — the probe keeps joining the variable as a value, as
+    # before #193 (review of #196).
+    open_outer = shared_names & visitor.state.maybe_unbound
+    certain = certainly_bound_variables(node.p2)
+    anchors = (shared_names & certain) - visitor.state.maybe_unbound
+    free_outer = open_outer if open_outer and (anchors or shared_names <= certain) else None
     inner_aql = _translate_probe(
         visitor,
         node.p2,
         allow_optional_rebind=True,
-        overlap_var_names={str(v) for v in shared},
+        overlap_var_names=shared_names,
+        free_outer=free_outer,
     )
 
     probe_alias = visitor.builder.fresh_alias(prefix="minus_probe")
@@ -178,6 +195,7 @@ def _translate_probe(
     allow_optional_rebind: bool = False,
     overlap_var_names: set[str] | None = None,
     substitute: bool = False,
+    free_outer: set[str] | None = None,
 ) -> str:
     """Spawn a child visitor for *inner_pattern*, emit a row-count
     probe (``LIMIT 1`` + ``RETURN 1``), absorb its binds, and
@@ -222,12 +240,11 @@ def _translate_probe(
       FOR + FILTER and leave the inner unable to constrain on
       the inner triples. We deliberately leave this empty.
 
-    Also NOT carried over: ``var_to_rpt_class`` (RPT class
-    bindings are query-scope; an inner pattern that references
-    the same SPARQL variable should re-resolve it against the
-    inner's own type-pattern, not adopt the outer's RPT class)
-    and ``tenant_entity`` (the inner re-derives its own tenant
-    scope from the resolver).
+    Carried over: ``var_to_rpt_class`` and ``const_subject_rpt_class``,
+    so a probe triple on an outer triples-table (RPT) subject reads the
+    table rather than a document collection (#190). NOT carried over:
+    ``tenant_entity`` (the inner re-derives its own tenant scope from the
+    resolver).
     """
     # Local import to avoid the visitor ↔ minus_exists module
     # cycle at import time.
@@ -255,6 +272,12 @@ def _translate_probe(
     # subquery) carries the same state.
     child_visitor.state.var_to_rpt_class = dict(visitor.state.var_to_rpt_class)
     child_visitor.state.const_subject_rpt_class = dict(visitor.state.const_subject_rpt_class)
+    # Inside ``GRAPH <g>`` / ``GRAPH ?g`` the probe's pattern is matched in
+    # the same graph (SPARQL 1.1 §18.6: the active graph is the scope's).
+    # Without the scope the probe read every graph, so ``GRAPH ?g { ?s :p ?o
+    # FILTER EXISTS { ?s :q ?v } }`` passed on ``:q`` in the default graph
+    # (#195). ``_spawn_child`` (UNION, OPTIONAL subquery) carries it too.
+    child_visitor.state.graph_scope = list(visitor.state.graph_scope)
     if substitute:
         # EXISTS substitutes the outer row into its pattern (§18.6): those
         # variables are constants throughout it, inside an OPTIONAL body too,
@@ -264,9 +287,22 @@ def _translate_probe(
         child_visitor.state.substituted = visitor.state.substituted | set(child_visitor.state.var_to_expr)
         # Substitution replaces only the variables the row binds; one an
         # OPTIONAL left unbound stays free in the pattern and matches any
-        # value (#190). MINUS keeps its own rule for an unbound shared
-        # variable (the §8.3.4 disjoint-domain guard), so only EXISTS reads it.
-        child_visitor.state.maybe_unbound = set(visitor.state.maybe_unbound)
+        # value (#190).
+        child_visitor.state.maybe_unbound = set(visitor.state.maybe_unbound) | {
+            # A hidden outer variable the body does not bind again keeps
+            # "can be unbound" too (an EXISTS in a nested group of an
+            # OPTIONAL body; review of #196).
+            name
+            for name in visitor.state.hidden_outer_unbound
+            if name not in visitor.state.var_to_expr
+        }
+    elif free_outer is not None:
+        # MINUS whose body binds every shared variable (``emit_minus``): one
+        # the outer row leaves unbound constrains nothing, so the body matches
+        # any value for it; the guard below removes the row only when a
+        # shared variable is bound on both sides (§8.3.4). It used to be
+        # joined as a value, matched nothing, and kept the row (review of #196).
+        child_visitor.state.maybe_unbound = set(free_outer)
     # Shared, so names minted inside the probe never collide with the
     # outer scope's ``_path_<n>`` / ``_bn_…`` (see _BindingState.counters).
     child_visitor.state.counters = visitor.state.counters
@@ -279,7 +315,14 @@ def _translate_probe(
     child_visitor.visit(inner_pattern)
 
     sink = child_visitor.state.optional_rebind_sink or []
-    if overlap_var_names is not None and sink:
+    if overlap_var_names is not None and free_outer is not None:
+        # The body binds every shared variable in every solution, so the
+        # domains overlap exactly where the outer row binds one of them. A
+        # shared variable the outer row certainly binds makes that always.
+        if not (overlap_var_names - free_outer):
+            terms = [f"{visitor.state.var_to_expr[name]} != null" for name in sorted(free_outer)]
+            child_builder.filter_raw(terms[0] if len(terms) == 1 else "(" + " || ".join(terms) + ")")
+    elif overlap_var_names is not None and sink:
         soft_vars = {var for var, _, _ in sink}
         # A shared var bound by a *required* inner triple (not in the
         # sink) already carries a hard equality FILTER ⇒ overlap is
@@ -299,6 +342,51 @@ def _translate_probe(
     child_builder.return_scalar("1")
 
     return visitor.builder.absorb_child(child_builder)
+
+
+def certainly_bound_variables(node: Any) -> set[str]:
+    """The variables *node* binds in every one of its solutions.
+
+    Conservative: a pattern this does not know binds nothing for certain.
+    A BGP binds its variables; a join both sides'; a left join, MINUS,
+    FILTER, BIND or GRAPH its required part's (plus a GRAPH variable); a
+    UNION what every arm binds; a VALUES block the columns no row leaves
+    ``UNDEF``. A sub-select, an aggregate or a path is left out.
+    """
+    from rdflib import Variable as _Variable
+
+    if node is None:
+        return set()
+    name = getattr(node, "name", None)
+    if name == "BGP":
+        return {str(term) for triple in node.triples for term in triple if isinstance(term, _Variable)}
+    if name == "Join":
+        return certainly_bound_variables(node.p1) | certainly_bound_variables(node.p2)
+    if name == "Union":
+        return certainly_bound_variables(node.p1) & certainly_bound_variables(node.p2)
+    if name in ("LeftJoin", "Minus"):
+        return certainly_bound_variables(node.p1)
+    if name in ("Filter", "Extend"):
+        return certainly_bound_variables(node.p)
+    if name == "Graph":
+        term = node.term
+        return certainly_bound_variables(node.p) | ({str(term)} if isinstance(term, _Variable) else set())
+    if name == "ToMultiSet":
+        return certainly_bound_variables(node.p)
+    if name == "values":
+        rows = node.get("res") or []
+        if not rows:
+            return set()
+        columns = {str(var) for row in rows for var in row}
+        return {col for col in columns if all(_bound_cell(row.get(_Variable(col))) for row in rows)}
+    return set()
+
+
+def _bound_cell(value: Any) -> bool:
+    """Whether a VALUES cell binds its variable: rdflib writes ``UNDEF`` as
+    the plain string ``'UNDEF'`` (a ``Literal`` is a ``str`` subclass, so
+    the type is tested exactly; see ``subselect``)."""
+    return value is not None and not (type(value) is str and value == "UNDEF")
 
 
 def _collect_referenced_variables(node: Any) -> set[Variable]:

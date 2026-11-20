@@ -61,13 +61,21 @@ def test_a_compared_attribute_read_again_later_is_read_from_every_copy() -> None
     assert "UNIQUE((" in aql[aql.index("LET optsub") :]
 
 
-def test_an_optional_that_rebinds_a_variable_is_still_refused() -> None:
+def test_an_optional_that_rebinds_a_required_variable_is_still_refused() -> None:
     import pytest
 
     from arango_sparql.errors import UnsupportedSparqlError
 
     with pytest.raises(UnsupportedSparqlError, match="re-binds variable"):
-        _aql("SELECT ?s ?y WHERE { ?s a :Agent OPTIONAL { ?s :name ?y } OPTIONAL { ?s :salary ?y } }")
+        _aql("SELECT ?s ?y WHERE { ?s a :Agent ; :name ?y OPTIONAL { ?s :salary ?y } }")
+
+
+def test_an_optional_joins_a_variable_an_earlier_optional_can_leave_unbound() -> None:
+    # SPARQL 1.1 §18.3 (review of #196): the subquery joins ?y instead of the
+    # inline emitter refusing a re-bind; checked against pyoxigraph in
+    # ``union_copies_optional_joins_an_optional_variable``.
+    aql = _aql("SELECT ?s ?y WHERE { ?s a :Agent OPTIONAL { ?s :name ?y } OPTIONAL { ?s :salary ?y } }")
+    assert "NOT_NULL(" in aql[aql.rindex("RETURN") :]
 
 
 def test_an_optional_attribute_is_read_from_every_copy_and_not_compared() -> None:
