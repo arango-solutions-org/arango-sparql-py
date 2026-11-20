@@ -248,6 +248,13 @@ def _translate_probe(
     # against the outer's expressions (the SPARQL compatibility
     # check, expressed in AQL).
     child_visitor.state.var_to_expr = dict(visitor.state.var_to_expr)
+    # An outer subject read from a triples table (RPT) is still one inside
+    # the probe: without its class the probe's triples on it were routed as
+    # documents, which on a mapping that is not one triple store opened the
+    # default collection (ERR 1203; #190). ``_spawn_child`` (UNION, OPTIONAL
+    # subquery) carries the same state.
+    child_visitor.state.var_to_rpt_class = dict(visitor.state.var_to_rpt_class)
+    child_visitor.state.const_subject_rpt_class = dict(visitor.state.const_subject_rpt_class)
     if substitute:
         # EXISTS substitutes the outer row into its pattern (§18.6): those
         # variables are constants throughout it, inside an OPTIONAL body too,
@@ -255,6 +262,11 @@ def _translate_probe(
         # variables the body hides (#125; pyoxigraph and rdflib agree).
         child_visitor.state.var_to_expr = {**visitor.state.hidden_outer, **child_visitor.state.var_to_expr}
         child_visitor.state.substituted = visitor.state.substituted | set(child_visitor.state.var_to_expr)
+        # Substitution replaces only the variables the row binds; one an
+        # OPTIONAL left unbound stays free in the pattern and matches any
+        # value (#190). MINUS keeps its own rule for an unbound shared
+        # variable (the §8.3.4 disjoint-domain guard), so only EXISTS reads it.
+        child_visitor.state.maybe_unbound = set(visitor.state.maybe_unbound)
     # Shared, so names minted inside the probe never collide with the
     # outer scope's ``_path_<n>`` / ``_bn_…`` (see _BindingState.counters).
     child_visitor.state.counters = visitor.state.counters

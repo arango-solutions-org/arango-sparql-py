@@ -72,8 +72,21 @@ def emit_optional_subquery(visitor: AlgebraVisitor, node: Any) -> None:
         for name in child.state.var_to_expr
         if name not in outer and not name.startswith(_INTERNAL_PREFIXES)
     ]
-    if new_vars:
-        child.builder.return_object([(name, child.state.var_to_expr[name]) for name in new_vars])
+    # An outer variable an earlier OPTIONAL can leave unbound joins any value
+    # in the body (SPARQL 1.1 §18.3) and then takes the body's: the body's
+    # expression for it changed (``NOT_NULL(outer, inner)``), so carry it out
+    # too, or the solution keeps the variable unbound (#190).
+    filled = [
+        name
+        for name in child.state.var_to_expr
+        if name in outer
+        and name in visitor.state.maybe_unbound
+        and child.state.var_to_expr[name] != visitor.state.var_to_expr[name]
+        and not name.startswith(_INTERNAL_PREFIXES)
+    ]
+    projected = new_vars + filled
+    if projected:
+        child.builder.return_object([(name, child.state.var_to_expr[name]) for name in projected])
     else:
         # Binds nothing new: the OPTIONAL still repeats each required row once
         # per match (SPARQL multiset semantics), so count matches.
@@ -88,6 +101,12 @@ def emit_optional_subquery(visitor: AlgebraVisitor, node: Any) -> None:
     for name in new_vars:
         visitor.state.var_to_expr[name] = attribute_ref(row_alias, name)
         visitor.state.maybe_unbound.add(name)
+    for name in filled:
+        # Unchanged where it was bound; the body's value where it was not;
+        # still unbound on the padded row.
+        visitor.state.var_to_expr[name] = (
+            f"NOT_NULL({visitor.state.var_to_expr[name]}, {attribute_ref(row_alias, name)})"
+        )
 
 
 def bound_variables(node: Any) -> set[str]:

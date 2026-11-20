@@ -2534,7 +2534,17 @@ class AlgebraVisitor:
                 if existing_alias and name not in self.state.var_to_rpt_class
                 else existing_expr
             )
-            if existing_uri_expr != subj_expr:
+            if existing_uri_expr != subj_expr and name in self.state.maybe_unbound and existing_alias is None:
+                # An earlier OPTIONAL can leave ?s unbound, and an unbound
+                # variable is compatible with any value (SPARQL 1.1 §18.3):
+                # the row joins every subject of the class and ?s takes it
+                # (#190), as the RPT property-triple join does.
+                self.builder.filter_raw(
+                    f"({existing_uri_expr} == null || {subj_expr} == {existing_uri_expr})"
+                )
+                self.state.var_to_expr[name] = f"NOT_NULL({existing_uri_expr}, {subj_expr})"
+                self.state.maybe_unbound.discard(name)
+            elif existing_uri_expr != subj_expr:
                 self.builder.filter_raw(f"{subj_expr} == {existing_uri_expr}")
             # If the prior binding was PG (no rpt_class entry) and
             # this one is RPT, record the RPT class too so subsequent
@@ -2636,6 +2646,14 @@ class AlgebraVisitor:
                     raise AqlEmitError(f"RPT property triple references unbound subject ?{subject}")
                 self.state.var_to_doc_alias[str(subject)] = triples_alias
                 self.state.var_to_expr[str(subject)] = new_subj_expr
+            elif subj_expr != new_subj_expr and str(subject) in self.state.maybe_unbound:
+                # An earlier OPTIONAL can leave the subject unbound, and an
+                # unbound variable is compatible with any value (SPARQL 1.1
+                # §18.3): the row joins every triple and the subject takes
+                # the triple's, as a VALUES join does (4184932; #190).
+                self.builder.filter_raw(f"({subj_expr} == null || {new_subj_expr} == {subj_expr})")
+                self.state.var_to_expr[str(subject)] = f"NOT_NULL({subj_expr}, {new_subj_expr})"
+                self.state.maybe_unbound.discard(str(subject))
             elif subj_expr != new_subj_expr:
                 self.builder.filter_raw(f"{new_subj_expr} == {subj_expr}")
         # OBJECT — variable / IRI / literal each take a different shape.
