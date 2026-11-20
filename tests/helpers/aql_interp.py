@@ -297,6 +297,15 @@ _AQL_BUILTINS: dict[str, Any] = {
     # matches when the predicate is actually present on the subject,
     # so missing-attribute documents must be excluded from the result.
     "HAS": lambda doc, attr: isinstance(doc, dict) and attr in doc,
+    # ``ATTRIBUTES(doc, removeSystemAttrs)``: the document's attribute names,
+    # without every ``_``-prefixed one when asked (``_uri`` and ``_graph``
+    # too, not only ArangoDB's own); null for a non-document. Pinned in
+    # ``test_aql_interp_aggregates.py``.
+    "ATTRIBUTES": lambda doc, remove_system=False, sort=False: (
+        None
+        if not isinstance(doc, dict)
+        else (sorted if sort else list)(k for k in doc if not (remove_system and k.startswith("_")))
+    ),
     # ``IS_SAME_COLLECTION(name, doc)``: whether the document (or ``_id``
     # string) lives in collection *name*, as ArangoDB reads its ``_id``.
     # A reverse traversal keeps its vertices in the subject's collections.
