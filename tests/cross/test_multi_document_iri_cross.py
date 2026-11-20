@@ -974,6 +974,48 @@ _CASES: list[tuple[str, Store, str, str | None]] = [
             ),
         ]
     ],
+    # #210, point 2 (recheck of #196): the OUTER subject is a supertype whose
+    # copies are all kept (a walk out of it), so every row repeats once per
+    # copy of ?s. On main the rows where ?x is unbound were missing; with
+    # #193's join they come back, once per copy.
+    *[
+        (f"union_copies_{name}", UNION_COPIES, query, "#210")
+        for name, query in [
+            ("outer_copies_walk", "SELECT ?s ?x WHERE { ?s a :Agent OPTIONAL { ?s :knows ?x } }"),
+            ("outer_copies_type", "SELECT ?s ?x WHERE { ?s a :Agent OPTIONAL { ?s :knows ?x } ?x a :Org }"),
+            (
+                "outer_copies_member",
+                "SELECT ?s ?x WHERE { ?s a :Agent OPTIONAL { ?s :knows ?x } ?x a :Person }",
+            ),
+            (
+                "outer_copies_member_attribute",
+                "SELECT ?s ?x ?n WHERE { ?s a :Agent OPTIONAL { ?s :knows ?x } ?x a :Person ; :name ?n }",
+            ),
+        ]
+    ],
+    *[
+        (f"union_edge_copies_{name}", UNION_EDGE_COPIES, query, "#210")
+        for name, query in [
+            ("outer_copies_walk", "SELECT ?s ?x WHERE { ?s a :Agent OPTIONAL { ?s :likes ?x } }"),
+            ("outer_copies_type", "SELECT ?s ?x WHERE { ?s a :Agent OPTIONAL { ?s :likes ?x } ?x a :Agent }"),
+            (
+                "outer_copies_attribute",
+                "SELECT ?s ?x ?n WHERE { ?s a :Agent OPTIONAL { ?s :likes ?x } ?x :name ?n }",
+            ),
+            (
+                "outer_copies_member",
+                "SELECT ?s ?x WHERE { ?s a :Agent OPTIONAL { ?s :likes ?x } ?x a :Person }",
+            ),
+            (
+                "outer_copies_optional_attribute",
+                "SELECT ?s ?x WHERE { ?s a :Agent OPTIONAL { ?s :likes ?x } OPTIONAL { ?x :name ?n } }",
+            ),
+            (
+                "outer_copies_count",
+                "SELECT ?s (COUNT(*) AS ?c) WHERE { ?s a :Agent OPTIONAL { ?s :likes ?x } ?x a :Person } GROUP BY ?s",
+            ),
+        ]
+    ],
     *[
         (f"union_list_copies_{name}", UNION_LIST_COPIES, query, issue)
         for name, query, issue in [
