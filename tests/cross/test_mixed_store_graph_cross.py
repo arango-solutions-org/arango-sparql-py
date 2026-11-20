@@ -10,9 +10,10 @@ field.
   mode, the answers match pyoxigraph. With the default graph the union of
   the named ones (lax mode), a triple stored in two graphs is two quads:
   each arm returns its graph field, so the set union keeps both.
-* Inside ``GRAPH ?g`` with ``?g`` unbound, the arms can neither bind nor
-  join ``?g`` yet: they joined across graphs and took in the default graph,
-  silently. Such a read is refused until #203.
+* Inside ``GRAPH ?g``, the row's graph binds ``?g`` (#203). The arms did
+  not bind it, so a read before any other in the group joined across
+  graphs and took in the default graph, silently; #199 refused it until
+  #198 held every arm to the named graphs.
 
 Run through the in-memory interpreter here and on ArangoDB in
 ``tests/integration/test_mixed_store_live.py``.
@@ -26,7 +27,6 @@ from typing import Any
 import pytest
 
 from arango_sparql.api import translate
-from arango_sparql.errors import UnsupportedSparqlError
 from arango_sparql.translate.resolver import SchemaResolver
 from tests.helpers.aql_interp import run_aql_subset
 from tests.helpers.oxi import assert_bindings_equal, drop_null_bindings, normalize_oxi_row, oxi_bindings
@@ -83,13 +83,24 @@ ANSWERED = [
         "SELECT ?c ?m WHERE { ?s a :Person . ?s :worksFor ?c . ?c :email ?m }", id="default_graph_chain"
     ),
 ]
-REFUSED = [
+# ``GRAPH ?g`` around a read of every store binds ?g from the row (#203).
+GRAPH_VARIABLE = [
     pytest.param("SELECT ?g ?m WHERE { GRAPH ?g { ?c :email ?m } }", id="first_seen"),
     pytest.param("SELECT ?m WHERE { GRAPH ?g { ?c :email ?m } }", id="first_seen_unprojected"),
     pytest.param("SELECT ?c ?m WHERE { GRAPH ?g { ?c :cname ?n . ?c :email ?m } }", id="two_stores"),
     pytest.param("SELECT ?g ?m WHERE { GRAPH ?g { :acme :email ?m } }", id="constant"),
     pytest.param("SELECT ?g ?n WHERE { GRAPH ?g { :a :worksFor ?c . ?c :cname ?n } }", id="one_store"),
+    pytest.param("SELECT ?g ?c ?m WHERE { GRAPH ?g { :a :worksFor ?c . ?c :email ?m } }", id="chain"),
+    pytest.param("SELECT (COUNT(*) AS ?k) WHERE { GRAPH ?g { ?c :email ?m } }", id="count"),
+    pytest.param("SELECT ?g ?m WHERE { VALUES ?g { :g1 :g2 } GRAPH ?g { ?c :email ?m } }", id="values_bound"),
+    # The reviewer's: ?g bound by a type pattern in one GRAPH group, then
+    # joined by a read of every store in the next (a default-graph row
+    # leaked here until #198).
+    pytest.param(
+        "SELECT ?g ?m WHERE { GRAPH ?g { ?x a :Company } GRAPH ?g { :acme :email ?m } }", id="bound_by_type"
+    ),
 ]
+ANSWERED = ANSWERED + GRAPH_VARIABLE
 
 
 def _row(s: str, p: str, o: str, iri: bool, g: str | None) -> dict[str, Any]:
@@ -144,12 +155,3 @@ def test_a_routed_read_in_a_named_or_the_default_graph_matches_oxigraph(
         normalize_oxi_row(r) for r in oxi_bindings(store, query, union_default_graph=lax_default_graph)
     ]
     assert_bindings_equal(expected, actual)
-
-
-@pytest.mark.parametrize("strict", [False, True], ids=["library", "strict"])
-@pytest.mark.parametrize("where", REFUSED)
-def test_a_routed_read_inside_graph_with_an_unbound_variable_is_refused(where: str, strict: bool) -> None:
-    with pytest.raises(UnsupportedSparqlError, match=r"GRAPH \?g.*#203") as refusal:
-        translate(PREFIX + where, resolver=make_resolver(strict, lax_default_graph=False))
-
-    assert refusal.value.code == "E_SPARQL_UNSUPPORTED"

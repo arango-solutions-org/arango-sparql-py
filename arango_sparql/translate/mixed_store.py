@@ -52,12 +52,12 @@ non-strict resolver and is refused under strict resolution, as the
 visitor's domain routing does. An edge-backed object property is not
 routed here: its triples are its edges.
 
-Inside ``GRAPH ?g`` with ``?g`` not yet bound, a read here is refused: its
-arms neither bind nor join ``?g`` yet (#203). ``GRAPH <iri>``, and ``GRAPH
-?g`` once ``?g`` is bound, filter each arm on its graph field. Each arm
-returns that field too, so the set union keeps a triple stored in two named
-graphs twice, as the default graph holds two quads (lax default-graph mode)
-and the single-store readers count it.
+Each arm is held to the active graph scope on its graph field
+(``GRAPH <iri>``; ``GRAPH ?g``: a named graph, ``?g``'s once bound) and
+returns that field: inside ``GRAPH ?g`` the row's graph binds ``?g``
+(:func:`_bind_graph_variable`, #203), and the set union keeps a triple
+stored in two named graphs twice, as the default graph holds two quads
+(lax default-graph mode) and the single-store readers count it.
 """
 
 from __future__ import annotations
@@ -204,21 +204,6 @@ def emit_routed_triple(
     subject (SPARQL 1.1 §18.3, as the triples-table reader does since
     #190); one seen first here binds to it.
     """
-    graph_scope = visitor.state.graph_scope
-    if (
-        graph_scope
-        and isinstance(graph_scope[-1], Variable)
-        and str(graph_scope[-1]) not in visitor.state.var_to_expr
-    ):
-        # The arms filter each store on the graph field only once the graph
-        # variable has a value; they do not bind it, so an unbound ``?g``
-        # joined across graphs and took in the default graph (review of #199).
-        raise UnsupportedSparqlError(
-            f"{triple[0].n3()} {triple[1].n3()} … inside GRAPH {graph_scope[-1].n3()}: the subject "
-            f"has no type pattern, and the mapping keeps both triples tables and documents, so its "
-            f"triples are read from several stores, which cannot bind the graph variable yet "
-            f"(issue #203); give the subject a type pattern, or name the graph"
-        )
     variable_predicate = isinstance(predicate, Variable)
     if variable_predicate and route.documents and route.tables and not visitor.resolver.attribute_uri_map():
         # Without declared datatype properties a document's ``?p`` is its
@@ -266,9 +251,10 @@ def emit_routed_triple(
             arms.append(visitor.builder.absorb_child(arm.builder))
         row = visitor.builder.fresh_alias(prefix="row")
         visitor.builder.for_union(row, arms, distinct=True)
-        fields = {key: f"{row}.{key}" for key in ("s", "p", "o")}
+        fields = {key: f"{row}.{key}" for key in ("s", "p", "o", "g")}
 
     state = visitor.state
+    _bind_graph_variable(visitor, fields["g"])
     if isinstance(subject, Variable):
         name = str(subject)
         if subject_expr is None:
@@ -280,6 +266,34 @@ def emit_routed_triple(
         _bind_value(visitor, str(predicate), fields["p"])
     if isinstance(obj, Variable):
         _bind_value(visitor, str(obj), fields["o"])
+
+
+def _bind_graph_variable(visitor: AlgebraVisitor, graph_expr: str) -> None:
+    """Inside ``GRAPH ?g``, bind ``?g`` to the graph the triple was read in.
+
+    Each arm already holds its store to the scope
+    (:meth:`AlgebraVisitor._graph_scope_test`): a named graph while ``?g`` is
+    unbound, ``?g``'s graph once bound, either where it can be unbound. The
+    arms did not bind ``?g``, so a read before any other in the group joined
+    across graphs and took in the default graph (review of #199; #203). As
+    :meth:`AlgebraVisitor._apply_graph_scope` binds it for a document: the
+    row's graph when ``?g`` has no value, the row's graph where an outer
+    OPTIONAL left it unbound (SPARQL 1.1 §18.3), and a refusal when an
+    OPTIONAL of the group itself bound it first (#198).
+    """
+    scope = visitor.state.graph_scope
+    if not scope or not isinstance(scope[-1], Variable):
+        return
+    state = visitor.state
+    name = str(scope[-1])
+    existing = state.var_to_expr.get(name)
+    if existing is None:
+        state.var_to_expr[name] = graph_expr
+    elif name in state.maybe_unbound:
+        if name in state.graph_vars_unbound_on_entry:
+            visitor._refuse_graph_var_without_documents(name)
+        state.var_to_expr[name] = f"NOT_NULL({existing}, {graph_expr})"
+        state.maybe_unbound.discard(name)
 
 
 def _bind_value(visitor: AlgebraVisitor, name: str, expr: str) -> None:
