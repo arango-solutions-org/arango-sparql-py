@@ -299,23 +299,17 @@ def _bind_graph_variable(visitor: AlgebraVisitor, graph_expr: str) -> None:
 def _bind_value(visitor: AlgebraVisitor, name: str, expr: str) -> None:
     """Bind *name* to *expr*, or join it to the value it already has. One an
     earlier OPTIONAL can leave unbound joins any value and takes this one
-    (SPARQL 1.1 §18.3)."""
-    state = visitor.state
-    existing = state.var_to_expr.get(name)
+    (SPARQL 1.1 §18.3), through the visitor's one compatible-join helper."""
+    existing = visitor.state.var_to_expr.get(name)
     if existing is None:
-        state.var_to_expr[name] = expr
-    elif existing != expr and name in state.maybe_unbound:
-        visitor.builder.filter_raw(f"({existing} == null || {expr} == {existing})")
-        state.var_to_expr[name] = f"NOT_NULL({existing}, {expr})"
-        state.maybe_unbound.discard(name)
-    elif existing != expr:
+        visitor.state.var_to_expr[name] = expr
+        return
+    if existing == expr:
+        return
+    if not visitor._join_maybe_unbound(
+        name, existing, f"NOT_NULL({existing}, {expr})", f"{expr} == {existing}"
+    ):
         visitor.builder.filter_raw(f"{expr} == {existing}")
-
-
-def _subject_test(column: str, subject_expr: str, open_subject: bool) -> str:
-    if open_subject:
-        return f"({subject_expr} == null || {column} == {subject_expr})"
-    return f"{column} == {subject_expr}"
 
 
 def _table_arm(
@@ -334,8 +328,18 @@ def _table_arm(
     row = builder.fresh_alias(prefix="doc")
     builder.for_(row, table.collection)
     subject_column = attribute_ref(row, table.subject_column)
-    if subject_expr is not None:
-        builder.filter_raw(_subject_test(subject_column, subject_expr, open_subject))
+    if subject_expr is not None and open_subject:
+        # A subject an earlier OPTIONAL can leave unbound joins every row
+        # (SPARQL 1.1 §18.3): the scan is split so a bound one keeps its
+        # subject-column index (#196).
+        arm._emit_unbound_join(
+            subject_expr,
+            lambda alias: f"{attribute_ref(alias, table.subject_column)} == {subject_expr}",
+            alias=row,
+            builder=builder,
+        )
+    elif subject_expr is not None:
+        builder.filter_raw(f"{subject_column} == {subject_expr}")
     predicate_column = attribute_ref(row, table.predicate_column)
     if isinstance(predicate, URIRef):
         arm._refuse_generated_iri_on_triples(predicate, table.collection, role="predicate")
@@ -386,7 +390,9 @@ def _document_arm(
     doc = builder.fresh_alias(prefix="doc")
     builder.for_(doc, collection)
     if subject_expr is not None and open_subject:
-        builder.filter_raw(f"({subject_expr} == null || {subject_matches(doc, subject_expr)})")
+        arm._emit_unbound_join(
+            subject_expr, lambda alias: subject_matches(alias, subject_expr), alias=doc, builder=builder
+        )
     elif subject_expr is not None:
         builder.filter_raw(subject_matches_value(doc, subject_expr))
     for test in arm._class_tests(builder, doc, list(classes), f"the documents of {collection!r}"):
