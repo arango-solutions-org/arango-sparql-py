@@ -160,6 +160,16 @@ CASES = [
         "SELECT ?s ?x WHERE { ?s a :Person OPTIONAL { ?s :email ?x } ?x a :Person }",
         id="required_type_pattern_after_optional",
     ),
+    # A UNION arm that fills the possibly-unbound variable carries it out;
+    # the arm joined it but the solution kept ?x unbound (review of #192).
+    pytest.param(
+        "SELECT ?s ?x ?m ?n WHERE { ?s a :Person OPTIONAL { ?s :knows ?x } { ?x :email ?m } UNION { ?x :city ?n } }",
+        id="union_arms_fill_optional_unbound",
+    ),
+    pytest.param(
+        "SELECT ?s ?x ?m ?n WHERE { ?s a :Person OPTIONAL { ?s :knows ?x } { ?x :email ?m } UNION { ?s :knows ?n } }",
+        id="union_one_arm_fills",
+    ),
 ]
 
 
