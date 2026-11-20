@@ -45,20 +45,24 @@ EX = "http://example.org/"
 _TRIPLES = "NestedOptTriples"
 _PEOPLE = "NestedOptPerson"
 _KNOWS = "NestedOptKnows"
+_LIKES = "NestedOptLikes"
+_EDGES = {"knows": _KNOWS, "likes": _LIKES}
 
-# a knows b and c, d knows e; only b and e have an email.
+# a knows b and c, d knows e, g knows c; only b and e have an email. a likes
+# b and b likes c; g likes nobody (review of #197).
 _PERSONS: dict[str, dict[str, Any]] = {
-    "a": {"name": "A", "knows": ["b", "c"]},
-    "b": {"name": "B", "email": "b@x.org"},
+    "a": {"name": "A", "knows": ["b", "c"], "likes": ["b"]},
+    "b": {"name": "B", "email": "b@x.org", "likes": ["c"]},
     "c": {"name": "C"},
     "d": {"name": "D", "knows": ["e"]},
     "e": {"name": "E", "email": "e@x.org"},
+    "g": {"name": "G", "knows": ["c"]},
 }
 _DATA = f"@prefix : <{EX}> .\n" + "\n".join(
     " ; ".join(
         [f":{k} a :Person"]
-        + [f':{p} "{v}"' for p, v in d.items() if p != "knows"]
-        + [f":knows :{t}" for t in d.get("knows", [])]
+        + [f':{p} "{v}"' for p, v in d.items() if p not in _EDGES]
+        + [f":{p} :{t}" for p in _EDGES for t in d.get(p, [])]
     )
     + " ."
     for k, d in _PERSONS.items()
@@ -75,6 +79,7 @@ _ONTOLOGIES = {
     + f"""
 :Person a owl:Class ; phys:collectionName "{_PEOPLE}" .
 :knows a owl:ObjectProperty ; phys:edgeCollectionName "{_KNOWS}" ; rdfs:domain :Person ; rdfs:range :Person .
+:likes a owl:ObjectProperty ; phys:edgeCollectionName "{_LIKES}" ; rdfs:domain :Person ; rdfs:range :Person .
 :name a owl:DatatypeProperty ; rdfs:domain :Person ; phys:attributeName "name" .
 :email a owl:DatatypeProperty ; rdfs:domain :Person ; phys:attributeName "email" .
 """,
@@ -96,15 +101,21 @@ def _triple_rows() -> list[dict[str, Any]]:
 
 def _collections() -> dict[str, tuple[list[dict[str, Any]], bool]]:
     people = [
-        {"_key": k, "_uri": EX + k, **{p: v for p, v in d.items() if p != "knows"}}
+        {"_key": k, "_uri": EX + k, **{p: v for p, v in d.items() if p not in _EDGES}}
         for k, d in _PERSONS.items()
     ]
-    knows = [
-        {"_from": f"{_PEOPLE}/{k}", "_to": f"{_PEOPLE}/{t}"}
-        for k, d in _PERSONS.items()
-        for t in d.get("knows", [])
-    ]
-    return {_TRIPLES: (_triple_rows(), False), _PEOPLE: (people, False), _KNOWS: (knows, True)}
+    edges = {
+        collection: (
+            [
+                {"_from": f"{_PEOPLE}/{k}", "_to": f"{_PEOPLE}/{t}"}
+                for k, d in _PERSONS.items()
+                for t in d.get(p, [])
+            ],
+            True,
+        )
+        for p, collection in _EDGES.items()
+    }
+    return {_TRIPLES: (_triple_rows(), False), _PEOPLE: (people, False), **edges}
 
 
 @pytest.fixture(scope="module")
@@ -160,6 +171,19 @@ def _multiset(rows: list[dict[str, Any]]) -> list[str]:
             "SELECT ?s ?x WHERE { ?s a :Person ; :knows ?x MINUS { ?s :name ?n OPTIONAL { ?x :email ?m } } }",
             id="minus",
         ),
+        # The group's ?x comes from an earlier OPTIONAL in it (review of #197):
+        # g likes nobody, so (g, c) keeps ?n unbound. Main refused it.
+        pytest.param(
+            "SELECT ?s ?x ?n ?m WHERE { ?s :knows ?x "
+            "OPTIONAL { ?s :name ?n OPTIONAL { ?s :likes ?x } OPTIONAL { ?x :email ?m } } }",
+            id="earlier_optional_binds_x",
+        ),
+        # MINUS's disjoint-domain guard for a group-scoped variable: only a ?t
+        # that likes the outer ?o removes the row.
+        pytest.param(
+            "SELECT ?s ?o WHERE { ?s :knows ?o MINUS { ?t :name ?n OPTIONAL { ?t :likes ?o . ?o :name ?on } } }",
+            id="minus_overlap_guard",
+        ),
         # The right side's OPTIONAL re-binds the outer ?o: it binds its own and
         # compares it (on a triples table it used to be refused).
         pytest.param(
@@ -179,7 +203,7 @@ def test_nested_optional_group_scope_matches_oxigraph(
 
 
 def test_issue_194_keeps_the_name_unbound_when_no_contact_is_compatible(db: Any) -> None:
-    """The issue's row by hand: a's contact c has no email, so a's (x = c) row gets no ?n."""
+    """The issue's row by hand: c has no email, so the (x = c) rows of a and g get no ?n."""
     body = (
         "SELECT ?s ?x ?m ?n WHERE { ?s a :Person ; :knows ?x "
         "OPTIONAL { ?s :name ?n OPTIONAL { ?x :email ?m } } FILTER(?x = :c) }"
@@ -187,4 +211,7 @@ def test_issue_194_keeps_the_name_unbound_when_no_contact_is_compatible(db: Any)
     for mapping in sorted(_ONTOLOGIES):
         res = translate(_PREFIX + body, resolver=SchemaResolver.from_turtle(_ONTOLOGIES[mapping]))
         rows = [drop_null_bindings(r) for r in db.aql.execute(res.aql, bind_vars=res.bind_vars)]
-        assert rows == [{"s": EX + "a", "x": EX + "c"}], mapping
+        assert sorted(rows, key=lambda r: r["s"]) == [
+            {"s": EX + "a", "x": EX + "c"},
+            {"s": EX + "g", "x": EX + "c"},
+        ], mapping

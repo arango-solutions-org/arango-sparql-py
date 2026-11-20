@@ -29,6 +29,7 @@ unbound, which aggregates rely on (SPARQL §18.5.1).
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from rdflib import Variable
@@ -45,17 +46,18 @@ _INTERNAL_PREFIXES = ("_path_", "_bn_")
 
 
 def group_scoped_variables(visitor: AlgebraVisitor, scope_before: set[str], node: Any) -> set[str]:
-    """Variables of ``LeftJoin(p1, p2)`` that its optional side must bind on its own.
+    """Variables of ``LeftJoin(p1, p2)`` its optional side binds on its own.
 
-    The left join is one group, evaluated on its own and then joined with
-    the solutions around it (SPARQL 1.1 §18.5, §18.3). The translator
-    visits the group in sequence after them, so ``p2`` sees every variable
-    already in scope. That substitution equals the join only for a
-    variable the group binds in every solution. A variable bound before the
-    group (*scope_before*) that ``p1`` does not bind but ``p2`` does
-    (``{ ?s :knows ?x OPTIONAL { ?s :name ?n OPTIONAL { ?x :email ?m } } }``)
-    can be left unbound by the group, so the group's ``?x`` has to be
-    found without the outer one and compared after (#194).
+    A group is evaluated on its own and then joined with the solutions
+    around it (SPARQL 1.1 §18.5, §18.3). The translator visits it in
+    sequence after them, so ``p2`` sees every variable already in scope.
+    That substitution equals the join only for a variable the group binds
+    in every solution. A variable bound before the group (*scope_before*)
+    that ``p1`` does not bind in every solution but ``p2`` binds
+    (``?s :knows ?x OPTIONAL { ?s :name ?n OPTIONAL { ?x :email ?m } } }``)
+    can be left unbound by the group, so whether ``p2`` matches is decided
+    without the outer value, and its matches are compared with it (#194;
+    :func:`emit_optional_subquery`).
 
     A variable an EXISTS substitutes is a constant throughout its pattern
     (§18.6), so it stays shared. A MINUS's right side is evaluated on its
@@ -69,8 +71,70 @@ def group_scoped_variables(visitor: AlgebraVisitor, scope_before: set[str], node
         return set()
     if visitor.state.optional_rebind_sink is not None and _inline_conditional_add(visitor, node.p2):
         return set()
-    loose = (scope_before & bound_variables(node.p2)) - bound_variables(node.p1) - visitor.state.substituted
+    loose = (scope_before & bound_variables(node.p2)) - certain_variables(node.p1) - visitor.state.substituted
     return {name for name in loose if not name.startswith(_INTERNAL_PREFIXES)}
+
+
+def certain_variables(node: Any) -> set[str]:
+    """The variables a graph pattern binds in every solution.
+
+    An OPTIONAL's side, a MINUS's right side and a variable only some UNION
+    arms bind can be unbound. A BIND target counts as bound (a BIND onto an
+    outer variable is refused), as does every variable of a pattern this
+    does not look inside (VALUES, sub-select, aggregate): those keep the
+    sequential translation they had before #194.
+    """
+    if node is None:
+        return set()
+    name = getattr(node, "name", None)
+    if name == "BGP":
+        return bound_variables(node)
+    if name == "Join":
+        return certain_variables(node.p1) | certain_variables(node.p2)
+    if name in ("LeftJoin", "Minus"):
+        return certain_variables(node.p1)
+    if name == "Filter":
+        return certain_variables(node.p)
+    if name == "Union":
+        return certain_variables(node.p1) & certain_variables(node.p2)
+    if name == "Extend":
+        return certain_variables(node.p) | {str(node.var)}
+    if name == "Graph":
+        term = node.term
+        return certain_variables(node.p) | ({str(term)} if isinstance(term, Variable) else set())
+    return bound_variables(node)
+
+
+def group_own_value(visitor: AlgebraVisitor, node: Any, name: str) -> str | None:
+    """The value the visited pattern *node* gave *name* itself, without the outer one.
+
+    ``"null"`` when it does not bind the variable; ``None`` when it binds it
+    only in some solutions in a way this does not track (a UNION arm, say):
+    the caller refuses then. A group-scoped OPTIONAL records its own value
+    (:func:`emit_optional_subquery`); a join combines its sides'.
+    """
+    if name not in bound_variables(node):
+        return "null"
+    kind = getattr(node, "name", None)
+    if kind == "LeftJoin":
+        return visitor.state.group_own.get(id(node), {}).get(name)
+    if kind == "Join":
+        left = group_own_value(visitor, node.p1, name)
+        right = group_own_value(visitor, node.p2, name)
+        if left is None or right is None:
+            return None
+        return _coalesce(left, right)
+    if kind == "Filter":
+        return group_own_value(visitor, node.p, name)
+    return None
+
+
+def _coalesce(first: str, second: str) -> str:
+    if first == "null":
+        return second
+    if second == "null":
+        return first
+    return f"NOT_NULL({first}, {second})"
 
 
 def _inline_conditional_add(visitor: AlgebraVisitor, p2: Any) -> bool:
@@ -90,13 +154,33 @@ def _inline_conditional_add(visitor: AlgebraVisitor, p2: Any) -> bool:
     )
 
 
-def emit_optional_subquery(visitor: AlgebraVisitor, node: Any, loose: set[str] | None = None) -> None:
-    """Emit ``LeftJoin(p1, p2, expr)`` with ``p1`` already visited.
+class _Body:
+    """The optional side translated once by a child visitor (:func:`_translate_body`)."""
 
-    *loose* names outer variables the body must bind on its own and join
-    by compatibility (:func:`group_scoped_variables`).
+    def __init__(self, aql: str, values: dict[str, str]) -> None:
+        self.aql = aql
+        #: Variable → the body's AQL for it, for each variable it returns.
+        self.values = values
+
+
+def _translate_body(
+    visitor: AlgebraVisitor,
+    node: Any,
+    *,
+    hide: set[str],
+    compare: dict[str, str],
+    own: dict[str, str],
+    returns: Callable[[dict[str, str]], list[str]] | None,
+) -> _Body:
+    """Translate ``node.p2`` (and the left join's condition) in a child visitor.
+
+    *hide* are outer variables the body binds on its own; *compare* maps
+    some of them to the value each match must be compatible with (§18.3).
+    The condition reads a group-scoped variable as the group would bind it:
+    *own*'s value where set, the body's where not. *returns* picks the
+    variables to return from the child's bindings, in order (``None``: the
+    probe shape, ``LIMIT 1`` and ``1``).
     """
-    loose = loose or set()
     outer = set(visitor.state.var_to_expr)
     child = _spawn_child(visitor)
     # The body is evaluated on its own, then left-joined (SPARQL 1.1 §18.5):
@@ -106,84 +190,144 @@ def emit_optional_subquery(visitor: AlgebraVisitor, node: Any, loose: set[str] |
     # ``OPTIONAL { ?p :age ?a BIND(CONCAT(?n, "!") AS ?v) }`` bound ``?v``).
     # The OPTIONAL's own condition (``expr``, its top-level FILTER) is the
     # left join's, evaluated on the joined row, so it sees them all.
-    hidden = _hide_unshared(child, ((outer - bound_variables(node.p2)) | loose) - visitor.state.substituted)
+    hidden = _hide_unshared(child, ((outer - bound_variables(node.p2)) | hide) - visitor.state.substituted)
     child.state.hidden_outer = {**visitor.state.hidden_outer, **hidden}
     child.visit(node.p2)
-    # A loose variable the body bound is the group's own (its condition
-    # below reads that value too); it is compared with the outer one after
-    # the padding, below.
-    rejoined = [name for name in sorted(loose) if name in hidden and name in child.state.var_to_expr]
+    for name, target in compare.items():
+        if name in child.state.var_to_expr:
+            value = child.state.var_to_expr[name]
+            child.builder.filter_raw(f"({value} == null || {target} == null || {value} == {target})")
+    values = {
+        name: child.state.var_to_expr[name] for name in (returns(child.state.var_to_expr) if returns else [])
+    }
     expr = getattr(node, "expr", None)
     if expr is not None and getattr(expr, "name", "") != "TrueFilter":
-        child.state.var_to_expr.update(
-            {name: value for name, value in hidden.items() if name not in rejoined}
-        )
+        child.state.var_to_expr.update({name: value for name, value in hidden.items() if name not in own})
+        for name, own_value in own.items():
+            child.state.var_to_expr[name] = _coalesce(own_value, child.state.var_to_expr.get(name, "null"))
         child.builder.filter_raw(child._translate_expr(expr))
     if not child.builder.has_for_clause():
         # A body that binds nothing from a collection (``OPTIONAL { BIND(…) }``):
         # give it a one-row scope, as an empty BGP does.
         child.builder.for_inline(child.builder.fresh_alias(prefix="empty"), "[1]")
-
-    new_vars = [
-        name
-        for name in child.state.var_to_expr
-        if name not in outer and not name.startswith(_INTERNAL_PREFIXES)
-    ]
-    # An outer variable an earlier OPTIONAL can leave unbound joins any value
-    # in the body (SPARQL 1.1 §18.3) and then takes the body's: the body's
-    # expression for it changed (``NOT_NULL(outer, inner)``), so carry it out
-    # too, or the solution keeps the variable unbound (#190).
-    filled = [
-        name
-        for name in child.state.var_to_expr
-        if name in outer
-        and name not in loose
-        and name in visitor.state.maybe_unbound
-        and child.state.var_to_expr[name] != visitor.state.var_to_expr[name]
-        and not name.startswith(_INTERNAL_PREFIXES)
-    ]
-    projected = new_vars + filled + rejoined
-    if projected:
-        child.builder.return_object([(name, child.state.var_to_expr[name]) for name in projected])
+    if returns is None:
+        child.builder.limit(1)
+        child.builder.return_scalar("1")
+    elif values:
+        child.builder.return_object(list(values.items()))
     else:
         # Binds nothing new: the OPTIONAL still repeats each required row once
         # per match (SPARQL multiset semantics), so count matches.
         child.builder.return_scalar("1")
-
     inner_aql = visitor.builder.absorb_child(child.builder)
-    indented = "\n".join("  " + line for line in inner_aql.splitlines())
+    return _Body("\n".join("  " + line for line in inner_aql.splitlines()), values)
+
+
+def emit_optional_subquery(visitor: AlgebraVisitor, node: Any, loose: dict[str, str] | None = None) -> None:
+    """Emit ``LeftJoin(p1, p2, expr)`` with ``p1`` already visited.
+
+    *loose* maps each group-scoped variable (:func:`group_scoped_variables`)
+    to the value ``p1`` gave it itself (:func:`group_own_value`). A row
+    of ``p1`` pads when ``p2`` has no match compatible with that value; the
+    matches it keeps are those compatible with the variable's value in the
+    whole row (the outer one too). Two subqueries say so: the matches, read
+    with that value (an index lookup where the body binds the variable in
+    every solution), and, when there are none, whether the body matches at
+    all, which drops the row instead of padding it (#194).
+    """
+    loose = loose or {}
+    state = visitor.state
+    outer = set(state.var_to_expr)
+
+    def returned(bindings: dict[str, str]) -> list[str]:
+        # Variables the body binds that the outer row does not; outer
+        # variables an earlier OPTIONAL can leave unbound that the body
+        # filled (SPARQL 1.1 §18.3: its expression for them changed to
+        # ``NOT_NULL(outer, inner)``, #190); and the group-scoped ones.
+        fresh = [n for n in bindings if n not in outer and not n.startswith(_INTERNAL_PREFIXES)]
+        filled = [
+            n
+            for n in bindings
+            if n in outer
+            and n not in loose
+            and n in state.maybe_unbound
+            and bindings[n] != state.var_to_expr[n]
+            and not n.startswith(_INTERNAL_PREFIXES)
+        ]
+        return fresh + filled + [n for n in sorted(loose) if n in bindings]
+
+    # A group-scoped variable the body binds in every solution, whose value
+    # in the row cannot be null, is substituted (an index lookup); otherwise
+    # the body binds it and each match is compared with the row's value.
+    certain_body = certain_variables(node.p2)
+    free = {n for n in loose if n not in certain_body or n in state.maybe_unbound}
+    matches = _translate_body(
+        visitor,
+        node,
+        hide=free,
+        compare={name: state.var_to_expr[name] for name in sorted(free)},
+        own=loose,
+        returns=returned,
+    )
+    rejoined = [name for name in sorted(loose) if name in matches.values]
+    new_vars = [name for name in matches.values if name not in outer]
+    filled = [name for name in matches.values if name in outer and name not in loose]
     sub_alias = visitor.builder.fresh_alias(prefix="optsub")
-    visitor.builder.let(sub_alias, f"(\n{indented}\n)")
+    visitor.builder.let(sub_alias, f"(\n{matches.aql}\n)")
+    rows = f"(LENGTH({sub_alias}) > 0 ? {sub_alias} : [null])"
+    if loose:
+        # No match compatible with the row: the body evaluated on its own may
+        # still match, with other values, and then the group has no solution
+        # compatible with the row, which is dropped rather than padded. Where
+        # the group's own value is set it equals the row's (the matches are
+        # compared with it), so the padding test is "no match" there; it
+        # needs the body only where the group left the variable unbound, and
+        # then with the variable free, which does not depend on the row's
+        # value (no per-row scan of the whole body).
+        settled = [own for own in loose.values() if own != "null"]
+        free_probe = not settled or len(loose) == 1
+        probe = _translate_body(
+            visitor,
+            node,
+            hide=set(loose),
+            compare={} if free_probe else {n: own for n, own in sorted(loose.items()) if own != "null"},
+            own={n: "null" for n in loose} if free_probe else loose,
+            returns=None,
+        )
+        probe_alias = visitor.builder.fresh_alias(prefix="optany")
+        visitor.builder.let(probe_alias, f"(\n{probe.aql}\n)")
+        if settled and free_probe:
+            pad = f"({settled[0]} != null || LENGTH({probe_alias}) == 0 ? [null] : [])"
+        else:
+            pad = f"(LENGTH({probe_alias}) > 0 ? [] : [null])"
+        rows = f"(LENGTH({sub_alias}) > 0 ? {sub_alias} : {pad})"
     row_alias = visitor.builder.fresh_alias(prefix="optrow")
-    visitor.builder.for_inline(row_alias, f"(LENGTH({sub_alias}) > 0 ? {sub_alias} : [null])")
+    visitor.builder.for_inline(row_alias, rows)
     for name in new_vars:
-        visitor.state.var_to_expr[name] = attribute_ref(row_alias, name)
-        visitor.state.maybe_unbound.add(name)
+        state.var_to_expr[name] = attribute_ref(row_alias, name)
+        state.maybe_unbound.add(name)
     for name in filled:
         # Unchanged where it was bound; the body's value where it was not;
         # still unbound on the padded row.
-        visitor.state.var_to_expr[name] = (
-            f"NOT_NULL({visitor.state.var_to_expr[name]}, {attribute_ref(row_alias, name)})"
-        )
-    for name in rejoined:
-        # The group's solution (the padded row included) joins the
-        # surrounding one by compatibility (SPARQL 1.1 §18.3): either side
-        # unbound, or both equal. It is tested here, after the padding, as
-        # the group was evaluated without the outer value (#194). A row that
-        # fails it is not a solution of the enclosing join; inside an
-        # enclosing OPTIONAL's body, that body then pads.
-        outer_expr = visitor.state.var_to_expr[name]
-        inner_expr = attribute_ref(row_alias, name)
-        visitor.builder.filter_raw(
-            f"({outer_expr} == null || {inner_expr} == null || {inner_expr} == {outer_expr})"
-        )
-        if visitor.state.optional_rebind_sink is not None:
+        state.var_to_expr[name] = f"NOT_NULL({state.var_to_expr[name]}, {attribute_ref(row_alias, name)})"
+    own_after: dict[str, str] = {}
+    for name, own in loose.items():
+        if name not in rejoined:
+            own_after[name] = own
+            continue
+        value = attribute_ref(row_alias, name)
+        own_after[name] = _coalesce(own, value)
+        if state.optional_rebind_sink is not None:
             # Inside a MINUS probe the variable is shared only where both
             # sides bind it: the probe's disjoint-domain guard (§8.3.4)
             # reads it from the sink, as for an inline conditional add.
-            visitor.state.optional_rebind_sink.append((name, inner_expr, outer_expr))
-        if name in visitor.state.maybe_unbound:
-            visitor.state.var_to_expr[name] = f"NOT_NULL({outer_expr}, {inner_expr})"
+            state.optional_rebind_sink.append((name, value, state.var_to_expr[name]))
+        if name in state.maybe_unbound:
+            state.var_to_expr[name] = f"NOT_NULL({state.var_to_expr[name]}, {value})"
+    if loose:
+        # A later OPTIONAL in the same group decides its padding against
+        # this group's own value (:func:`group_own_value`).
+        state.group_own[id(node)] = own_after
 
 
 def bound_variables(node: Any) -> set[str]:
