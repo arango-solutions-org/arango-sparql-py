@@ -19,6 +19,7 @@ interpreter. Strict xfails are wrong on ``main`` today and name their issue.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -937,6 +938,22 @@ _CASES: list[tuple[str, Store, str, str | None]] = [
                 "optional_joins_an_optional_variable",
                 "SELECT ?s ?y WHERE { ?s a :Agent OPTIONAL { ?s :name ?y } OPTIONAL { ?s :salary ?y } }",
             ),
+            # Recheck of #196: read from every copy, the joined value binds ?y
+            # where the first OPTIONAL left it unbound (a membership FILTER
+            # never bound it).
+            (
+                "optional_joins_an_optional_variable_from_every_copy",
+                "SELECT ?s ?y WHERE { ?s a :Agent OPTIONAL { ?s :salary ?y } OPTIONAL { ?s :name ?y } }",
+            ),
+            (
+                "optional_joins_an_optional_attribute_from_every_copy",
+                "SELECT ?s ?y WHERE { ?s a :Agent OPTIONAL { ?s :age ?y } OPTIONAL { ?s :name ?y } }",
+            ),
+            (
+                "optional_joins_an_optional_variable_counted",
+                "SELECT ?s (COUNT(?y) AS ?c) WHERE { ?s a :Agent OPTIONAL { ?s :age ?y } "
+                "OPTIONAL { ?s :name ?y } } GROUP BY ?s",
+            ),
         ]
     ],
     *[
@@ -947,6 +964,14 @@ _CASES: list[tuple[str, Store, str, str | None]] = [
             ("range_person", "SELECT ?x ?s WHERE { ?s a :Agent . ?x :knows ?s }"),
             ("range_supertype", "SELECT ?x ?s WHERE { ?s a :Agent . ?x :likes ?s }"),
             ("forward", "SELECT ?s ?x WHERE { ?s a :Agent . ?s ^:likes ?x }"),
+            # Recheck of #196: an OPTIONAL can leave ?x unbound, so every
+            # agent joins; with the relationship's range declared the copies
+            # are interchangeable and :s comes back once.
+            ("optional_unbound_supertype", "SELECT ?x WHERE { OPTIONAL { :d :likes ?x } ?x a :Agent }"),
+            (
+                "optional_partly_unbound_supertype",
+                "SELECT ?s ?x WHERE { ?s a :Person OPTIONAL { ?s :likes ?x } ?x a :Agent }",
+            ),
         ]
     ],
     *[
@@ -1626,3 +1651,36 @@ def test_the_class_walk_cases_walk_into_the_class(store: Store, query: str) -> N
     # would pass on the forward plan and check nothing.
     aql = translate_case(store, query).aql
     assert " IN INBOUND " in aql or " IN ANY " in aql
+
+
+#: Recheck of #196: an unbound join into :Agent, whose copies are not
+#: interchangeable (``:knows`` has no declared range).
+UNBOUND_INTO_COPIES = [
+    pytest.param("SELECT ?x WHERE { OPTIONAL { :d :knows ?x } ?x a :Agent }", id="optional_then_type"),
+    pytest.param(
+        "SELECT ?s ?x WHERE { ?s a :Person OPTIONAL { ?s :knows ?x } ?x a :Agent }", id="chained_type"
+    ),
+    pytest.param(
+        "SELECT ?s ?x ?n WHERE { ?s a :Person OPTIONAL { ?s :knows ?x } ?x :name ?n }", id="chained_attribute"
+    ),
+]
+
+
+@pytest.mark.parametrize("query", UNBOUND_INTO_COPIES)
+def test_an_unbound_join_into_copies_that_differ_is_joined_as_a_value(query: str) -> None:
+    # Where ?x is unbound every member document of :Agent would join, once per
+    # copy of :s, :d and :m (7b5d7be returned them twice): one row per IRI
+    # needs interchangeable copies. The join stays a value join, as on main,
+    # so those rows find nothing (#210) instead of repeating.
+    lines = [line.strip() for line in translate_case(UNION_COPIES, query).aql.splitlines()]
+    # No null arm: neither the split scan's ``FILTER x == null`` nor ``(x == null || …)``.
+    assert not [line for line in lines if re.fullmatch(r"FILTER optrow\d+\.\w+ == null", line)]
+    assert not [line for line in lines if "== null ||" in line]
+
+
+@pytest.mark.parametrize("query", UNBOUND_INTO_COPIES)
+@pytest.mark.xfail(strict=True, reason="#210: the rows where ?x is unbound are dropped, as on main")
+def test_an_unbound_join_into_copies_that_differ_agrees_with_pyoxigraph(query: str) -> None:
+    result = translate_case(UNION_COPIES, query)
+    rows = [drop_null_bindings(r) for r in run_aql_subset(result.aql, result.bind_vars, UNION_COPIES.docs)]
+    assert_bindings_equal(oracle_rows(UNION_COPIES, query), rows)

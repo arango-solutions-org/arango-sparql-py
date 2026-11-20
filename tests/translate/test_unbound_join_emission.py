@@ -78,3 +78,28 @@ def test_an_attribute_value_that_can_be_unbound_is_joined_by_a_filter() -> None:
     # No document to look up by index: the value is read from the document.
     aql = _aql("SELECT ?s ?x ?y WHERE { ?s a :Person OPTIONAL { ?s :email ?x } ?y :email ?x }")
     assert "== null || doc" in aql
+
+
+def _minus_body(where: str) -> object:
+    from rdflib.plugins.sparql import prepareQuery
+
+    algebra = prepareQuery(
+        "PREFIX : <http://ex.org/> SELECT * WHERE { ?s a :Person MINUS { " + where + " } }"
+    ).algebra
+    node = algebra.p.p
+    while getattr(node, "name", None) != "Minus":
+        node = node.p
+    return node.p2
+
+
+def test_certainly_bound_variables_follow_every_solution() -> None:
+    from arango_sparql.translate.minus_exists import certainly_bound_variables
+
+    # Recheck of #196: the MINUS overlap test needs the variables every
+    # solution of the body binds, not every variable it mentions.
+    assert certainly_bound_variables(_minus_body("?s :name ?n . ?x :email ?m")) == {"s", "n", "x", "m"}
+    assert certainly_bound_variables(_minus_body('{ ?x :email ?m } UNION { ?s :name "Z" }')) == set()
+    assert certainly_bound_variables(_minus_body("?s :name ?n OPTIONAL { ?s :knows ?x }")) == {"s", "n"}
+    assert certainly_bound_variables(_minus_body("VALUES (?s ?x) { (:a UNDEF) (:b :c) }")) == {"s"}
+    assert certainly_bound_variables(_minus_body("?y :name ?n FILTER(?y = ?x)")) == {"y", "n"}
+    assert certainly_bound_variables(_minus_body("{ SELECT ?s WHERE { ?s :name ?n } }")) == set()

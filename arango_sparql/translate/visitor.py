@@ -3604,6 +3604,16 @@ class AlgebraVisitor:
             # One an earlier OPTIONAL can leave unbound matches every document
             # where it is (SPARQL 1.1 §18.3, #193).
             open_value = match_in_arms and name in self.state.maybe_unbound
+            if open_value and not copies_interchangeable(self, subject):
+                # Where it is unbound every member document would join, and an
+                # entity with a copy in two members would come back once per
+                # copy: keeping one per IRI needs the copies to be
+                # interchangeable (``copies.copies_interchangeable``), which a
+                # triple on the subject here rules out. Join it as a value, as
+                # before #193: the rows where it is unbound find nothing (#210;
+                # review of #196). Refusing instead failed LDBC IC7, whose
+                # MIN() result is only possibly unbound.
+                open_value = False
         arm_aqls: list[str] = []
         for collection in sorted(by_collection):
             # One child per arm, as SPARQL UNION arms are built: its scan,
@@ -3837,8 +3847,10 @@ class AlgebraVisitor:
         alias: str | None = None,
         builder: AqlQueryBuilder | None = None,
     ) -> None:
-        """Emit the compatible join of a value that can be null: the only
-        place the translator writes it.
+        """Emit the compatible join of a value that can be null: the one
+        place the triple emitters write it. (A VALUES or sub-select column
+        joined to the outer scope, where either side can be null, has its
+        own two-sided form in ``subselect._bind_outer_scope``.)
 
         Where *alias* is a plain collection scan the scan itself is split
         (:meth:`AqlQueryBuilder.split_scan_on_value`), so a bound value keeps

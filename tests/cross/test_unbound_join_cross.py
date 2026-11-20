@@ -304,6 +304,32 @@ SCOPE_CASES = [
         "SELECT ?s ?x WHERE { ?s a :Person OPTIONAL { ?s :knows ?x } OPTIONAL { ?s :email ?x } }",
         id="optional_binds_an_open_variable",
     ),
+    # Recheck of #196: the §8.3.4 overlap holds per solution of the MINUS
+    # body. ?s, bound in one UNION arm only, gives an arm that binds only ?x
+    # no overlap where ?x is unbound, so those rows stay.
+    pytest.param(
+        'SELECT ?s ?x WHERE { ?s a :Person OPTIONAL { ?s :knows ?x } MINUS { { ?x :email ?m } UNION { ?s :name "Z" } } }',
+        id="minus_union_arm_binds_only_the_open_variable",
+    ),
+    pytest.param(
+        'SELECT ?s ?x WHERE { ?s a :Person OPTIONAL { ?s :knows ?x } MINUS { { ?x :email ?m } UNION { ?s :name "C" } } }',
+        id="minus_union_arms_bind_one_shared_variable_each",
+    ),
+    pytest.param(
+        'SELECT ?s ?x WHERE { ?s a :Person OPTIONAL { ?s :knows ?x } MINUS { { ?s :name "A" } UNION { ?x :name "B" } } }',
+        id="minus_union_arms_bind_the_other_variable",
+    ),
+    # ...while a shared variable bound in every solution on both sides (?s)
+    # makes the overlap certain, whatever the body does with ?x.
+    pytest.param(
+        "SELECT ?s ?x WHERE { ?s a :Person OPTIONAL { ?s :knows ?x } "
+        'MINUS { ?s :name ?n { ?x :email ?m } UNION { ?s :name "Q" } } }',
+        id="minus_anchored_union",
+    ),
+    pytest.param(
+        "SELECT ?s ?x WHERE { ?s a :Person OPTIONAL { ?s :knows ?x } MINUS { ?s :name ?n OPTIONAL { ?s :knows ?x } } }",
+        id="minus_anchored_optional",
+    ),
 ]
 
 #: A supertype subject (one FOR over a UNION of collections).
