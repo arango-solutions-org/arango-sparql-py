@@ -376,6 +376,7 @@ def _spawn_child(visitor: AlgebraVisitor) -> AlgebraVisitor:
     # An outer variable an arm re-projects keeps "can be unbound" (#59).
     cv.state.maybe_unbound = set(visitor.state.maybe_unbound)
     cv.state.graph_scope = list(visitor.state.graph_scope)
+    cv.state.graph_vars_unbound_on_entry = set(visitor.state.graph_vars_unbound_on_entry)
     # OPTIONAL-body scope (#125): what an enclosing body hid, what an
     # enclosing EXISTS substitutes.
     cv.state.hidden_outer = dict(visitor.state.hidden_outer)

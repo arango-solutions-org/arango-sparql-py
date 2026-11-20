@@ -55,7 +55,11 @@ def emit_optional_subquery(visitor: AlgebraVisitor, node: Any) -> None:
     # ``OPTIONAL { ?p :age ?a BIND(CONCAT(?n, "!") AS ?v) }`` bound ``?v``).
     # The OPTIONAL's own condition (``expr``, its top-level FILTER) is the
     # left join's, evaluated on the joined row, so it sees them all.
-    hidden = _hide_unshared(child, outer - bound_variables(node.p2) - visitor.state.substituted)
+    # The active GRAPH variables are not hidden: the body is matched in the
+    # scope's graph (SPARQL 1.1 §18.6), the outer row's. Hidden, ``?g`` left
+    # the body free to read any named graph (review of #198).
+    graph_vars = {str(t) for t in visitor.state.graph_scope if isinstance(t, Variable)}
+    hidden = _hide_unshared(child, outer - bound_variables(node.p2) - visitor.state.substituted - graph_vars)
     child.state.hidden_outer = {**visitor.state.hidden_outer, **hidden}
     child.visit(node.p2)
     expr = getattr(node, "expr", None)

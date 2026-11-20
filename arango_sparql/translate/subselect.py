@@ -206,7 +206,7 @@ def _inherit_graph_scope(visitor: AlgebraVisitor, child_visitor: AlgebraVisitor,
     the child takes the scope as is.
 
     Under ``GRAPH ?g`` the child's scope is a fresh internal variable
-    (``_path_<n>``), so a ``?g`` of the sub-select's own (W3C
+    (``_graph_<n>``), so a ``?g`` of the sub-select's own (W3C
     ``subquery/sq02``, ``sq03``) stays its own:
 
     * ``?g`` bound by an earlier pattern of the group (and never unbound
@@ -230,12 +230,19 @@ def _inherit_graph_scope(visitor: AlgebraVisitor, child_visitor: AlgebraVisitor,
         child_visitor.state.graph_scope = list(scope)
         return None
     name = str(term)
-    column = str(visitor._fresh_path_var())  # noqa: SLF001 - the parent visitor's own sigil counter
+    # Its own sigil, not ``_path_``: a UNION arm carries a variable it binds
+    # out to the row, and it skips ``_path_`` intermediates (W3C-style
+    # ``{ SELECT … WHERE { { … } UNION { … } } }`` lost the column).
+    visitor.state.counters.path += 1
+    column = f"_graph_{visitor.state.counters.path}"
     child_visitor.state.graph_scope = [*scope[:-1], Variable(column)]
     expr = visitor.state.var_to_expr.get(name)
     if expr is not None and name not in visitor.state.maybe_unbound:
         child_visitor.state.var_to_expr[column] = expr
         return None
+    if expr is not None and name in visitor.state.graph_vars_unbound_on_entry:
+        # An OPTIONAL of this GRAPH group bound ?g first (review of #198).
+        visitor._refuse_graph_var_without_documents(name)  # noqa: SLF001 - the parent visitor's own check
     if _has_whole_result_modifier(inner):
         raise UnsupportedSparqlError(
             f"a sub-SELECT with LIMIT, OFFSET or an aggregate inside GRAPH ?{name}, before a pattern of "

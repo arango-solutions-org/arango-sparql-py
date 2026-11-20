@@ -129,7 +129,6 @@ cases:
       FILTER doc1._graph != null
       FILTER HAS(doc1, "name")
       FOR doc2 IN @@c1_Document
-      FILTER doc2._graph != null
       FILTER doc2._graph == doc1._graph
       FILTER HAS(doc2, "age")
       RETURN { g: doc1._graph, n: doc1.name, a: doc2.age }
