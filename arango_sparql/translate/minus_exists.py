@@ -222,12 +222,11 @@ def _translate_probe(
       FOR + FILTER and leave the inner unable to constrain on
       the inner triples. We deliberately leave this empty.
 
-    Also NOT carried over: ``var_to_rpt_class`` (RPT class
-    bindings are query-scope; an inner pattern that references
-    the same SPARQL variable should re-resolve it against the
-    inner's own type-pattern, not adopt the outer's RPT class)
-    and ``tenant_entity`` (the inner re-derives its own tenant
-    scope from the resolver).
+    Carried over: ``var_to_rpt_class`` and ``const_subject_rpt_class``,
+    so a probe triple on an outer triples-table (RPT) subject reads the
+    table rather than a document collection (#190). NOT carried over:
+    ``tenant_entity`` (the inner re-derives its own tenant scope from the
+    resolver).
     """
     # Local import to avoid the visitor ↔ minus_exists module
     # cycle at import time.

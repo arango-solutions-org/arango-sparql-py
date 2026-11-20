@@ -148,7 +148,15 @@ def emit_rpt_cross_subject_optional(visitor: AlgebraVisitor, triple: tuple[Any, 
         f"{attribute_ref(triples_alias, rpt_class.object_value_column)})"
     )
     new_bindings.append((str(obj), object_expr))
-    for var_name, _source in new_bindings:
+    # A variable an earlier OPTIONAL can leave unbound joins any value here
+    # too (§18.3, #193), and keeps its own where it is bound.
+    open_bindings: dict[str, str] = {}
+    for var_name, source in new_bindings:
+        if var_name in visitor.state.maybe_unbound and var_name != str(subject):
+            existing = visitor.state.var_to_expr[var_name]
+            child.filter_raw(f"({existing} == null || {source} == {existing})")
+            open_bindings[var_name] = existing
+            continue
         if var_name in visitor.state.var_to_expr:
             # The emitter installs each variable as a fresh binding; one the
             # required side (or, in a MINUS probe, the outer query) already
@@ -183,6 +191,11 @@ def emit_rpt_cross_subject_optional(visitor: AlgebraVisitor, triple: tuple[Any, 
             # Bound outside: unchanged (the FILTER held it equal). Unbound:
             # the matched triple's subject, or still unbound on the pad row.
             visitor.state.var_to_expr[var_name] = f"NOT_NULL({subject_value_expr}, {row_alias}.{field})"
+            continue
+        if var_name in open_bindings:
+            # Its own value where bound; the triple's where not; still
+            # unbound on the pad row only if it was unbound before.
+            visitor.state.var_to_expr[var_name] = f"NOT_NULL({open_bindings[var_name]}, {row_alias}.{field})"
             continue
         visitor.state.var_to_expr[var_name] = f"{row_alias}.{field}"
         visitor.state.maybe_unbound.add(var_name)

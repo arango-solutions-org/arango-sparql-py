@@ -2040,6 +2040,22 @@ class AlgebraVisitor:
                         self._record_var_expr(o, value_alias)
                     else:
                         self._record_var_expr(o, attr_path)
+                elif existing != attr_path and str(o) in self.state.maybe_unbound:
+                    # An earlier OPTIONAL can leave the variable unbound, and
+                    # an unbound variable matches any value (§18.3, #193):
+                    # read the attribute's value(s) where it is null, test it
+                    # where it is bound, and bind the variable to what was read.
+                    if fan_out:
+                        source = self._fan_out_source(attr_path)
+                        value_alias = self.builder.fresh_alias(prefix="lv")
+                        self.builder.for_inline(
+                            value_alias,
+                            f"({existing} == null ? {source} : ({existing} IN {source} ? [{existing}] : []))",
+                        )
+                        self.state.var_to_expr[str(o)] = value_alias
+                        self.state.maybe_unbound.discard(str(o))
+                    else:
+                        self._join_maybe_unbound(str(o), existing, attr_path, f"{attr_path} == {existing}")
                 elif existing != attr_path:
                     # The variable is already bound by an earlier
                     # triple to a different AQL expression — turn the
@@ -2666,7 +2682,9 @@ class AlgebraVisitor:
             existing = self.state.var_to_expr.get(o_name)
             if existing is None:
                 self.state.var_to_expr[o_name] = coalesce_expr
-            elif existing != coalesce_expr:
+            elif existing != coalesce_expr and not self._join_maybe_unbound(
+                o_name, existing, coalesce_expr, f"{coalesce_expr} == {existing}"
+            ):
                 # Object var was bound by a prior triple to a
                 # different expression (PG ``doc._uri``, another RPT
                 # COALESCE on a different alias, or an attribute
@@ -2930,6 +2948,13 @@ class AlgebraVisitor:
                 self._bind_subject(obj, alias)
                 return
             existing = subject_ref(existing_alias) if existing_alias else existing_expr
+            if (
+                existing_alias is None
+                and existing_expr is not None
+                and self._join_maybe_unbound(name, existing_expr, target, f"{target} == {existing_expr}")
+            ):
+                self.state.var_to_doc_alias[name] = alias
+                return
             if existing != target:
                 self.builder.filter_raw(f"{target} == {existing}")
             return
@@ -2999,11 +3024,18 @@ class AlgebraVisitor:
         by_collection = self._range_classes(range_iris)
         if not by_collection:
             return None
-        match = (
-            (lambda alias: subject_matches_value(alias, value))
-            if value is not None
-            else (lambda alias: subject_matches(alias, self.builder.bind(str(obj), hint="uri")))
-        )
+        # A value an earlier OPTIONAL can leave unbound joins any document
+        # (SPARQL 1.1 §18.3, #193): the lookup keeps every range document
+        # when it is null, and the variable then takes the document's identity.
+        open_value = value is not None and str(obj) in self.state.maybe_unbound
+
+        def match(alias: str, value: str | None = value) -> str:
+            if value is None:
+                return subject_matches(alias, self.builder.bind(str(obj), hint="uri"))
+            if open_value:
+                return f"({value} == null || {subject_matches(alias, value)})"
+            return subject_matches_value(alias, value)
+
         if len(by_collection) == 1:
             ((collection, classes),) = by_collection.items()
             alias = self._open_collection(collection, resolved=classes[0])
@@ -3035,7 +3067,13 @@ class AlgebraVisitor:
             # unbound ``GRAPH ?g`` is bound here. A per-arm test could only
             # filter, and left ``?g`` unbound (AqlEmitError).
             self._apply_graph_scope(alias)
-        if value is not None:
+        if open_value:
+            # Bound, the document is the one the value names, so its identity
+            # is the same value; unbound, it is whichever document matched.
+            self.state.var_to_doc_alias[str(obj)] = alias
+            self.state.var_to_expr[str(obj)] = subject_ref(alias)
+            self.state.maybe_unbound.discard(str(obj))
+        elif value is not None:
             # The variable keeps its value expression; its document is this.
             self.state.var_to_doc_alias[str(obj)] = alias
         else:
@@ -3535,6 +3573,7 @@ class AlgebraVisitor:
                 f"{what} spans classes with different tenant scoping; one tenant filter "
                 f"cannot apply to the subject {subject} in all of them"
             )
+        open_value = False
         if isinstance(subject, URIRef):
             match_in_arms = str(subject) not in self.state.const_subject_alias
             match_value = self.builder.bind(str(subject), hint="uri") if match_in_arms else None
@@ -3547,6 +3586,9 @@ class AlgebraVisitor:
             prior = self.state.var_to_expr.get(name)
             match_in_arms = prior is not None and name not in self.state.var_to_doc_alias
             match_value = prior if match_in_arms else None
+            # One an earlier OPTIONAL can leave unbound matches every document
+            # where it is (SPARQL 1.1 §18.3, #193).
+            open_value = match_in_arms and name in self.state.maybe_unbound
         arm_aqls: list[str] = []
         for collection in sorted(by_collection):
             # One child per arm, as SPARQL UNION arms are built: its scan,
@@ -3561,6 +3603,8 @@ class AlgebraVisitor:
                 child.filter_raw(
                     subject_matches(inner, match_value)
                     if isinstance(subject, URIRef)
+                    else f"({match_value} == null || {subject_matches(inner, match_value)})"
+                    if open_value
                     else subject_matches_value(inner, match_value)
                 )
             child.return_scalar(inner)
@@ -3580,6 +3624,11 @@ class AlgebraVisitor:
         self._enforce_tenant_scope(alias, classes[0])
         self._guard_relationship_endpoints(alias, classes)
         self._bind_opened_subject(subject, alias, matched=match_in_arms)
+        if open_value:
+            # Bound, the document is the one the value names; unbound, it is
+            # whichever matched, so the variable reads the document either way.
+            self.state.var_to_expr[str(subject)] = subject_ref(alias)
+            self.state.maybe_unbound.discard(str(subject))
         return alias
 
     def _ensure_subject_alias(self, subject: Any, prop: Any | None = None) -> str:
@@ -3719,6 +3768,16 @@ class AlgebraVisitor:
             new_expr = subject_ref(alias)
             if prior_expr is None:
                 self.state.var_to_expr[name] = new_expr
+            elif prior_expr != new_expr and name in self.state.maybe_unbound:
+                # An unbound variable is compatible with any value (SPARQL 1.1
+                # §18.3): where an earlier OPTIONAL left it unbound, every
+                # document joins, and the variable takes that document's
+                # identity. Where it is bound, the document is the one it
+                # names, so its identity is the same value either way (#193).
+                # The ``== null`` arm costs the index only for such variables.
+                self.builder.filter_raw(f"({prior_expr} == null || {subject_matches(alias, prior_expr)})")
+                self.state.var_to_expr[name] = new_expr
+                self.state.maybe_unbound.discard(name)
             elif prior_expr != new_expr:
                 # Index-friendly and null-safe (``subject_matches_value``):
                 # the ``NOT_NULL(...) == value`` form hid both indexes.
@@ -3730,6 +3789,24 @@ class AlgebraVisitor:
         # document in each (PRD §6.1). Written so the new FOR is an index
         # lookup on ``_uri`` / ``_id`` rather than a scan per outer row.
         self.builder.filter_raw(subject_matches_value(alias, subject_ref(existing_alias)))
+
+    def _join_maybe_unbound(self, name: str, existing: str, new_expr: str, test: str) -> bool:
+        """Join *name*, which an earlier OPTIONAL can leave unbound, to *new_expr*.
+
+        An unbound variable is compatible with any value (SPARQL 1.1 §18.3):
+        the row passes when *existing* is null and otherwise must pass *test*
+        (the ordinary equality join), and the variable then reads *new_expr*,
+        which equals *existing* wherever that was bound. ``False``, with
+        nothing emitted, when the variable is certainly bound, so the usual
+        equality FILTER (and its index) applies (#193; the triples-table
+        subject did the same in #190, VALUES ``UNDEF`` in 4184932).
+        """
+        if name not in self.state.maybe_unbound:
+            return False
+        self.builder.filter_raw(f"({existing} == null || {test})")
+        self.state.var_to_expr[name] = new_expr
+        self.state.maybe_unbound.discard(name)
+        return True
 
     def _value_match_expr(self, attr_path: str, value_expr: str, *, fan_out: bool) -> str:
         """Equality between an attribute read and a value expression.
