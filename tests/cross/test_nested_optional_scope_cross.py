@@ -230,6 +230,20 @@ CASES = [
         "SELECT ?s ?x ?n ?xn WHERE { ?s :knows ?x OPTIONAL { ?s :name ?n OPTIONAL { ?s :likes ?x } ?x :name ?xn } }",
         id="earlier_optional_then_required",
     ),
+    # Three levels: the innermost group binds ?x only through ``:likes``, and
+    # its ``?x :email ?m`` joins that (or a free ?x) under SPARQL 1.1 §18.3.
+    # On documents that join needed #196's compatible join for an unbound
+    # variable (review of #197).
+    pytest.param(
+        "SELECT ?s ?x ?n ?a ?m WHERE { ?s :knows ?x OPTIONAL { ?s :name ?n "
+        "OPTIONAL { ?s :age ?a OPTIONAL { ?s :likes ?x } OPTIONAL { ?x :email ?m } } } }",
+        id="three_levels_rebind",
+    ),
+    pytest.param(
+        "SELECT ?s ?x ?n ?a ?m WHERE { ?s :knows ?x OPTIONAL { ?s :name ?n "
+        "OPTIONAL { ?s :likes ?x } OPTIONAL { ?s :age ?a OPTIONAL { ?x :email ?m } } } }",
+        id="three_levels_rebind_mid",
+    ),
     # Control: the nested OPTIONAL's subject is bound inside its own group.
     pytest.param(
         "SELECT ?s ?x ?m WHERE { ?s a :Person OPTIONAL { ?s :knows ?x OPTIONAL { ?x :email ?m } } }",

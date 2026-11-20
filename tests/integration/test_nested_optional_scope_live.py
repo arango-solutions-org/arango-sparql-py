@@ -52,17 +52,17 @@ _EDGES = {"knows": _KNOWS, "likes": _LIKES}
 # a knows b and c, d knows e, g knows c; only b and e have an email. a likes
 # b and b likes c; g likes nobody (review of #197).
 _PERSONS: dict[str, dict[str, Any]] = {
-    "a": {"name": "A", "knows": ["b", "c"], "likes": ["b"]},
-    "b": {"name": "B", "email": "b@x.org", "likes": ["c"]},
-    "c": {"name": "C"},
-    "d": {"name": "D", "knows": ["e"]},
+    "a": {"name": "A", "age": 30, "knows": ["b", "c"], "likes": ["b"]},
+    "b": {"name": "B", "age": 40, "email": "b@x.org", "likes": ["c"]},
+    "c": {"name": "C", "age": 20},
+    "d": {"name": "D", "age": 50, "knows": ["e"]},
     "e": {"name": "E", "email": "e@x.org"},
     "g": {"name": "G", "knows": ["c"]},
 }
 _DATA = f"@prefix : <{EX}> .\n" + "\n".join(
     " ; ".join(
         [f":{k} a :Person"]
-        + [f':{p} "{v}"' for p, v in d.items() if p not in _EDGES]
+        + [f":{p} {v}" if isinstance(v, int) else f':{p} "{v}"' for p, v in d.items() if p not in _EDGES]
         + [f":{p} :{t}" for p in _EDGES for t in d.get(p, [])]
     )
     + " ."
@@ -83,6 +83,7 @@ _ONTOLOGIES = {
 :likes a owl:ObjectProperty ; phys:edgeCollectionName "{_LIKES}" ; rdfs:domain :Person ; rdfs:range :Person .
 :name a owl:DatatypeProperty ; rdfs:domain :Person ; phys:attributeName "name" .
 :email a owl:DatatypeProperty ; rdfs:domain :Person ; phys:attributeName "email" .
+:age a owl:DatatypeProperty ; rdfs:domain :Person ; phys:attributeName "age" .
 """,
 }
 _PREFIX = f"PREFIX : <{EX}>\n"
@@ -185,6 +186,12 @@ def _multiset(rows: list[dict[str, Any]]) -> list[str]:
             "SELECT ?s ?x ?n ?m WHERE { ?s :knows ?x "
             "OPTIONAL { ?s :name ?n OPTIONAL { ?s :likes ?x } OPTIONAL { ?x :email ?m } } }",
             id="earlier_optional_binds_x",
+        ),
+        # Three levels deep, with the innermost ?x from ``:likes`` (review of #197).
+        pytest.param(
+            "SELECT ?s ?x ?n ?a ?m WHERE { ?s :knows ?x OPTIONAL { ?s :name ?n "
+            "OPTIONAL { ?s :age ?a OPTIONAL { ?s :likes ?x } OPTIONAL { ?x :email ?m } } } }",
+            id="three_levels_rebind",
         ),
         # MINUS's disjoint-domain guard for a group-scoped variable: only a ?t
         # that likes the outer ?o removes the row.
