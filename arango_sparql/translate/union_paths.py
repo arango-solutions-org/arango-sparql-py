@@ -177,10 +177,23 @@ def _emit_union_of_arms(
     # never absorbs it, so the parent's counters stay put.
     outer_vars = set(visitor.state.var_to_expr.keys())
     arm_var_sets: list[set[str]] = []
+    # Outer variables an earlier OPTIONAL can leave unbound, which an arm
+    # joins with any value (SPARQL 1.1 §18.3) and so fills: its expression
+    # for them changed (``NOT_NULL(outer, inner)``). They are projected like
+    # the arm's own variables and read back below, or the solution keeps them
+    # unbound (review of #192), as ``optional_subquery`` does for its body.
+    filled: set[str] = set()
     for driver in arm_drivers:
         probe = _spawn_child(visitor)
         driver(probe)
         arm_var_sets.append(set(probe.state.var_to_expr.keys()) - outer_vars)
+        filled.update(
+            name
+            for name in outer_vars & visitor.state.maybe_unbound
+            if probe.state.var_to_expr.get(name, visitor.state.var_to_expr[name])
+            != visitor.state.var_to_expr[name]
+            and not name.startswith(("_path_", "_bn_"))
+        )
 
     raw_vars = sorted(set().union(*arm_var_sets))
     # Property-path intermediate variables (``_path_<n>``, minted by
@@ -212,6 +225,7 @@ def _emit_union_of_arms(
     else:
         # Strip internal sigils from the user-visible projection.
         all_vars = user_vars
+    all_vars = [*all_vars, *sorted(filled - set(all_vars))]
 
     # ---- Phase 2: emit each arm with full-schema projection ---------
     arm_aqls: list[str] = []
@@ -267,6 +281,13 @@ def _emit_union_of_arms(
             continue
         new_expr = attribute_ref(row_alias, var_name)
         existing = visitor.state.var_to_expr.get(var_name)
+        if var_name in filled and existing is not None:
+            # Every arm already held it compatible with the outer value; an
+            # arm that filled it carries the value, the others the outer one.
+            visitor.state.var_to_expr[var_name] = f"NOT_NULL({existing}, {new_expr})"
+            if var_name not in unbound_in_some_arm:
+                visitor.state.maybe_unbound.discard(var_name)
+            continue
         if existing is None:
             if var_name in arm_relationships and var_name not in not_relationship:
                 visitor.state.relationship_nodes[var_name] = arm_relationships[var_name]

@@ -144,6 +144,33 @@ def _oxigraph(store: Any, body: str) -> list[dict[str, Any]]:
             "SELECT ?s WHERE { ?s a :Person MINUS { ?t a :Person ; :knows ?s OPTIONAL { ?t :email ?m } } }",
             [{"s": EX + "a"}, {"s": EX + "d"}],
         ),
+        # #190: c knows nobody, so the first OPTIONAL leaves ?x unbound, and an
+        # unbound variable joins any value (SPARQL 1.1 §18.3): c takes b's
+        # email, with ?x = b. The row used to be dropped.
+        (
+            "SELECT ?s ?x ?m WHERE { ?s a :Person OPTIONAL { ?s :knows ?x } OPTIONAL { ?x :email ?m } }",
+            [
+                {"s": EX + "a", "x": EX + "b", "m": "b@x.org"},
+                {"s": EX + "a", "x": EX + "c"},
+                {"s": EX + "c", "x": EX + "b", "m": "b@x.org"},
+                {"s": EX + "d", "x": EX + "e"},
+            ],
+        ),
+        # The same through the general subquery (a two-triple body).
+        (
+            "SELECT ?s ?x ?m WHERE { ?s a :Person OPTIONAL { ?s :knows ?x } OPTIONAL { ?x :email ?m . ?k :knows ?x } }",
+            [
+                {"s": EX + "a", "x": EX + "b", "m": "b@x.org"},
+                {"s": EX + "a", "x": EX + "c"},
+                {"s": EX + "c", "x": EX + "b", "m": "b@x.org"},
+                {"s": EX + "d", "x": EX + "e"},
+            ],
+        ),
+        # EXISTS substitutes only bound variables: c's unbound ?x stays free.
+        (
+            "SELECT ?s ?x WHERE { ?s a :Person OPTIONAL { ?s :knows ?x } FILTER EXISTS { ?x :email ?m } }",
+            [{"s": EX + "a", "x": EX + "b"}, {"s": EX + "c"}],
+        ),
     ],
 )
 def test_an_optional_on_a_triples_table_subject_matches_pyoxigraph(

@@ -127,6 +127,49 @@ CASES = [
         'SELECT ?s WHERE { ?s a :Person MINUS { ?t a :Person ; :knows ?s OPTIONAL { ?t :email ?m FILTER(?m = "bob@x.org") } } }',
         id="minus_unshared_filtered",
     ),
+    # #190: the first OPTIONAL leaves ?x unbound for :carol (she knows nobody);
+    # an unbound variable is compatible with any value (SPARQL 1.1 §18.3), so
+    # the next pattern on ?x joins every subject and ?x takes it. The join
+    # used to require ``subject_uri == null`` and dropped the row.
+    pytest.param(
+        "SELECT ?s ?x ?m WHERE { ?s a :Person OPTIONAL { ?s :knows ?x } OPTIONAL { ?x :email ?m } }",
+        id="chained_optional_unbound_join",
+    ),
+    pytest.param(
+        "SELECT ?s ?x ?m ?c WHERE { ?s a :Person OPTIONAL { ?s :knows ?x } OPTIONAL { ?x :email ?m . ?x :city ?c } }",
+        id="chained_optional_two_triples",
+    ),
+    pytest.param(
+        "SELECT ?s ?x ?m WHERE { ?s a :Person OPTIONAL { ?s :knows ?x } ?x :email ?m }",
+        id="required_join_after_optional",
+    ),
+    pytest.param(
+        "SELECT ?s ?x WHERE { ?s a :Person OPTIONAL { ?s :knows ?x } FILTER EXISTS { ?x :email ?m } }",
+        id="exists_on_optional_unbound",
+    ),
+    pytest.param(
+        "SELECT ?s ?x WHERE { ?s a :Person OPTIONAL { ?s :knows ?x } MINUS { ?x :email ?m } }",
+        id="minus_on_optional_unbound",
+    ),
+    # A type pattern on the possibly-unbound variable joins every member.
+    pytest.param(
+        "SELECT ?s ?x ?y WHERE { ?s a :Person OPTIONAL { ?s :knows ?x } OPTIONAL { ?x a :Person . ?x :knows ?y } }",
+        id="type_pattern_on_optional_unbound",
+    ),
+    pytest.param(
+        "SELECT ?s ?x WHERE { ?s a :Person OPTIONAL { ?s :email ?x } ?x a :Person }",
+        id="required_type_pattern_after_optional",
+    ),
+    # A UNION arm that fills the possibly-unbound variable carries it out;
+    # the arm joined it but the solution kept ?x unbound (review of #192).
+    pytest.param(
+        "SELECT ?s ?x ?m ?n WHERE { ?s a :Person OPTIONAL { ?s :knows ?x } { ?x :email ?m } UNION { ?x :city ?n } }",
+        id="union_arms_fill_optional_unbound",
+    ),
+    pytest.param(
+        "SELECT ?s ?x ?m ?n WHERE { ?s a :Person OPTIONAL { ?s :knows ?x } { ?x :email ?m } UNION { ?s :knows ?n } }",
+        id="union_one_arm_fills",
+    ),
 ]
 
 

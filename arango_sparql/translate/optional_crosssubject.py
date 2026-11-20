@@ -120,7 +120,16 @@ def emit_rpt_cross_subject_optional(visitor: AlgebraVisitor, triple: tuple[Any, 
     # Join the OPTIONAL subject to the outer-bound value. The outer
     # alias referenced by ``subject_value_expr`` is in lexical scope
     # inside this subquery (same as the MINUS/EXISTS probe).
-    child.filter_raw(f"{attribute_ref(triples_alias, rpt_class.subject_column)} == {subject_value_expr}")
+    subject_column = attribute_ref(triples_alias, rpt_class.subject_column)
+    # An earlier OPTIONAL can leave the subject unbound, and an unbound
+    # variable is compatible with any value (SPARQL 1.1 §18.3): the row then
+    # joins every triple and the subject takes the triple's (#190), as a
+    # VALUES join does (``_bind_outer_scope``, 4184932).
+    subject_open = str(subject) in visitor.state.maybe_unbound
+    if subject_open:
+        child.filter_raw(f"({subject_value_expr} == null || {subject_column} == {subject_value_expr})")
+    else:
+        child.filter_raw(f"{subject_column} == {subject_value_expr}")
 
     # One projection field per *new* variable (predicate if it's a
     # variable, plus the object). Fields are positional (``f0``, ``f1``)
@@ -150,9 +159,12 @@ def emit_rpt_cross_subject_optional(visitor: AlgebraVisitor, triple: tuple[Any, 
                 f"OPTIONAL over a triples table re-binds variable ?{var_name} that is already bound"
             )
 
-    field_names = [f"f{i}" for i in range(len(new_bindings))]
+    # The subject is projected too when it can be unbound, so the solution
+    # takes the triple's subject where the outer one is missing.
+    projected = [*new_bindings, (str(subject), subject_column)] if subject_open else new_bindings
+    field_names = [f"f{i}" for i in range(len(projected))]
     projection = ", ".join(
-        f"{field}: {source}" for field, (_, source) in zip(field_names, new_bindings, strict=False)
+        f"{field}: {source}" for field, (_, source) in zip(field_names, projected, strict=False)
     )
     child.return_scalar("{" + projection + "}")
 
@@ -166,6 +178,11 @@ def emit_rpt_cross_subject_optional(visitor: AlgebraVisitor, triple: tuple[Any, 
     # field reads are ``null`` (SPARQL unbound), so the outer solution
     # survives. Multiple matches fan out — correct multiset OPTIONAL.
     visitor.builder.for_inline(row_alias, f"(LENGTH({opt_alias}) > 0 ? {opt_alias} : [null])")
-    for field, (var_name, _source) in zip(field_names, new_bindings, strict=False):
+    for field, (var_name, _source) in zip(field_names, projected, strict=False):
+        if var_name == str(subject):
+            # Bound outside: unchanged (the FILTER held it equal). Unbound:
+            # the matched triple's subject, or still unbound on the pad row.
+            visitor.state.var_to_expr[var_name] = f"NOT_NULL({subject_value_expr}, {row_alias}.{field})"
+            continue
         visitor.state.var_to_expr[var_name] = f"{row_alias}.{field}"
         visitor.state.maybe_unbound.add(var_name)
