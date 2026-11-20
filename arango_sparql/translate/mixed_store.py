@@ -19,9 +19,11 @@ database need not have (ERR 1203), and strict subject resolution refused.
 1. **By the predicate's ``rdfs:domain``**, when it declares one. The
    mapping stores a property on its domain's classes: ``:cname`` (domain
    ``:Company``, a document class) is a document attribute, so its
-   triples are read from the ``Company`` documents (the visitor's existing
-   domain routing, which this module leaves alone); a property whose
-   domain is a triples-table class is read from that table.
+   triples are read from the ``Company`` documents, looked up by ``_uri``
+   as the visitor's domain routing reads them (but without opening the
+   subject as a ``Company`` document: its next triple is routed on its
+   own); a property whose domain is a triples-table class is read from
+   that table.
 2. **At run time, from every store**, when the mapping cannot say: an
    undeclared predicate, a declared one with no domain, a variable
    predicate, or a domain spanning both stores. The subject's IRI is
@@ -38,11 +40,24 @@ A ``:worksFor`` ranging over documents does not stop the triples table from
 holding a triple about the same company, and routing by it would drop that
 triple without an error.
 
-The default ``Document`` collection is not one of the stores here: in a
-mixed mapping the stores are its classes' collections and tables (the
-non-strict fallback to ``Document`` is for a mapping that names nowhere
-else). An edge-backed object property is not routed here either: its
-triples are its edges.
+The stores are the classes' collections and tables
+(:meth:`SchemaResolver.store_sources`) and, on the library's non-strict
+resolver, the default ``Document`` collection, where the non-strict
+contract keeps an IRI no class places (as ``DESCRIBE`` reads it). A mapping
+without that collection then fails loudly (ERR 1203) rather than answer
+without it. Under strict subject resolution (the service) it is not a
+store. A domain naming a class the ontology does not declare
+(``rdfs:domain :Company, :Any``) reads ``Document`` for that class on the
+non-strict resolver and is refused under strict resolution, as the
+visitor's domain routing does. An edge-backed object property is not
+routed here: its triples are its edges.
+
+Inside ``GRAPH ?g`` with ``?g`` not yet bound, a read here is refused: its
+arms neither bind nor join ``?g`` yet (#203). ``GRAPH <iri>``, and ``GRAPH
+?g`` once ``?g`` is bound, filter each arm on its graph field. Each arm
+returns that field too, so the set union keeps a triple stored in two named
+graphs twice, as the default graph holds two quads (lax default-graph mode)
+and the single-store readers count it.
 """
 
 from __future__ import annotations
@@ -189,6 +204,21 @@ def emit_routed_triple(
     subject (SPARQL 1.1 §18.3, as the triples-table reader does since
     #190); one seen first here binds to it.
     """
+    graph_scope = visitor.state.graph_scope
+    if (
+        graph_scope
+        and isinstance(graph_scope[-1], Variable)
+        and str(graph_scope[-1]) not in visitor.state.var_to_expr
+    ):
+        # The arms filter each store on the graph field only once the graph
+        # variable has a value; they do not bind it, so an unbound ``?g``
+        # joined across graphs and took in the default graph (review of #199).
+        raise UnsupportedSparqlError(
+            f"{triple[0].n3()} {triple[1].n3()} … inside GRAPH {graph_scope[-1].n3()}: the subject "
+            f"has no type pattern, and the mapping keeps both triples tables and documents, so its "
+            f"triples are read from several stores, which cannot bind the graph variable yet "
+            f"(issue #203); give the subject a type pattern, or name the graph"
+        )
     variable_predicate = isinstance(predicate, Variable)
     if variable_predicate and route.documents and route.tables and not visitor.resolver.attribute_uri_map():
         # Without declared datatype properties a document's ``?p`` is its
@@ -317,6 +347,7 @@ def _table_arm(
     if isinstance(predicate, Variable):
         fields.append(("p", predicate_column))
     fields.append(("o", f"NOT_NULL({uri_column}, {value_column})"))
+    fields.append(("g", attribute_ref(row, arm.resolver.graph_field)))
     return fields
 
 
@@ -370,7 +401,7 @@ def _document_arm(
         else:
             predicate_value, value = attribute_triple_loop(arm, builder, doc)
         _document_object_test(arm, value, obj, fan_out=False, triple=triple)
-        return [("s", subject_ref(doc)), ("p", predicate_value), ("o", value)]
+        return [("s", subject_ref(doc)), ("p", predicate_value), ("o", value), _graph_field(arm, doc)]
 
     prop = arm.resolver.resolve_property(predicate)
     path = attribute_path_ref(doc, prop.field_path)
@@ -381,7 +412,13 @@ def _document_arm(
         value = builder.fresh_alias(prefix="lv")
         builder.for_inline(value, arm._fan_out_source(path))
     _document_object_test(arm, path, obj, fan_out=fan_out and not isinstance(obj, Variable), triple=triple)
-    return [("s", subject_ref(doc)), ("o", value)]
+    return [("s", subject_ref(doc)), ("o", value), _graph_field(arm, doc)]
+
+
+def _graph_field(arm: AlgebraVisitor, alias: str) -> tuple[str, str]:
+    """The ``g`` field: the named graph the triple is in, part of the set
+    union's key (null in the default graph)."""
+    return ("g", attribute_ref(alias, arm.resolver.graph_field))
 
 
 def _document_object_test(arm: AlgebraVisitor, value: str, obj: Any, *, fan_out: bool, triple: Any) -> None:

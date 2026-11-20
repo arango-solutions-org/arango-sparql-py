@@ -2075,8 +2075,9 @@ class AlgebraVisitor:
                 return
             # A subject the query never placed, in a mapping with several
             # stores, is read where its triples can be (#191): one triples
-            # table, or every store. Document-only routes fall through to
-            # the domain routing below.
+            # table through the reader above, anything else (documents, or
+            # several stores) through the routed reader. A route always
+            # returns here; ``None`` leaves the triple to the readers below.
             route = route_subject(self, s, p)
             if route is not None:
                 if route.one_table is not None:

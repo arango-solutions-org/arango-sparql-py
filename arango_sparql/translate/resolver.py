@@ -422,7 +422,7 @@ class SchemaResolver(AdvisoryLog):
     _tenant_scoped_classes: tuple[ResolvedClass, ...] | None = field(default=None)
     """Cached result of :meth:`tenant_scoped_classes`."""
     _store_sources: tuple[tuple[str, ...], tuple[ResolvedClass, ...]] | None = field(default=None)
-    """Cached result of :meth:`store_sources`."""
+    """Cached class survey behind :meth:`store_sources`."""
     _nested_properties: tuple[str, ...] | None = field(default=None)
     """Lazily-built IRIs of datatype properties stored in a nested object."""
     _multi_valued_attributes: tuple[str, ...] | None = field(default=None)
@@ -1171,16 +1171,21 @@ class SchemaResolver(AdvisoryLog):
         return tuple(c for c in self._tenant_scoped_classes if (c.style == "RPT") == rpt)
 
     def store_sources(self) -> tuple[tuple[str, ...], tuple[ResolvedClass, ...]]:
-        """The stores the mapping's classes keep triples in: their document
-        collections (a sharded one's whole family) and their triples tables,
-        one class per table and column layout. Unlike
-        :meth:`described_sources`, never the default collection, which is a
-        fallback for a subject the mapping places nowhere, not a store of its
-        own. Cached: the visitor asks for every triple on an unplaced subject
-        (:mod:`.mixed_store`, #191)."""
+        """The stores a triple can be in: the classes' document collections
+        (a sharded one's whole family) and triples tables (one class per
+        table and column layout), plus the default collection unless
+        :attr:`strict_subject_resolution` is on or the mapping is only
+        triples tables. The non-strict contract keeps an IRI no class places
+        in the default collection, so a read of every store reads it too
+        (review of #199). The class survey is cached: the visitor asks for
+        every triple on an unplaced subject (:mod:`.mixed_store`, #191)."""
         if self._store_sources is None:
             self._store_sources = self._class_sources()
-        return self._store_sources
+        collections, tables = self._store_sources
+        # A triple store (only RPT classes) keeps every triple in its tables.
+        if not self.strict_subject_resolution and (collections or not tables):
+            return tuple(sorted({*collections, self.default_collection})), tables
+        return collections, tables
 
     def described_sources(self) -> tuple[tuple[str, ...], tuple[ResolvedClass, ...]]:
         """Where a constant IRI's triples can be, for ``DESCRIBE <iri>`` (#150):
@@ -1199,11 +1204,7 @@ class SchemaResolver(AdvisoryLog):
         class that does not resolve is read by nothing. Triples tables are
         listed once per collection and column layout.
         """
-        collections, tables = self._class_sources()
-        # A triple store (only RPT classes) keeps every triple in its tables.
-        if not self.strict_subject_resolution and (collections or not tables):
-            return tuple(sorted({*collections, self.default_collection})), tables
-        return collections, tables
+        return self.store_sources()
 
     def _class_sources(self) -> tuple[tuple[str, ...], tuple[ResolvedClass, ...]]:
         """Every class's document collections and triples tables, resolved

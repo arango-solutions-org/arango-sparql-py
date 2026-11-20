@@ -5,8 +5,9 @@ The answers are cross-validated against pyoxigraph in
 ``tests/cross/test_mixed_store_cross.py`` and live in
 ``tests/integration/test_mixed_store_live.py``. These tests pin the routing
 itself: the predicate's ``rdfs:domain`` decides when it can, every store is
-read when it cannot, the default ``Document`` collection is never read, and
-a variable predicate refuses rather than mix attribute names with IRIs.
+read when it cannot (with the default collection on the library's non-strict
+resolver, never under strict subject resolution), and a variable predicate
+refuses rather than mix attribute names with IRIs.
 """
 
 from __future__ import annotations
@@ -14,9 +15,9 @@ from __future__ import annotations
 import pytest
 
 from arango_sparql.api import TranslateResult, translate
-from arango_sparql.errors import UnsupportedSparqlError
+from arango_sparql.errors import SchemaResolutionError, UnsupportedSparqlError
 from arango_sparql.translate.resolver import SchemaResolver
-from tests.cross.test_mixed_store_cross import ONTOLOGIES, PREFIX, cases
+from tests.cross.test_mixed_store_cross import DEFAULT_COLLECTION, ONTOLOGIES, PREFIX, cases, make_resolver
 
 _NO_DATATYPE_PROPERTIES = """
 @prefix : <http://ex.org/> .
@@ -45,12 +46,45 @@ def _collections(result: TranslateResult) -> set[str]:
 
 @pytest.mark.parametrize("strict", [False, True], ids=["library", "strict"])
 @pytest.mark.parametrize(("where", "ontology"), cases())
-def test_an_unplaced_subject_never_reads_the_default_collection(
+def test_an_unplaced_subject_reads_the_default_collection_only_without_strict_resolution(
     where: str, ontology: str, strict: bool
 ) -> None:
-    result = _translate(where, ONTOLOGIES[ontology], strict=strict)
+    result = translate(PREFIX + where, resolver=make_resolver(ontology, strict))
 
-    assert _collections(result) <= {"T191", "C191"}
+    assert _collections(result) <= ({"T191", "C191"} if strict else {"T191", "C191", DEFAULT_COLLECTION})
+
+
+@pytest.mark.parametrize("strict", [False, True], ids=["library", "strict"])
+def test_every_store_includes_the_default_collection_only_without_strict_resolution(strict: bool) -> None:
+    # The non-strict contract keeps an IRI no class places in the default
+    # collection, so a read of every store reads it too (review of #199).
+    result = _translate("SELECT ?m WHERE { :zeta :email ?m }", ONTOLOGIES["undeclared"], strict=strict)
+
+    assert _collections(result) == ({"T191", "C191"} if strict else {"T191", "C191", "Document"})
+
+
+def test_a_domain_naming_an_undeclared_class_reads_the_default_collection_for_it() -> None:
+    # ``rdfs:domain :Company, :Any``: the undeclared class stands for the
+    # default collection on the non-strict resolver (#126) and is refused
+    # under strict resolution, as the visitor's domain routing does.
+    ttl = ONTOLOGIES["undeclared"] + ":rating a owl:DatatypeProperty ; rdfs:domain :Company , :Any .\n"
+    where = "SELECT ?c ?r WHERE { ?s a :Person ; :worksFor ?c . ?c :rating ?r }"
+
+    assert _collections(_translate(where, ttl, strict=False)) == {"T191", "C191", "Document"}
+    with pytest.raises(SchemaResolutionError):
+        _translate(where, ttl, strict=True)
+
+
+@pytest.mark.parametrize(
+    "where",
+    [
+        "SELECT ?g ?m WHERE { GRAPH ?g { ?c :email ?m } }",
+        "SELECT ?c ?n WHERE { ?s a :Person ; :worksFor ?c GRAPH ?g { ?c :cname ?n } }",
+    ],
+)
+def test_a_routed_read_inside_graph_with_an_unbound_variable_is_refused(where: str) -> None:
+    with pytest.raises(UnsupportedSparqlError, match="#203"):
+        _translate(where, ONTOLOGIES["undeclared"])
 
 
 def test_a_domain_of_documents_reads_the_documents_by_iri_without_placing_the_subject() -> None:

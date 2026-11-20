@@ -21,8 +21,8 @@ from typing import Any
 import pytest
 
 from arango_sparql.api import translate
-from arango_sparql.translate.resolver import SchemaResolver
-from tests.cross.test_mixed_store_cross import DOC_FACTS, DOCS, ONTOLOGIES, PREFIX, TRIPLES, _rows, cases
+from tests.cross import test_mixed_store_graph_cross as graph_cases
+from tests.cross.test_mixed_store_cross import PREFIX, cases, collections, facts, make_resolver
 from tests.helpers.oxi import drop_null_bindings, normalize_oxi_row, oxi_bindings
 from tests.integration.conftest import (
     DEFAULT_ARANGO_DB,
@@ -52,24 +52,25 @@ def db() -> Iterator[Any]:
     handle = ArangoClient(hosts=DEFAULT_ARANGO_URL).db(
         DEFAULT_ARANGO_DB, username=DEFAULT_ARANGO_USER, password=DEFAULT_ARANGO_PASSWORD
     )
-    for name, docs in (("T191", _rows()), ("C191", DOCS)):
+    stored = {**collections(), **graph_cases.collections()}
+    for name, docs in stored.items():
         if handle.has_collection(name):
             handle.delete_collection(name)
         collection = handle.create_collection(name)
-        collection.insert_many(docs)
-    # The indexes the readers rely on: the table's subject column, and the
-    # documents' ``_uri`` (PRD §6.3; #146).
-    handle.collection("T191").add_index({"type": "persistent", "fields": ["subject_uri", "predicate"]})
-    handle.collection("C191").add_index({"type": "persistent", "fields": ["_uri"]})
+        if docs:
+            collection.insert_many(docs)
+        # The indexes the readers rely on: a table's subject column, and the
+        # documents' ``_uri`` (PRD §6.3; #146).
+        fields = ["subject_uri", "predicate"] if name.startswith("T") else ["_uri"]
+        collection.add_index({"type": "persistent", "fields": fields})
     yield handle
-    handle.delete_collection("T191")
-    handle.delete_collection("C191")
+    for name in stored:
+        handle.delete_collection(name)
 
 
-@pytest.fixture(scope="module")
-def oxi_store() -> Any:
+def _store(strict: bool) -> Any:
     store = oxi.Store()
-    store.load((TRIPLES + DOC_FACTS).encode("utf-8"), oxi.RdfFormat.TURTLE)
+    store.load(facts(strict).encode("utf-8"), oxi.RdfFormat.TURTLE)
     return store
 
 
@@ -77,24 +78,52 @@ def _multiset(rows: list[dict[str, Any]]) -> list[str]:
     return sorted(json.dumps(r, sort_keys=True) for r in rows)
 
 
-def _resolver(ontology: str, strict: bool) -> SchemaResolver:
-    resolver = SchemaResolver.from_turtle(ONTOLOGIES[ontology])
-    resolver.strict_subject_resolution = strict
-    return resolver
-
-
 @pytest.mark.parametrize("strict", [False, True], ids=["library", "strict"])
 @pytest.mark.parametrize(("where", "ontology"), cases())
 def test_an_unplaced_subject_in_a_mixed_database_matches_pyoxigraph(
-    db: Any, oxi_store: Any, where: str, ontology: str, strict: bool
+    db: Any, where: str, ontology: str, strict: bool
 ) -> None:
     query = PREFIX + where
-    result = translate(query, resolver=_resolver(ontology, strict))
+    result = translate(query, resolver=make_resolver(ontology, strict))
     db.aql.validate(result.aql)
 
     arango = [drop_null_bindings(r) for r in db.aql.execute(result.aql, bind_vars=result.bind_vars)]
 
-    assert _multiset(arango) == _multiset([normalize_oxi_row(r) for r in oxi_bindings(oxi_store, query)])
+    assert _multiset(arango) == _multiset([normalize_oxi_row(r) for r in oxi_bindings(_store(strict), query)])
+
+
+@pytest.mark.parametrize(
+    "lax_default_graph", [False, True], ids=["default_graph_alone", "union_default_graph"]
+)
+@pytest.mark.parametrize("strict", [False, True], ids=["library", "strict"])
+@pytest.mark.parametrize("where", graph_cases.ANSWERED)
+def test_a_routed_read_in_a_named_or_the_default_graph_matches_pyoxigraph(
+    db: Any, where: str, strict: bool, lax_default_graph: bool
+) -> None:
+    query = graph_cases.PREFIX + where
+    result = translate(query, resolver=graph_cases.make_resolver(strict, lax_default_graph))
+
+    arango = [drop_null_bindings(r) for r in db.aql.execute(result.aql, bind_vars=result.bind_vars)]
+
+    store = oxi.Store()
+    store.load(graph_cases.quads().encode("utf-8"), oxi.RdfFormat.N_QUADS)
+    expected = [
+        normalize_oxi_row(r) for r in oxi_bindings(store, query, union_default_graph=lax_default_graph)
+    ]
+    assert _multiset(arango) == _multiset(expected)
+
+
+def test_a_missing_default_collection_fails_loudly_on_the_library_resolver(db: Any) -> None:
+    # The non-strict resolver reads its default collection too; a database
+    # without one is an error, not an answer without it (review of #199).
+    from arango.exceptions import AQLQueryExecuteError
+
+    resolver = make_resolver("undeclared", strict=False)
+    resolver.default_collection = "NoSuchDefault191"
+    result = translate(PREFIX + "SELECT ?m WHERE { :acme :email ?m }", resolver=resolver)
+
+    with pytest.raises(AQLQueryExecuteError, match="1203"):
+        list(db.aql.execute(result.aql, bind_vars=result.bind_vars))
 
 
 def _full_scans(db: Any, aql: str, bind_vars: dict[str, Any]) -> list[str]:
@@ -115,7 +144,7 @@ def _full_scans(db: Any, aql: str, bind_vars: dict[str, Any]) -> list[str]:
     ],
 )
 def test_a_routed_read_is_an_index_lookup_on_the_subject(db: Any, ontology: str, where: str) -> None:
-    result = translate(PREFIX + where, resolver=_resolver(ontology, strict=True))
+    result = translate(PREFIX + where, resolver=make_resolver(ontology, strict=True))
 
     # Only the type pattern scans: the people, on the table's rdf:type rows.
     assert _full_scans(db, result.aql, result.bind_vars) == ["T191"]

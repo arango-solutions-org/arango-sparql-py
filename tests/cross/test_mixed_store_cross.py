@@ -16,6 +16,12 @@ AQL interpreter on the same facts pyoxigraph (the W3C ground truth) loads,
 on the library's resolver and on the service's strict one, and with and
 without declared domains. The same cases run on ArangoDB in
 ``tests/integration/test_mixed_store_live.py``.
+
+The library's non-strict resolver also reads its default collection, where
+the non-strict contract keeps an IRI no class places: ``:zeta`` is such an
+untyped document (in ``D191``, the default collection these tests give the
+resolver, so they never touch a shared ``Document``). Under strict subject
+resolution it is not in the mapping, so the expected answers leave it out.
 """
 
 from __future__ import annotations
@@ -64,6 +70,15 @@ DOC_FACTS = f"""
 :globex a :Company ; :cname "Globex" .
 """
 
+# The non-strict resolver's default collection, and an untyped document in
+# it (review of #199: without it a read of every store dropped such data).
+DEFAULT_COLLECTION = "D191"
+UNTYPED_DOCS = [{"_key": "zeta", "_uri": EX + "zeta", "label": "Zeta", "phone": "555-0100"}]
+UNTYPED_FACTS = f"""
+@prefix : <{EX}> .
+:zeta :label "Zeta" ; :phone "555-0100" .
+"""
+
 _HEAD = """
 @prefix : <http://ex.org/> .
 @prefix owl: <http://www.w3.org/2002/07/owl#> .
@@ -76,6 +91,14 @@ _HEAD = """
 ONTOLOGIES = {
     # The issue's mapping: only :cname is declared.
     "undeclared": _HEAD,
+    # Declared without a domain: every store is read, and a document's
+    # attributes are triples a variable predicate reads.
+    "no_domain": _HEAD
+    + """
+:email a owl:DatatypeProperty .
+:label a owl:DatatypeProperty .
+:phone a owl:DatatypeProperty .
+""",
     # Declared domains decide the store without reading both.
     "declared": _HEAD
     + """
@@ -179,6 +202,45 @@ OBJECT_JOIN_QUERIES = [
 ]
 
 
+# The untyped document, reached as a constant, a first-seen subject and a
+# VALUES row; its variable predicate needs its attributes declared.
+UNTYPED_QUERIES = [
+    (pytest.param("SELECT ?v WHERE { :zeta :phone ?v }", id="untyped_constant"), sorted(ONTOLOGIES)),
+    (pytest.param("SELECT ?x ?l WHERE { ?x :label ?l }", id="untyped_first_seen"), sorted(ONTOLOGIES)),
+    (
+        pytest.param("SELECT ?c ?l WHERE { VALUES ?c { :zeta :acme } ?c :label ?l }", id="untyped_values"),
+        sorted(ONTOLOGIES),
+    ),
+    (
+        pytest.param(
+            "SELECT ?p ?o WHERE { :zeta ?p ?o FILTER(?p != rdf:type) }", id="untyped_variable_predicate"
+        ),
+        ["no_domain"],
+    ),
+]
+
+
+def make_resolver(ontology: str, strict: bool) -> SchemaResolver:
+    """The mapping's resolver: the library's (non-strict, default collection
+    :data:`DEFAULT_COLLECTION`) or the service's strict one."""
+    resolver = SchemaResolver.from_turtle(ONTOLOGIES[ontology], default_collection=DEFAULT_COLLECTION)
+    resolver.strict_subject_resolution = strict
+    return resolver
+
+
+def collections() -> dict[str, list[dict[str, Any]]]:
+    """The stored rows and documents. The default collection is there for
+    both resolvers: data on the non-strict one, which the strict one must
+    not read."""
+    return {"T191": _rows(), "C191": DOCS, DEFAULT_COLLECTION: UNTYPED_DOCS}
+
+
+def facts(strict: bool) -> str:
+    """The RDF the mapping exposes: the untyped document only without strict
+    subject resolution."""
+    return TRIPLES + DOC_FACTS + ("" if strict else UNTYPED_FACTS)
+
+
 def _rows() -> list[dict[str, Any]]:
     """One triples-table row per triple: IRIs in ``object_uri``, literals in ``object_value``."""
     rows: list[dict[str, Any]] = []
@@ -193,13 +255,22 @@ def _rows() -> list[dict[str, Any]]:
 
 
 def cases() -> list[Any]:
-    """Every (query, mapping) pair: :data:`QUERIES` on both mappings,
-    :data:`OBJECT_JOIN_QUERIES` on the undeclared one."""
-    return [
-        pytest.param(q.values[0], ontology, id=f"{q.id}-{ontology}")
-        for q in QUERIES
-        for ontology in sorted(ONTOLOGIES)
-    ] + [pytest.param(q.values[0], "undeclared", id=f"{q.id}-undeclared") for q in OBJECT_JOIN_QUERIES]
+    """Every (query, mapping) pair: :data:`QUERIES` on every mapping,
+    :data:`OBJECT_JOIN_QUERIES` on the undeclared one, :data:`UNTYPED_QUERIES`
+    on the mappings each names."""
+    return (
+        [
+            pytest.param(q.values[0], ontology, id=f"{q.id}-{ontology}")
+            for q in QUERIES
+            for ontology in sorted(ONTOLOGIES)
+        ]
+        + [pytest.param(q.values[0], "undeclared", id=f"{q.id}-undeclared") for q in OBJECT_JOIN_QUERIES]
+        + [
+            pytest.param(q.values[0], ontology, id=f"{q.id}-{ontology}")
+            for q, ontologies in UNTYPED_QUERIES
+            for ontology in ontologies
+        ]
+    )
 
 
 @pytest.mark.cross
@@ -209,15 +280,10 @@ def test_an_unplaced_subject_in_a_mixed_mapping_matches_oxigraph(
     where: str, ontology: str, strict: bool
 ) -> None:
     query = PREFIX + where
-    resolver = SchemaResolver.from_turtle(ONTOLOGIES[ontology])
-    resolver.strict_subject_resolution = strict
 
-    result = translate(query, resolver=resolver)
-    actual = [
-        drop_null_bindings(r)
-        for r in run_aql_subset(result.aql, result.bind_vars, {"T191": _rows(), "C191": DOCS})
-    ]
+    result = translate(query, resolver=make_resolver(ontology, strict))
+    actual = [drop_null_bindings(r) for r in run_aql_subset(result.aql, result.bind_vars, collections())]
 
-    store = load_store_from_string(TRIPLES + DOC_FACTS)
+    store = load_store_from_string(facts(strict))
     expected = [normalize_oxi_row(r) for r in oxi_bindings(store, query)]
     assert_bindings_equal(expected, actual)
