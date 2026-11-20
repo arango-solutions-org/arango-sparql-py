@@ -145,28 +145,13 @@ def test_a_same_subject_optional_on_a_triples_table_reads_the_table() -> None:
     assert sorted((r["s"], r["x"]) for r in rows) == [(f"{_EX}a", f"{_EX}b"), (f"{_EX}b", None)]
 
 
-def test_a_shared_optional_binding_on_a_triples_subject_inside_minus_is_refused() -> None:
-    # Inside MINUS the OPTIONAL stays inline (conditional-add, SPARQL
-    # §18.2.5.2), whose document attribute read cannot see a triples row.
-    query = (
-        f"SELECT ?s WHERE {{ ?s a <{_EX}Person> ; <{_EX}knows> ?o "
-        f"MINUS {{ ?t a <{_EX}Person> OPTIONAL {{ ?t <{_EX}knows> ?o }} }} }}"
-    )
-
-    with pytest.raises(UnsupportedSparqlError, match="inside MINUS when the binding is shared"):
-        translate(query, resolver=SchemaResolver.from_turtle(_RPT_OWL))
-
-
 @pytest.mark.parametrize(
     "where",
     [
-        # Inside MINUS the probe's OPTIONAL on the shared ?s re-binds the outer ?o:
-        # it overwrote it instead of comparing, and answered [] (pyoxigraph: 2 rows).
-        pytest.param(
-            f"?s a <{_EX}Person> . ?u a <{_EX}Person> ; <{_EX}knows> ?o "
-            f"MINUS {{ ?s a <{_EX}Person> OPTIONAL {{ ?s <{_EX}knows> ?o }} }}",
-            id="minus_shared",
-        ),
+        # Inside MINUS an OPTIONAL that re-binds the outer ?o overwrote it, then
+        # was refused. The right side now binds its own ?o and compares it
+        # (#194): tested against pyoxigraph in
+        # tests/cross/test_optional_crosssubject_cross.py (``minus_*_rebind``).
         # Outside MINUS the same overwrite replaced ?o with the email.
         pytest.param(
             f"?s a <{_EX}Person> ; <{_EX}knows> ?o . OPTIONAL {{ ?o <{_EX}email> ?o }}", id="rebind"

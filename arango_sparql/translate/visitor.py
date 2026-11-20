@@ -48,7 +48,7 @@ from .optional_crosssubject import (
     emit_rpt_cross_subject_optional,
     is_rpt_cross_subject_optional,
 )
-from .optional_subquery import emit_optional_subquery
+from .optional_subquery import emit_optional_subquery, group_scoped_variables
 from .optional_subquery import needs_subquery as needs_optional_subquery
 from .paths import emit_path_triple
 from .predicates import LoopEmitter, LoopPlan, PredicateCall, extract_predicate_calls, resolve_call
@@ -798,11 +798,22 @@ class AlgebraVisitor:
     # OPTIONAL — LeftJoin(p1=required, p2=optional, expr=<inner FILTER>)
     # ------------------------------------------------------------------
     def visit_LeftJoin(self, node: Any) -> Any:
+        scope_before = set(self.state.var_to_expr)
         # Visit the required side first so every alias / variable that
         # the optional side references is in scope.
         self.visit(node.p1)
 
         p2 = node.p2
+
+        # A variable bound around this OPTIONAL's group, but not by its
+        # required side, is not shared with the optional side: the group is
+        # evaluated on its own (SPARQL 1.1 §18.5), so the optional side
+        # binds it afresh and is joined to the outer value by compatibility
+        # (#194). Only the subquery emitter can express that.
+        loose = group_scoped_variables(self, scope_before, node)
+        if loose:
+            emit_optional_subquery(self, node, loose=loose)
+            return
 
         # RPT-native cross-subject OPTIONAL (ADR-0002 Problem 1, Option
         # A): the OPTIONAL subject is bound only as a *value* by the

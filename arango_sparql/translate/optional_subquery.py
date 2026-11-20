@@ -44,8 +44,59 @@ if TYPE_CHECKING:
 _INTERNAL_PREFIXES = ("_path_", "_bn_")
 
 
-def emit_optional_subquery(visitor: AlgebraVisitor, node: Any) -> None:
-    """Emit ``LeftJoin(p1, p2, expr)`` with ``p1`` already visited."""
+def group_scoped_variables(visitor: AlgebraVisitor, scope_before: set[str], node: Any) -> set[str]:
+    """Variables of ``LeftJoin(p1, p2)`` that its optional side must bind on its own.
+
+    The left join is one group, evaluated on its own and then joined with
+    the solutions around it (SPARQL 1.1 §18.5, §18.3). The translator
+    visits the group in sequence after them, so ``p2`` sees every variable
+    already in scope. That substitution equals the join only for a
+    variable the group binds in every solution. A variable bound before the
+    group (*scope_before*) that ``p1`` does not bind but ``p2`` does
+    (``{ ?s :knows ?x OPTIONAL { ?s :name ?n OPTIONAL { ?x :email ?m } } }``)
+    can be left unbound by the group, so the group's ``?x`` has to be
+    found without the outer one and compared after (#194).
+
+    A variable an EXISTS substitutes is a constant throughout its pattern
+    (§18.6), so it stays shared. A MINUS's right side is evaluated on its
+    own too (§18.5), so the rule holds inside its probe, except where the
+    probe's inline conditional add already applies it: an optional side
+    whose every subject is a document the required side opened reads one
+    value per row and tests it against the outer one
+    (``minus_exists.yml``, ``tests/cross/test_minus_optional_cross.py``).
+    """
+    if not scope_before:
+        return set()
+    if visitor.state.optional_rebind_sink is not None and _inline_conditional_add(visitor, node.p2):
+        return set()
+    loose = (scope_before & bound_variables(node.p2)) - bound_variables(node.p1) - visitor.state.substituted
+    return {name for name in loose if not name.startswith(_INTERNAL_PREFIXES)}
+
+
+def _inline_conditional_add(visitor: AlgebraVisitor, p2: Any) -> bool:
+    """Whether a MINUS probe's inline emitter lowers *p2* itself (documents it opened).
+
+    Not a triples-table subject: the inline reads are document attribute
+    paths, which it refuses on a triples row (#189).
+    """
+    if getattr(p2, "name", None) != "BGP":
+        return False
+    triples = getattr(p2, "triples", None) or []
+    return bool(triples) and all(
+        isinstance(s, Variable)
+        and str(s) in visitor.state.var_to_doc_alias
+        and str(s) not in visitor.state.var_to_rpt_class
+        for s, _p, _o in triples
+    )
+
+
+def emit_optional_subquery(visitor: AlgebraVisitor, node: Any, loose: set[str] | None = None) -> None:
+    """Emit ``LeftJoin(p1, p2, expr)`` with ``p1`` already visited.
+
+    *loose* names outer variables the body must bind on its own and join
+    by compatibility (:func:`group_scoped_variables`).
+    """
+    loose = loose or set()
     outer = set(visitor.state.var_to_expr)
     child = _spawn_child(visitor)
     # The body is evaluated on its own, then left-joined (SPARQL 1.1 §18.5):
@@ -55,12 +106,18 @@ def emit_optional_subquery(visitor: AlgebraVisitor, node: Any) -> None:
     # ``OPTIONAL { ?p :age ?a BIND(CONCAT(?n, "!") AS ?v) }`` bound ``?v``).
     # The OPTIONAL's own condition (``expr``, its top-level FILTER) is the
     # left join's, evaluated on the joined row, so it sees them all.
-    hidden = _hide_unshared(child, outer - bound_variables(node.p2) - visitor.state.substituted)
+    hidden = _hide_unshared(child, ((outer - bound_variables(node.p2)) | loose) - visitor.state.substituted)
     child.state.hidden_outer = {**visitor.state.hidden_outer, **hidden}
     child.visit(node.p2)
+    # A loose variable the body bound is the group's own (its condition
+    # below reads that value too); it is compared with the outer one after
+    # the padding, below.
+    rejoined = [name for name in sorted(loose) if name in hidden and name in child.state.var_to_expr]
     expr = getattr(node, "expr", None)
     if expr is not None and getattr(expr, "name", "") != "TrueFilter":
-        child.state.var_to_expr.update(hidden)
+        child.state.var_to_expr.update(
+            {name: value for name, value in hidden.items() if name not in rejoined}
+        )
         child.builder.filter_raw(child._translate_expr(expr))
     if not child.builder.has_for_clause():
         # A body that binds nothing from a collection (``OPTIONAL { BIND(…) }``):
@@ -80,11 +137,12 @@ def emit_optional_subquery(visitor: AlgebraVisitor, node: Any) -> None:
         name
         for name in child.state.var_to_expr
         if name in outer
+        and name not in loose
         and name in visitor.state.maybe_unbound
         and child.state.var_to_expr[name] != visitor.state.var_to_expr[name]
         and not name.startswith(_INTERNAL_PREFIXES)
     ]
-    projected = new_vars + filled
+    projected = new_vars + filled + rejoined
     if projected:
         child.builder.return_object([(name, child.state.var_to_expr[name]) for name in projected])
     else:
@@ -107,6 +165,25 @@ def emit_optional_subquery(visitor: AlgebraVisitor, node: Any) -> None:
         visitor.state.var_to_expr[name] = (
             f"NOT_NULL({visitor.state.var_to_expr[name]}, {attribute_ref(row_alias, name)})"
         )
+    for name in rejoined:
+        # The group's solution (the padded row included) joins the
+        # surrounding one by compatibility (SPARQL 1.1 §18.3): either side
+        # unbound, or both equal. It is tested here, after the padding, as
+        # the group was evaluated without the outer value (#194). A row that
+        # fails it is not a solution of the enclosing join; inside an
+        # enclosing OPTIONAL's body, that body then pads.
+        outer_expr = visitor.state.var_to_expr[name]
+        inner_expr = attribute_ref(row_alias, name)
+        visitor.builder.filter_raw(
+            f"({outer_expr} == null || {inner_expr} == null || {inner_expr} == {outer_expr})"
+        )
+        if visitor.state.optional_rebind_sink is not None:
+            # Inside a MINUS probe the variable is shared only where both
+            # sides bind it: the probe's disjoint-domain guard (§8.3.4)
+            # reads it from the sink, as for an inline conditional add.
+            visitor.state.optional_rebind_sink.append((name, inner_expr, outer_expr))
+        if name in visitor.state.maybe_unbound:
+            visitor.state.var_to_expr[name] = f"NOT_NULL({outer_expr}, {inner_expr})"
 
 
 def bound_variables(node: Any) -> set[str]:
