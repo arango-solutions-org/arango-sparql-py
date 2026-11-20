@@ -1255,7 +1255,7 @@ _CASES: list[tuple[str, Store, str, str | None]] = [
         "ng_graph_var_reverse",
         NG_EDGES,
         "SELECT ?gg ?x WHERE { GRAPH ?gg { ?y a :Person . ?x :knows ?y } }",
-        "#106",
+        None,
     ),
     (
         "graph_outside_untyped_walk",
@@ -1529,13 +1529,13 @@ _CASES: list[tuple[str, Store, str, str | None]] = [
         "graph_var_type",
         NAMED_GRAPHS,
         "SELECT ?s ?gr WHERE { ?s :name ?n . GRAPH ?gr { ?s a :Person } }",
-        "#106",
+        None,
     ),
     (
         "graph_exists_inside_graph",
         NAMED_GRAPHS,
         "SELECT ?s WHERE { GRAPH :g { ?s :age ?a FILTER EXISTS { ?s :name ?n } } }",
-        "#106",
+        None,
     ),
 ]
 

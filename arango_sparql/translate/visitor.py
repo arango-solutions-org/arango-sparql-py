@@ -237,6 +237,20 @@ class _BindingState:
     *default-graph* case handled per
     :attr:`SchemaResolver.default_graph_includes_named`."""
 
+    graph_vars_unbound_on_entry: set[str] = field(default_factory=set)
+    """The ``GRAPH ?g`` variables of the active scopes that were unbound
+    when their GRAPH group began. Such a ``?g`` is the group's own: one an
+    OPTIONAL in the group binds first must not then be joined as if an
+    earlier OPTIONAL outside had left it unbound (review of #198), since
+    the group is evaluated once per named graph."""
+
+    graph_vars_open_on_entry: set[str] = field(default_factory=set)
+    """The ``GRAPH ?g`` variables of the active scopes that were bound but
+    could be unbound when their GRAPH group began (an OPTIONAL or VALUES
+    ``UNDEF`` outside it). A required pattern of the group may fill one
+    (SPARQL 1.1 §18.3); an OPTIONAL of the group before that is refused
+    (recheck of #198)."""
+
     optional_rebind_sink: list[tuple[str, str, str]] | None = None
     """Probe-mode collector for ``OPTIONAL`` triples that re-bind an
     already-bound variable. ``None`` outside a MINUS probe (the default),
@@ -801,7 +815,20 @@ class AlgebraVisitor:
         # Visit the required side first so every alias / variable that
         # the optional side references is in scope.
         self.visit(node.p1)
+        # A GRAPH variable that could be unbound when its group began (an
+        # OPTIONAL or VALUES UNDEF outside the GRAPH), and that no required
+        # pattern of the group has bound yet: on a row where it is unbound
+        # the group is evaluated once per named graph, so this OPTIONAL would
+        # have to be matched in each graph and the rest of the group in the
+        # same one. Reading it against "any graph" instead mixed graphs
+        # (recheck of #198); refuse.
+        for name in sorted(self.state.graph_vars_open_on_entry):
+            if name in self.state.maybe_unbound:
+                self._refuse_graph_var_without_documents(name)
+        self._emit_optional_side(node)
 
+    def _emit_optional_side(self, node: Any) -> None:
+        """Emit the OPTIONAL side of ``LeftJoin(p1, p2, expr)``, ``p1`` visited."""
         p2 = node.p2
 
         # RPT-native cross-subject OPTIONAL (ADR-0002 Problem 1, Option
@@ -1671,8 +1698,28 @@ class AlgebraVisitor:
                 homes[key] = (resolved.collection, resolved)
         self.state.outer_subject_homes = homes
         self.state.var_to_doc_alias, self.state.const_subject_alias = {}, {}
+        graph_var = str(term) if isinstance(term, Variable) else None
+        bound_before = graph_var is not None and graph_var in self.state.var_to_expr
+        outer_unbound_on_entry = self.state.graph_vars_unbound_on_entry
+        if graph_var is not None and not bound_before:
+            self.state.graph_vars_unbound_on_entry = outer_unbound_on_entry | {graph_var}
+        outer_open_on_entry = self.state.graph_vars_open_on_entry
+        if graph_var is not None and bound_before and graph_var in self.state.maybe_unbound:
+            self.state.graph_vars_open_on_entry = outer_open_on_entry | {graph_var}
         try:
             self.visit(node.p)
+            if (
+                graph_var is not None
+                and not bound_before
+                and (graph_var not in self.state.var_to_expr or graph_var in self.state.maybe_unbound)
+            ):
+                # The group is evaluated once per named graph (SPARQL 1.1
+                # §18.6): a graph where an OPTIONAL body has no match still
+                # gives a row, with ?g bound to it. ?g comes from the
+                # documents a required pattern reads, and the translation
+                # has no list of the named graphs to bind it from otherwise,
+                # so it answered with ?g unbound or with the wrong rows (#195).
+                self._refuse_graph_var_without_documents(graph_var)
         finally:
             # Pop in finally so an exception in the inner pattern
             # doesn't leave the scope stack corrupted for any
@@ -1680,6 +1727,27 @@ class AlgebraVisitor:
             self.state.graph_scope.pop()
             self.state.var_to_doc_alias, self.state.const_subject_alias = outer_docs, outer_consts
             self.state.outer_subject_homes = outer_homes
+            self.state.graph_vars_unbound_on_entry = outer_unbound_on_entry
+            self.state.graph_vars_open_on_entry = outer_open_on_entry
+
+    @staticmethod
+    def _refuse_graph_var_without_documents(graph_var: str) -> None:
+        """Refuse a ``GRAPH ?g`` group no required pattern of its own binds ?g in.
+
+        SPARQL evaluates the group once per named graph (§18.6), so a graph
+        where its OPTIONAL has no match still gives a row with ?g bound. The
+        translation binds ?g from the documents a pattern reads and has no
+        list of the named graphs, so it would leave ?g unbound or lose rows:
+        a group of only OPTIONAL, FILTER, BIND or a nested ``GRAPH <iri>``,
+        or one whose OPTIONAL binds ?g before a required pattern does
+        (review of #198).
+        """
+        raise UnsupportedSparqlError(
+            f"GRAPH ?{graph_var} needs a required pattern of its own group, before any OPTIONAL "
+            f"in it, that reads ?{graph_var}'s documents (a triple pattern or a sub-SELECT); "
+            f"otherwise the group is evaluated once per named graph, which needs the list of "
+            f"named graphs and is not supported"
+        )
 
     # ------------------------------------------------------------------
     # ToMultiSet — SPARQL sub-SELECT and VALUES. Delegated to
@@ -2215,7 +2283,8 @@ class AlgebraVisitor:
         binding anything; ``None`` when there is none to apply.
 
         As :meth:`_apply_graph_scope`, except that a GRAPH variable not bound
-        yet is left free (whatever document binds it applies the scope).
+        yet is not bound here (whatever document binds it applies the scope);
+        the document must still be in some named graph (#195).
         """
         lhs = attribute_ref(alias, self.resolver.graph_field)
         if not self.state.graph_scope:
@@ -2224,7 +2293,11 @@ class AlgebraVisitor:
         if isinstance(graph_term, URIRef):
             return f"{lhs} == {self.builder.bind(str(graph_term), hint='graph')}"
         existing = self.state.var_to_expr.get(str(graph_term))
-        return None if existing is None else f"{lhs} == {existing}"
+        if existing is None:
+            return f"{lhs} != null"
+        if str(graph_term) in self.state.maybe_unbound:
+            return f"{lhs} != null && ({existing} == null || {lhs} == {existing})"
+        return f"{lhs} == {existing}"
 
     def _refuse_tenant_scoped_triples(self, collection: str) -> None:
         """Refuse reading a triples table a tenant-scoped RPT class uses.
@@ -2275,6 +2348,15 @@ class AlgebraVisitor:
            the canonical binding and we record
            ``var_to_expr[?g] = alias.<graph_field>`` for downstream
            SELECT / FILTER / additional FORs to reuse.
+
+           ``GRAPH ?g`` ranges over the *named* graphs only (SPARQL 1.1
+           §13.3): a document whose graph field is null is in the default
+           graph, so it is filtered out (``alias.<graph_field> != null``).
+           Without that FILTER the default graph's documents matched with
+           ``?g`` unbound (#195). A ``?g`` an earlier OPTIONAL or VALUES
+           ``UNDEF`` can leave unbound joins any named graph and takes it
+           (SPARQL 1.1 §18.3), as a VALUES join does
+           (:func:`.subselect._bind_outer_scope`).
         """
         graph_field = self.resolver.graph_field
         lhs = attribute_ref(alias, graph_field)
@@ -2293,15 +2375,29 @@ class AlgebraVisitor:
             self.builder.filter_eq(lhs, bind)
             return
 
-        # graph_term is a Variable (validated in visit_Graph).
+        # graph_term is a Variable (validated in visit_Graph). Only a named
+        # graph's documents are in scope (#195): ``!= null`` where nothing
+        # else excludes the default graph's.
         var_name = str(graph_term)
         existing = self.state.var_to_expr.get(var_name)
+        if existing is not None and var_name in self.state.maybe_unbound:
+            if var_name in self.state.graph_vars_unbound_on_entry:
+                # An OPTIONAL of this GRAPH group bound ?g first.
+                self._refuse_graph_var_without_documents(var_name)
+            # Unbound on this row (an OPTIONAL or VALUES UNDEF outside the
+            # GRAPH): compatible with any named graph, and takes it.
+            self.builder.filter_raw(f"{lhs} != null")
+            self.builder.filter_raw(f"({existing} == null || {lhs} == {existing})")
+            self.state.var_to_expr[var_name] = f"NOT_NULL({existing}, {lhs})"
+            self.state.maybe_unbound.discard(var_name)
+            return
         if existing is None:
             # First FOR inside this scope: this alias's graph_field
             # is the canonical binding for ?g. Downstream sibling FORs
             # in the same scope will fall into the ``existing`` branch
             # and emit an equality FILTER, which is how SPARQL's
             # implicit-join semantics fire for the graph variable.
+            self.builder.filter_raw(f"{lhs} != null")
             self.state.var_to_expr[var_name] = lhs
         else:
             # ?g is already bound — either by a prior FOR in this

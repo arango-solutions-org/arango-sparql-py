@@ -48,7 +48,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from rdflib import Literal, URIRef
+from rdflib import Literal, URIRef, Variable
 
 from ..errors import UnsupportedSparqlError
 from .builder import attribute_ref
@@ -167,6 +167,7 @@ def _emit_subselect(
     )
     # Shared sigil counters (see _BindingState.counters).
     child_visitor.state.counters = visitor.state.counters
+    graph_column = _inherit_graph_scope(visitor, child_visitor, inner)
     child_visitor.visit(inner)
 
     inner_aql = visitor.builder.absorb_child(child_builder)
@@ -182,6 +183,89 @@ def _emit_subselect(
         [str(v) for v in inner_pv],
         unbound={str(v) for v in inner_pv if str(v) in child_visitor.state.maybe_unbound},
     )
+    if graph_column is not None:
+        # The graph each row came from is the GRAPH variable's value (#195).
+        graph_var = str(visitor.state.graph_scope[-1])
+        if (
+            graph_column not in child_visitor.state.var_to_expr
+            or graph_column in child_visitor.state.maybe_unbound
+        ):
+            raise UnsupportedSparqlError(
+                f"a sub-SELECT inside GRAPH ?{graph_var} needs a pattern outside OPTIONAL that reads the "
+                f"graph's documents"
+            )
+        _bind_outer_scope(visitor, row_alias, [graph_var], unbound=set(), fields={graph_var: graph_column})
+
+
+def _inherit_graph_scope(visitor: AlgebraVisitor, child_visitor: AlgebraVisitor, inner: Any) -> str | None:
+    """Match a sub-SELECT inside ``GRAPH`` in that graph (#195).
+
+    A sub-SELECT under ``GRAPH <g>`` / ``GRAPH ?g`` is evaluated with the
+    scope's graph as its active graph (SPARQL 1.1 §18.6); it read every
+    graph's documents, the default graph's among them. Under ``GRAPH <g>``
+    the child takes the scope as is.
+
+    Under ``GRAPH ?g`` the child's scope is a fresh internal variable
+    (``_graph_<n>``), so a ``?g`` of the sub-select's own (W3C
+    ``subquery/sq02``, ``sq03``) stays its own:
+
+    * ``?g`` bound by an earlier pattern of the group (and never unbound
+      there): the sub-query sits after that pattern's FOR, so it is
+      correlated with the outer expression, and its LIMIT or GROUP BY run
+      per graph as SPARQL evaluates them.
+    * Otherwise the child binds the graph from the documents it reads and
+      projects it as one more column, which the caller joins with ``?g``
+      (:func:`_bind_outer_scope`). A DISTINCT then keeps one row per graph,
+      as the per-graph evaluation does; a LIMIT / OFFSET or an aggregate
+      would run over every graph at once instead of per graph, so those are
+      refused.
+
+    Returns the projected column's name in the second case, else ``None``.
+    """
+    scope = visitor.state.graph_scope
+    if not scope:
+        return None
+    term = scope[-1]
+    if not isinstance(term, Variable):
+        child_visitor.state.graph_scope = list(scope)
+        return None
+    name = str(term)
+    # Its own sigil, not ``_path_``: a UNION arm carries a variable it binds
+    # out to the row, and it skips ``_path_`` intermediates (W3C-style
+    # ``{ SELECT … WHERE { { … } UNION { … } } }`` lost the column).
+    visitor.state.counters.path += 1
+    column = f"_graph_{visitor.state.counters.path}"
+    child_visitor.state.graph_scope = [*scope[:-1], Variable(column)]
+    expr = visitor.state.var_to_expr.get(name)
+    if expr is not None and name not in visitor.state.maybe_unbound:
+        child_visitor.state.var_to_expr[column] = expr
+        return None
+    if expr is not None and name in visitor.state.graph_vars_unbound_on_entry:
+        # An OPTIONAL of this GRAPH group bound ?g first (review of #198).
+        visitor._refuse_graph_var_without_documents(name)  # noqa: SLF001 - the parent visitor's own check
+    if _has_whole_result_modifier(inner):
+        raise UnsupportedSparqlError(
+            f"a sub-SELECT with LIMIT, OFFSET or an aggregate inside GRAPH ?{name}, before a pattern of "
+            f"the GRAPH group binds ?{name}, is not supported (it is evaluated once per named graph); "
+            f"put a triple pattern before the sub-SELECT"
+        )
+    child_visitor.state.graph_vars_unbound_on_entry = {
+        *child_visitor.state.graph_vars_unbound_on_entry,
+        column,
+    }
+    child_visitor.explicit_projection = [*(child_visitor.explicit_projection or []), Variable(column)]
+    return column
+
+
+def _has_whole_result_modifier(node: Any) -> bool:
+    """Whether the sub-select applies LIMIT / OFFSET or an aggregate to its
+    whole result (its own nested sub-selects decide for themselves)."""
+    if getattr(node, "name", None) in ("Slice", "AggregateJoin", "Group"):
+        return True
+    if getattr(node, "name", None) == "ToMultiSet":
+        return False
+    children = node.values() if isinstance(node, dict) else ()
+    return any(_has_whole_result_modifier(c) for c in children if hasattr(c, "name"))
 
 
 def _emit_values(visitor: AlgebraVisitor, values_node: Any) -> None:
@@ -334,6 +418,7 @@ def _bind_outer_scope(
     var_names: list[str],
     *,
     unbound: set[str],
+    fields: dict[str, str] | None = None,
 ) -> None:
     """Bind ``<row>.<var>`` into the outer ``var_to_expr`` for each var.
 
@@ -352,9 +437,12 @@ def _bind_outer_scope(
     tested for null before the equality, and the variable then takes
     whichever side is bound: W3C ``bindings/values4``, ``values5``,
     ``values7`` and ``values8``.
+
+    ``fields`` names the row field a variable is read from when it is not
+    the variable's own name (a sub-select's graph column, #195).
     """
     for var_name in var_names:
-        new_expr = attribute_ref(row_alias, var_name)
+        new_expr = attribute_ref(row_alias, (fields or {}).get(var_name, var_name))
         existing = visitor.state.var_to_expr.get(var_name)
         if existing is None:
             visitor.state.var_to_expr[var_name] = new_expr
