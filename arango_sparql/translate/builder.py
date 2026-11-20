@@ -14,6 +14,7 @@ visitor methods are ported via the SPARQL→AQL skill recipe.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -257,6 +258,16 @@ def attribute_path_ref(alias: str, path: tuple[str, ...]) -> str:
 _MISSING = object()
 
 
+def _union_clause(alias: str, arm_aqls: list[str], op: str) -> str:
+    """``FOR <alias> IN <op>((<arm1>), …)``, each arm's lines indented two
+    spaces inside its own ``(`` / ``)`` lines (EXPLAIN-readable, and the
+    layout the cross-test interpreter reads)."""
+    arm_blocks = ",\n".join(
+        "(\n" + "\n".join("  " + line for line in arm.splitlines()) + "\n)" for arm in arm_aqls
+    )
+    return f"FOR {alias} IN {op}(\n{arm_blocks}\n)"
+
+
 class _ClauseKind(Enum):
     FOR = 1
     FILTER = 2
@@ -433,6 +444,48 @@ class AqlQueryBuilder:
         self._body_clauses.append(_Clause(_ClauseKind.FOR, text))
         self._scanned_aliases.append(alias)
         return self
+
+    def split_scan_on_value(self, alias: str, value: str, match: Callable[[str], str]) -> bool:
+        """Join the scan ``FOR <alias> IN @@coll`` to *value*, which can be null.
+
+        An unbound variable is compatible with any value (SPARQL 1.1 §18.3),
+        so where *value* is null every document joins, and where it is not,
+        only those passing ``match(<doc alias>)``. Written as one FILTER,
+        ``(value == null || match)``, the ``OR`` hides the match from the
+        optimizer and every row scans the collection, bound or not (review
+        of #196: 0.07 s became 4.8 s at 4,000 documents). Instead the scan
+        becomes two sub-queries, each written so ArangoDB plans it on its
+        own: an index lookup that runs only where *value* is bound, and a
+        scan that runs only where it is null (the loop-invariant guard is
+        evaluated before the loop)::
+
+            FOR <alias> IN UNION(
+              (FOR hit IN @@coll FILTER value != null && match(hit) RETURN hit),
+              (FOR any IN @@coll FILTER value == null RETURN any))
+
+        (one clause per line, as :meth:`for_union` writes its arms).
+
+        Returns ``False``, changing nothing, when *alias* is not a plain
+        collection scan of this builder (a traversal vertex, a union row,
+        a view search, a sharded family): the caller then filters instead.
+        """
+        pattern = re.compile(rf"FOR {re.escape(alias)} IN (@@\w+)")
+        for index, clause in enumerate(self._body_clauses):
+            if clause.kind != _ClauseKind.FOR:
+                continue
+            found = pattern.fullmatch(clause.text)
+            if found is None:
+                continue
+            collection = found.group(1)
+            hit = self.fresh_alias()
+            free = self.fresh_alias()
+            arms = [
+                f"FOR {hit} IN {collection}\nFILTER ({value} != null && {match(hit)})\nRETURN {hit}",
+                f"FOR {free} IN {collection}\nFILTER {value} == null\nRETURN {free}",
+            ]
+            self._body_clauses[index] = _Clause(_ClauseKind.FOR, _union_clause(alias, arms, "UNION"))
+            return True
+        return False
 
     def sort_here(self, expression: str, *, descending: bool) -> AqlQueryBuilder:
         """Emit ``SORT <expression>`` at this point of the body, unlike
@@ -825,16 +878,8 @@ class AqlQueryBuilder:
                 raise AqlEmitError(
                     f"for_union arm {i} is empty; every UNION arm must be a non-empty AQL block"
                 )
-        arm_blocks = ",\n".join(
-            "(\n" + "\n".join("  " + line for line in arm.splitlines()) + "\n)" for arm in arm_aqls
-        )
         op = "UNION_DISTINCT" if distinct else "UNION"
-        self._body_clauses.append(
-            _Clause(
-                _ClauseKind.FOR,
-                f"FOR {row_alias} IN {op}(\n{arm_blocks}\n)",
-            )
-        )
+        self._body_clauses.append(_Clause(_ClauseKind.FOR, _union_clause(row_alias, arm_aqls, op)))
         if scans_documents:
             self._scanned_aliases.append(row_alias)
         return self

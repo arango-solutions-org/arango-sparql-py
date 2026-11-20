@@ -379,6 +379,7 @@ def _spawn_child(visitor: AlgebraVisitor) -> AlgebraVisitor:
     # OPTIONAL-body scope (#125): what an enclosing body hid, what an
     # enclosing EXISTS substitutes.
     cv.state.hidden_outer = dict(visitor.state.hidden_outer)
+    cv.state.hidden_outer_unbound = set(visitor.state.hidden_outer_unbound)
     cv.state.substituted = set(visitor.state.substituted)
     cv.state.outer_subject_homes = dict(visitor.state.outer_subject_homes)
     # Where the outer documents are, so a GRAPH inside the child can re-read

@@ -272,16 +272,51 @@ ATTRIBUTE_CASES = [
     ),
 ]
 
+#: Review of #196, on every mapping: an EXISTS in an OPTIONAL's FILTER, a
+#: MINUS sharing one bound and one possibly-unbound variable (§8.3.4: the
+#: bound one gives the domains their overlap), and an OPTIONAL that binds a
+#: variable an earlier OPTIONAL can leave unbound.
+SCOPE_CASES = [
+    pytest.param(
+        "SELECT ?s ?x ?n WHERE { ?s a :Person OPTIONAL { ?s :knows ?x } "
+        "OPTIONAL { ?s :name ?n FILTER EXISTS { ?x :email ?e } } }",
+        id="exists_in_optional_filter",
+    ),
+    pytest.param(
+        "SELECT ?s ?x ?n WHERE { ?s a :Person OPTIONAL { ?s :knows ?x } "
+        "OPTIONAL { ?s :name ?n BIND(1 AS ?one) FILTER EXISTS { ?x :email ?e } } }",
+        id="exists_in_optional_filter_with_bind",
+    ),
+    pytest.param(
+        "SELECT ?s ?x ?n WHERE { ?s a :Person OPTIONAL { ?s :knows ?x } "
+        "OPTIONAL { ?y :name ?n FILTER(?y = ?s) FILTER EXISTS { ?x :email ?e } } }",
+        id="exists_in_optional_filter_other_subject",
+    ),
+    pytest.param(
+        "SELECT ?s ?x WHERE { ?s a :Person OPTIONAL { ?s :knows ?x } MINUS { ?s :name ?n . ?x :email ?m } }",
+        id="minus_one_shared_bound_one_open",
+    ),
+    pytest.param(
+        "SELECT ?s ?x WHERE { ?s a :Person OPTIONAL { ?s :knows ?x } MINUS { ?s :name ?n . ?y :knows ?x } }",
+        id="minus_one_shared_bound_one_open_edge",
+    ),
+    pytest.param(
+        "SELECT ?s ?x WHERE { ?s a :Person OPTIONAL { ?s :knows ?x } OPTIONAL { ?s :email ?x } }",
+        id="optional_binds_an_open_variable",
+    ),
+]
+
 #: A supertype subject (one FOR over a UNION of collections).
 SUPERTYPE_CASES = [
     pytest.param(
         "SELECT ?s ?x WHERE { ?s a :Human OPTIONAL { ?s :knows ?x } ?x a :Agent }",
         id="supertype_required_type",
     ),
+    pytest.param(
+        "SELECT ?s ?x ?n WHERE { ?s a :Human OPTIONAL { ?s :knows ?x } OPTIONAL { ?x a :Agent ; :name ?n } }",
+        id="supertype_optional",
+    ),
 ]
-# ``OPTIONAL { ?x a :Agent ; :name ?n }`` on this mapping runs live only
-# (``tests/integration/test_unbound_join_live.py``): its copy check inside a
-# union sub-query is beyond the interpreter.
 
 
 def _check(ttl: str, docs: dict[str, list[dict[str, Any]]], facts: str, body: str) -> None:
@@ -300,6 +335,14 @@ EDGE_MAPPINGS = [pytest.param(_pg_edge, id="pg_edge"), pytest.param(_lpg, id="lp
 @pytest.mark.parametrize("mapping", EDGE_MAPPINGS)
 @pytest.mark.parametrize("body", SUBJECT_CASES + OBJECT_CASES)
 def test_unbound_variable_joins_any_document(mapping: Any, body: str) -> None:
+    ttl, docs = mapping()
+    _check(ttl, docs, _facts(), body)
+
+
+@pytest.mark.cross
+@pytest.mark.parametrize("mapping", [*EDGE_MAPPINGS, pytest.param(_rpt, id="rpt")])
+@pytest.mark.parametrize("body", SCOPE_CASES)
+def test_unbound_variable_scope_cases(mapping: Any, body: str) -> None:
     ttl, docs = mapping()
     _check(ttl, docs, _facts(), body)
 

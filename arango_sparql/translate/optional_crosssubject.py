@@ -127,7 +127,12 @@ def emit_rpt_cross_subject_optional(visitor: AlgebraVisitor, triple: tuple[Any, 
     # VALUES join does (``_bind_outer_scope``, 4184932).
     subject_open = str(subject) in visitor.state.maybe_unbound
     if subject_open:
-        child.filter_raw(f"({subject_value_expr} == null || {subject_column} == {subject_value_expr})")
+        visitor._emit_unbound_join(
+            subject_value_expr,
+            lambda row: f"{attribute_ref(row, rpt_class.subject_column)} == {subject_value_expr}",
+            alias=triples_alias,
+            builder=child,
+        )
     else:
         child.filter_raw(f"{subject_column} == {subject_value_expr}")
 
@@ -154,7 +159,7 @@ def emit_rpt_cross_subject_optional(visitor: AlgebraVisitor, triple: tuple[Any, 
     for var_name, source in new_bindings:
         if var_name in visitor.state.maybe_unbound and var_name != str(subject):
             existing = visitor.state.var_to_expr[var_name]
-            child.filter_raw(f"({existing} == null || {source} == {existing})")
+            visitor._emit_unbound_join(existing, f"{source} == {existing}", builder=child)
             open_bindings[var_name] = existing
             continue
         if var_name in visitor.state.var_to_expr:

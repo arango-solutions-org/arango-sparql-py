@@ -263,8 +263,22 @@ def _translate_probe(
         child_visitor.state.substituted = visitor.state.substituted | set(child_visitor.state.var_to_expr)
         # Substitution replaces only the variables the row binds; one an
         # OPTIONAL left unbound stays free in the pattern and matches any
-        # value (#190). MINUS keeps its own rule for an unbound shared
-        # variable (the §8.3.4 disjoint-domain guard), so only EXISTS reads it.
+        # value (#190).
+        child_visitor.state.maybe_unbound = set(visitor.state.maybe_unbound) | {
+            # A hidden outer variable the body does not bind again keeps
+            # "can be unbound" too (an EXISTS in a nested group of an
+            # OPTIONAL body; review of #196).
+            name
+            for name in visitor.state.hidden_outer_unbound
+            if name not in visitor.state.var_to_expr
+        }
+    else:
+        # MINUS: a shared variable the outer row leaves unbound is outside
+        # its domain, so it constrains nothing and the inner pattern matches
+        # any value for it; the row is still removed when another shared
+        # variable is bound on both sides (§8.3.4; the guard below). It used
+        # to be joined as a value, matched nothing, and kept the row (review
+        # of #196).
         child_visitor.state.maybe_unbound = set(visitor.state.maybe_unbound)
     # Shared, so names minted inside the probe never collide with the
     # outer scope's ``_path_<n>`` / ``_bn_…`` (see _BindingState.counters).
@@ -278,16 +292,21 @@ def _translate_probe(
     child_visitor.visit(inner_pattern)
 
     sink = child_visitor.state.optional_rebind_sink or []
-    if overlap_var_names is not None and sink:
+    if overlap_var_names is not None:
         soft_vars = {var for var, _, _ in sink}
-        # A shared var bound by a *required* inner triple (not in the
-        # sink) already carries a hard equality FILTER ⇒ overlap is
-        # guaranteed and no guard is needed. Only when every shared var
-        # is optional-bound must we add the §8.3.4 disjoint-domain guard.
-        if not (overlap_var_names - soft_vars):
+        hard_vars = overlap_var_names - soft_vars
+        # A shared var bound by a *required* inner triple (not in the sink)
+        # and certainly bound outside carries a hard equality FILTER, so the
+        # domains overlap and no guard is needed. Otherwise the §8.3.4
+        # disjoint-domain guard: some shared var is bound on both sides —
+        # an optional inner one equal to the outer value, or a required
+        # inner one the outer row binds (one the outer can leave unbound
+        # was joined to any value above).
+        open_hard = hard_vars & visitor.state.maybe_unbound
+        if not (hard_vars - open_hard) and (sink or open_hard):
             terms = [
                 f"({value} != null && {bound} != null && {value} == {bound})" for _, value, bound in sink
-            ]
+            ] + [f"{visitor.state.var_to_expr[name]} != null" for name in sorted(open_hard)]
             overlap = terms[0] if len(terms) == 1 else "(" + " || ".join(terms) + ")"
             child_builder.filter_raw(overlap)
 

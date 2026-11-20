@@ -7,8 +7,7 @@ several collections), an edge's target, an attribute value (single- and
 multi-valued), a triples-table object, and twice in one EXISTS. Before the
 fix the join compared the stored identity with null and dropped the row.
 
-Live because the bug is about what ArangoDB runs; the supertype OPTIONAL
-also runs only here (its copy check is beyond the interpreter). Every query
+Live because the bug is about what ArangoDB runs. Every query
 runs through pyoxigraph on the same facts, and the answers must agree.
 Gated like the rest of the integration suite (``RUN_INTEGRATION=1``).
 """
@@ -126,6 +125,19 @@ def test_unbound_variable_joins_any_document_live(db: Any, load: Any, mapping: M
     _check(db, load(mapping), shapes._facts(), body)
 
 
+@pytest.mark.parametrize(
+    "mapping",
+    [
+        pytest.param(shapes._pg_edge, id="pg_edge"),
+        pytest.param(shapes._lpg, id="lpg"),
+        pytest.param(shapes._rpt, id="rpt"),
+    ],
+)
+@pytest.mark.parametrize("body", shapes.SCOPE_CASES)
+def test_unbound_variable_scope_cases_live(db: Any, load: Any, mapping: Mapping, body: str) -> None:
+    _check(db, load(mapping), shapes._facts(), body)
+
+
 @pytest.mark.parametrize("body", shapes.OBJECT_CASES)
 def test_unbound_variable_joins_any_triples_object_live(db: Any, load: Any, body: str) -> None:
     _check(db, load(shapes._rpt), shapes._facts(), body)
@@ -136,15 +148,6 @@ def test_unbound_variable_joins_any_attribute_value_live(db: Any, load: Any, bod
     _check(db, load(shapes._pg_attr), shapes._facts(knows=False, tags=True), body)
 
 
-@pytest.mark.parametrize(
-    "body",
-    [
-        *shapes.SUPERTYPE_CASES,
-        pytest.param(
-            "SELECT ?s ?x ?n WHERE { ?s a :Human OPTIONAL { ?s :knows ?x } OPTIONAL { ?x a :Agent ; :name ?n } }",
-            id="supertype_optional",
-        ),
-    ],
-)
+@pytest.mark.parametrize("body", shapes.SUPERTYPE_CASES)
 def test_unbound_variable_joins_any_supertype_member_live(db: Any, load: Any, body: str) -> None:
     _check(db, load(shapes._pg_union), shapes._facts(types=False, agent=True), body)

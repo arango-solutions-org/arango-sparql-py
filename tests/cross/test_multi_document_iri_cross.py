@@ -931,6 +931,12 @@ _CASES: list[tuple[str, Store, str, str | None]] = [
             ("bound_elsewhere", "SELECT ?s WHERE { VALUES ?y { 10 } ?s a :Agent ; :salary ?y }"),
             ("exists_elsewhere", "SELECT ?s WHERE { ?s a :Agent FILTER EXISTS { ?s :salary ?y } }"),
             ("not_exists", "SELECT ?s WHERE { ?s a :Agent FILTER NOT EXISTS { ?s :name ?n } }"),
+            # Review of #196: the second OPTIONAL joins ?y, which the first can
+            # leave unbound (§18.3); it was refused as a re-bind.
+            (
+                "optional_joins_an_optional_variable",
+                "SELECT ?s ?y WHERE { ?s a :Agent OPTIONAL { ?s :name ?y } OPTIONAL { ?s :salary ?y } }",
+            ),
         ]
     ],
     *[

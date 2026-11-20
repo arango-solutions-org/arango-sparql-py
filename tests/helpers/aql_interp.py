@@ -783,25 +783,23 @@ def _unique_scalars(
     return _unique([row["_scalar"] for row in rows])
 
 
-def _read_block(
-    lines: list[str], i: int, into: list[str], opener: re.Pattern[str], closer: re.Pattern[str]
-) -> int:
+def _read_block(lines: list[str], i: int, into: list[str], closer: re.Pattern[str]) -> int:
     """Copy the lines of one subquery block into ``into``; return the index of
     its closing line (or ``len(lines)`` when unterminated).
 
-    Depth-aware: a block of the same kind nested inside it — the OPTIONAL
-    ``LET optsub = (…)`` inside a grouped query's ``LET results = (…)``
-    (issue #48) — keeps its own closer instead of ending the outer block.
+    Depth-aware: a block nested inside it — the OPTIONAL ``LET optsub =
+    (…)`` inside a grouped query's ``LET results = (…)`` (issue #48), or a
+    ``FOR … IN UNION(`` whose arms close on ``)`` lines (a join split into an
+    index lookup and a scan, review of #196) — keeps its own closers instead
+    of ending the outer block. Depth is the parenthesis balance of the lines
+    read so far.
     """
     depth = 0
     while i < len(lines):
         line = lines[i]
-        if opener.match(line):
-            depth += 1
-        elif closer.match(line):
-            if depth == 0:
-                return i
-            depth -= 1
+        if depth == 0 and closer.match(line):
+            return i
+        depth += line.count("(") - line.count(")")
         into.append(line)
         i += 1
     return i
@@ -879,7 +877,7 @@ def run_aql_subset(
             # row-count op evaluated per outer row at run time.
             alias = m.group(1)
             inner: list[str] = []
-            i = _read_block(lines, i, inner, _LEN_SUBQUERY_START_RE, _SUBQUERY_END_RE)
+            i = _read_block(lines, i, inner, _SUBQUERY_END_RE)
             if i >= len(lines):  # pragma: no cover - malformed AQL
                 raise AssertionError("unterminated LENGTH(( subquery in AQL")
             i += 1  # skip the closing ``))``
@@ -891,7 +889,7 @@ def run_aql_subset(
         if m := _UNIQUE_SUBQUERY_START_RE.match(line):
             alias = m.group(1)
             unique_inner: list[str] = []
-            i = _read_block(lines, i, unique_inner, _UNIQUE_SUBQUERY_START_RE, _UNIQUE_SUBQUERY_END_RE)
+            i = _read_block(lines, i, unique_inner, _UNIQUE_SUBQUERY_END_RE)
             if i >= len(lines):  # pragma: no cover - malformed AQL
                 raise AssertionError("unterminated UNIQUE(( subquery in AQL")
             closer = _UNIQUE_SUBQUERY_END_RE.match(lines[i])
@@ -912,7 +910,7 @@ def run_aql_subset(
             # alias binds to the resulting list of row dicts.
             alias = m.group(1)
             rows_inner: list[str] = []
-            i = _read_block(lines, i, rows_inner, _ROWS_SUBQUERY_START_RE, _SUBQUERY_PAREN_END_RE)
+            i = _read_block(lines, i, rows_inner, _SUBQUERY_PAREN_END_RE)
             if i >= len(lines):  # pragma: no cover - malformed AQL
                 raise AssertionError("unterminated LET = ( subquery in AQL")
             i += 1  # skip the closing ``)``
