@@ -287,3 +287,38 @@ def test_an_unplaced_subject_in_a_mixed_mapping_matches_oxigraph(
     store = load_store_from_string(facts(strict))
     expected = [normalize_oxi_row(r) for r in oxi_bindings(store, query)]
     assert_bindings_equal(expected, actual)
+
+
+_DOCUMENT_ONLY = """
+@prefix : <http://ex.org/> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix phys: <https://arango.solutions/phys#> .
+:Person a owl:Class ; phys:collectionName "P191" .
+:email a owl:DatatypeProperty ; rdfs:domain :Person .
+"""
+
+
+@pytest.mark.cross
+@pytest.mark.parametrize("mapping", ["triples_table_domain", "document_domain"])
+def test_a_declared_domain_is_read_not_the_default_collection(mapping: str) -> None:
+    # The one answer #191 changes from main: ``:email`` declares a domain,
+    # so an untyped ``:zeta`` with an email in the default collection is not
+    # one of its subjects. A triples-table domain (``:Person`` is RPT) reads
+    # the table, as a document domain reads its collection; main read
+    # ``Document`` for the former only because it could not route a
+    # triples-table domain (review of #199).
+    if mapping == "triples_table_domain":
+        resolver = make_resolver("declared", strict=False)
+    else:
+        resolver = SchemaResolver.from_turtle(_DOCUMENT_ONLY, default_collection=DEFAULT_COLLECTION)
+    stored = {
+        **collections(),
+        "P191": [],
+        DEFAULT_COLLECTION: [{"_key": "zeta", "_uri": EX + "zeta", "email": "z@x"}],
+    }
+
+    result = translate(PREFIX + "SELECT ?m WHERE { :zeta :email ?m }", resolver=resolver)
+
+    assert DEFAULT_COLLECTION not in result.bind_vars.values()
+    assert run_aql_subset(result.aql, result.bind_vars, stored) == []
