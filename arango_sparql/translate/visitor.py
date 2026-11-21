@@ -48,7 +48,7 @@ from .optional_crosssubject import (
     emit_rpt_cross_subject_optional,
     is_rpt_cross_subject_optional,
 )
-from .optional_subquery import emit_optional_subquery
+from .optional_subquery import emit_optional_subquery, group_own_value, group_scoped_variables
 from .optional_subquery import needs_subquery as needs_optional_subquery
 from .paths import emit_path_triple
 from .predicates import LoopEmitter, LoopPlan, PredicateCall, extract_predicate_calls, resolve_call
@@ -167,6 +167,12 @@ class _BindingState:
     """SPARQL variables bound to ``date ± duration`` (a BIND of one): their
     lexical form keeps the input's zone, so they compare, sort and aggregate
     by instant (:mod:`date_arithmetic`, #123)."""
+    group_own: dict[int, dict[str, str]] = field(default_factory=dict)
+    """A group-scoped OPTIONAL (#194), by its algebra node's ``id``: the
+    value each group-scoped variable has from the group itself, without the
+    outer one (``"null"`` where the group did not bind it). A later
+    OPTIONAL in the same group decides its padding against it
+    (``optional_subquery.group_own_value``)."""
     hidden_outer: dict[str, str] = field(default_factory=dict)
     """In an OPTIONAL body: the outer variables it does not bind, taken out
     of its scope (#125) → their expressions. An EXISTS probe inside the body
@@ -825,6 +831,7 @@ class AlgebraVisitor:
     # OPTIONAL — LeftJoin(p1=required, p2=optional, expr=<inner FILTER>)
     # ------------------------------------------------------------------
     def visit_LeftJoin(self, node: Any) -> Any:
+        scope_before = set(self.state.var_to_expr)
         # Visit the required side first so every alias / variable that
         # the optional side references is in scope.
         self.visit(node.p1)
@@ -838,11 +845,39 @@ class AlgebraVisitor:
         for name in sorted(self.state.graph_vars_open_on_entry):
             if name in self.state.maybe_unbound:
                 self._refuse_graph_var_without_documents(name)
-        self._emit_optional_side(node)
+        self._emit_optional_side(node, scope_before)
 
-    def _emit_optional_side(self, node: Any) -> None:
-        """Emit the OPTIONAL side of ``LeftJoin(p1, p2, expr)``, ``p1`` visited."""
+    def _emit_optional_side(self, node: Any, scope_before: set[str]) -> None:
+        """Emit the OPTIONAL side of ``LeftJoin(p1, p2, expr)``, ``p1`` visited.
+
+        *scope_before* is the scope before ``p1`` was visited: the variables
+        bound around the group (:func:`group_scoped_variables`, #194).
+        """
         p2 = node.p2
+
+        # A variable bound around this OPTIONAL's group, but not by its
+        # required side, is not shared with the optional side: the group is
+        # evaluated on its own (SPARQL 1.1 §18.5), so the optional side
+        # binds it afresh and is joined to the outer value by compatibility
+        # (#194). Only the subquery emitter can express that.
+        loose = group_scoped_variables(self, scope_before, node)
+        if loose:
+            own = {name: group_own_value(self, node.p1, name) for name in sorted(loose)}
+            untracked = [name for name, value in own.items() if value is None]
+            if untracked:
+                # The required side binds it in only some solutions in a way
+                # whose own value is not recorded (a UNION arm, a VALUES column
+                # with UNDEF, a sub-select column, or in a MINUS probe an
+                # OPTIONAL its inline conditional add lowered), so the padding
+                # test has nothing to compare with: refuse, not guess.
+                raise UnsupportedSparqlError(
+                    f"OPTIONAL binding ?{untracked[0]}, which the surrounding pattern binds and this "
+                    f"group's required side binds in only some solutions (through a UNION arm, a VALUES "
+                    f"column with UNDEF, a sub-select column, or inside MINUS an OPTIONAL read inline), "
+                    f"is not supported (#194)"
+                )
+            emit_optional_subquery(self, node, loose={name: value for name, value in own.items() if value})
+            return
 
         # RPT-native cross-subject OPTIONAL (ADR-0002 Problem 1, Option
         # A): the OPTIONAL subject is bound only as a *value* by the

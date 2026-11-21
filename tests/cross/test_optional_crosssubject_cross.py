@@ -127,6 +127,20 @@ CASES = [
         'SELECT ?s WHERE { ?s a :Person MINUS { ?t a :Person ; :knows ?s OPTIONAL { ?t :email ?m FILTER(?m = "bob@x.org") } } }',
         id="minus_unshared_filtered",
     ),
+    # The right side's OPTIONAL re-binds the outer ?o: it is evaluated on its
+    # own (SPARQL 1.1 §18.5), binds its own ?o and is compared after (#194).
+    # It overwrote ?o and answered nothing (review of #189), then was refused.
+    pytest.param(
+        "SELECT ?s ?u ?o WHERE { ?s a :Person . ?u a :Person ; :knows ?o MINUS { ?s a :Person OPTIONAL { ?s :knows ?o } } }",
+        id="minus_shared_rebind",
+    ),
+    # The same with the right side's own subject: inside the probe the OPTIONAL
+    # used to stay an inline document read, which cannot see a triples row, so
+    # it was refused.
+    pytest.param(
+        "SELECT ?s WHERE { ?s a :Person ; :knows ?o MINUS { ?t a :Person OPTIONAL { ?t :knows ?o } } }",
+        id="minus_unshared_subject_rebind",
+    ),
     # #190: the first OPTIONAL leaves ?x unbound for :carol (she knows nobody);
     # an unbound variable is compatible with any value (SPARQL 1.1 §18.3), so
     # the next pattern on ?x joins every subject and ?x takes it. The join

@@ -126,9 +126,14 @@ def test_graph_variable_shapes_without_a_binding_pattern_are_refused(
 
 
 def test_a_triples_table_optional_before_the_graph_variable_is_bound_is_refused() -> None:
-    # The cross-subject OPTIONAL scan would have to bind ?g per triple.
+    # The cross-subject OPTIONAL scan would have to bind ?g per triple. Since
+    # #194 the GRAPH group's ?x is its own (the group binds it only through
+    # the OPTIONAL), so the group-scoped emitter takes the OPTIONAL and the
+    # GRAPH group's own check refuses it: no required pattern binds ?g first.
     query = "SELECT ?s ?x ?g ?m WHERE { ?s a :Person ; :knows ?x . GRAPH ?g { OPTIONAL { ?x :email ?m } } }"
-    with pytest.raises(UnsupportedSparqlError, match="before any pattern binds"):
+    with pytest.raises(
+        UnsupportedSparqlError, match="before any pattern binds|needs a required pattern of its own group"
+    ):
         translate_case(SPLIT["rpt"], query)
 
 
