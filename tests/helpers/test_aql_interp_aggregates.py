@@ -81,3 +81,14 @@ def test_null_orders_below_a_number_as_in_aql() -> None:
     )
     rows = run_aql_subset(aql, {"@c1": "C"}, {"C": []})
     assert rows == [{"r": "none", "low": "yes"}]
+
+
+def test_attributes_without_system_attributes_drops_every_underscore_name() -> None:
+    # ArangoDB 3.12: ATTRIBUTES({_uri:1, _key:2, a:3, _graph:4, b:null}, true)
+    # == ["b", "a"] (any order), ATTRIBUTES(null, true) == null. A variable
+    # predicate iterates it (#191's cross tests read documents this way).
+    aql = "FOR doc1 IN @@c1\nFOR k2 IN ATTRIBUTES(doc1, true)\nRETURN { r: k2 }"
+    rows = run_aql_subset(
+        aql, {"@c1": "C"}, {"C": [{"_uri": 1, "_key": "2", "a": 3, "_graph": 4, "b": None}]}
+    )
+    assert sorted(r["r"] for r in rows) == ["a", "b"]
