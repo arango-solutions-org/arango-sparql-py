@@ -828,9 +828,15 @@ class AqlQueryBuilder:
                     f"broke — make sure create_child() was used to "
                     f"spawn the child builder."
                 )
-        self._bind_counter = child._bind_counter
-        self._alias_counter = child._alias_counter
-        self._coll_counter = child._coll_counter
+        # Never backwards: the parent can mint while a child is open (the
+        # tenant guard of an edge OPTIONAL's subquery binds into the parent),
+        # and taking the child's lower counter then let a later child reuse
+        # a parent name (`_pN_tenant_colls`, review of #214). A parent and an
+        # open child minting the same number with the same hint is still
+        # possible in principle; the collision check above refuses it loudly.
+        self._bind_counter = max(self._bind_counter, child._bind_counter)
+        self._alias_counter = max(self._alias_counter, child._alias_counter)
+        self._coll_counter = max(self._coll_counter, child._coll_counter)
         return inner_aql
 
     def for_union(

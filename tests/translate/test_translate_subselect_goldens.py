@@ -239,3 +239,29 @@ def test_absorb_child_detects_bind_collision() -> None:
     child.return_scalar("1")
     with pytest.raises(AqlEmitError, match="bind-var name collision"):
         parent.absorb_child(child)
+
+
+def test_absorb_child_never_moves_the_parent_counters_backwards() -> None:
+    """The parent can mint while a child is open (an edge OPTIONAL's tenant
+    guard binds into the parent). Absorbing the child then must keep the
+    parent's higher counters, or the next child reuses the parent's names
+    (review of #214: ``_pN_tenant_colls`` collided)."""
+    from arango_sparql.translate.builder import AqlQueryBuilder
+
+    parent = AqlQueryBuilder()
+    child = parent.create_child()
+    parent.bind(["Person"], hint="tenant_colls")  # parent mints while the child is open
+    parent.fresh_alias()
+    child.bind("x", hint="uri")
+    child.for_("d", "Doc")
+    child.return_scalar("d")
+    parent.absorb_child(child)
+    later = parent.create_child()
+    later.bind(["Doc"], hint="tenant_colls")
+    later.for_("e", "Doc")
+    later.return_scalar("e")
+    parent.absorb_child(later)  # raised AqlEmitError (bind-var name collision) before
+    assert sorted(v for k, v in parent._bind_vars.items() if k.endswith("_tenant_colls")) == [
+        ["Doc"],
+        ["Person"],
+    ]
