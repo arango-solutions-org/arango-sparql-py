@@ -32,7 +32,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from rdflib import Variable
+from rdflib import Literal, URIRef, Variable
 
 from .builder import attribute_ref, indent_aql
 from .mixed_store import route_subject
@@ -89,10 +89,19 @@ def certain_variables(node: Any) -> set[str]:
     left side's; a UNION what every arm binds; a GRAPH its pattern's plus a
     GRAPH variable; a VALUES block the columns no row leaves ``UNDEF``; a
     sub-select the columns its own pattern binds in every solution. A
-    FILTER, DISTINCT, ORDER BY, LIMIT or GROUP keeps its pattern's. A BIND
-    target is not counted: an expression that errors leaves it unbound
-    (§18.6), and so can an aggregate (SAMPLE, MIN over nothing; review of
-    #197).
+    FILTER, DISTINCT, ORDER BY, LIMIT or GROUP keeps its pattern's.
+
+    A BIND target in a group is not counted, even a plain copy of a bound
+    variable: an expression that errors leaves it unbound (§18.6), and the
+    group-scoped OPTIONAL substitutes what this returns by an index lookup
+    on the outer value, which a computed value cannot take (review of #213:
+    counting ``OPTIONAL { ?s :likes ?k BIND(?k AS ?x) }`` gave wrong rows).
+    A sub-select's column is joined by value instead, so it counts when it
+    cannot be unbound: a constant, or a plain copy of a variable its pattern
+    binds in every solution (``SELECT ?s (?k AS ?x)``, or ``BIND(?k AS ?x)``
+    as the sub-select's last step; :func:`_column_certain`). An aggregate
+    column never counts (SAMPLE, MIN over nothing; review of #197): rdflib
+    reads it through an ``__agg_<n>__`` variable its pattern never binds.
     """
     if node is None:
         return set()
@@ -116,7 +125,7 @@ def certain_variables(node: Any) -> set[str]:
     ):
         return certain_variables(node.p)
     if name in ("Project", "SelectQuery"):
-        return {str(v) for v in node.get("PV") or []} & certain_variables(node.p)
+        return {str(v) for v in node.get("PV") or []} & _column_certain(node.p)
     if name == "values":
         rows = node.get("res") or []
         columns = {str(var) for row in rows for var in row}
@@ -127,6 +136,21 @@ def certain_variables(node: Any) -> set[str]:
         term = node.term
         return certain_variables(node.p) | ({str(term)} if isinstance(term, Variable) else set())
     return set()
+
+
+def _column_certain(node: Any) -> set[str]:
+    """:func:`certain_variables` of a sub-select's pattern, where the
+    ``Extend`` steps directly under its projection (``SELECT (… AS ?x)``, a
+    trailing ``BIND``) also count a constant or a plain copy of a variable
+    bound in every solution: the column is joined with the outside by
+    value, never substituted."""
+    if getattr(node, "name", None) != "Extend":
+        return certain_variables(node)
+    inner = _column_certain(node.p)
+    expr = node.expr
+    if isinstance(expr, (URIRef, Literal)) or (isinstance(expr, Variable) and str(expr) in inner):
+        return inner | {str(node.var)}
+    return inner
 
 
 def _bound_cell(value: Any) -> bool:

@@ -115,6 +115,27 @@ def test_certain_variables_follow_every_solution() -> None:
     assert certain_variables(
         _minus_body("{ SELECT ?s (SAMPLE(?n) AS ?x) WHERE { ?s :name ?n } GROUP BY ?s }")
     ) == {"s"}
+    assert certain_variables(
+        _minus_body("{ SELECT ?s (MIN(?n) AS ?x) WHERE { ?s :name ?n } GROUP BY ?s }")
+    ) == {"s"}
+    # Not even a plain copy in a group: the group-scoped OPTIONAL would
+    # substitute it by the outer value, which a computed one cannot take
+    # (review of #213).
+    assert certain_variables(_minus_body("?s :name ?n BIND(?n AS ?x)")) == {"s", "n"}
+    assert certain_variables(_minus_body("?s :name ?n BIND(:c AS ?x)")) == {"s", "n"}
+    # A sub-select column is joined by value: a plain copy of a variable
+    # bound in every solution, or a constant, counts; an expression or a
+    # copy of a variable that can be unbound does not.
+    assert certain_variables(_minus_body("{ SELECT ?s (?n AS ?x) WHERE { ?s :name ?n } }")) == {"s", "x"}
+    assert certain_variables(_minus_body("{ SELECT ?s ?x WHERE { ?s :name ?n BIND(?n AS ?x) } }")) == {
+        "s",
+        "x",
+    }
+    assert certain_variables(_minus_body("{ SELECT ?s (:c AS ?x) WHERE { ?s :name ?n } }")) == {"s", "x"}
+    assert certain_variables(_minus_body("{ SELECT ?s (STR(?n) AS ?x) WHERE { ?s :name ?n } }")) == {"s"}
+    assert certain_variables(
+        _minus_body("{ SELECT ?s ?x WHERE { ?s :name ?n OPTIONAL { ?s :knows ?k } BIND(?k AS ?x) } }")
+    ) == {"s"}
     # A pattern the walker does not look inside binds nothing for certain.
     assert certain_variables(_minus_body("SERVICE <http://ex.org/sparql> { ?s :name ?n }")) == set()
 

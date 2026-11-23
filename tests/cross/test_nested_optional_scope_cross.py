@@ -323,6 +323,32 @@ UNTRACKED_CASES = [
         "{ SELECT ?s ?x WHERE { ?s :name ?nn OPTIONAL { ?s :likes ?x } } } OPTIONAL { ?x :email ?m } } }",
         id="subselect_optional_column",
     ),
+    # A sub-select column computed by an expression that can raise an error
+    # (IF … 1/0), or by an aggregate, can be unbound (review of #213). Main
+    # counted both as always bound: the IF forms answered wrongly, the MIN
+    # form happened to answer right.
+    pytest.param(
+        "SELECT ?s ?x ?n ?m WHERE { ?s :knows ?x OPTIONAL { ?s :name ?n "
+        "{ SELECT ?s (IF(?k = :c, ?k, 1/0) AS ?x) WHERE { ?s :likes ?k } } OPTIONAL { ?x :email ?m } } }",
+        id="subselect_expression_column",
+    ),
+    pytest.param(
+        "SELECT ?s ?x ?n ?m WHERE { ?s :knows ?x OPTIONAL { ?s :name ?n "
+        "{ SELECT ?s ?x WHERE { ?s :likes ?k BIND(IF(?k = :c, ?k, 1/0) AS ?x) } } OPTIONAL { ?x :email ?m } } }",
+        id="subselect_bind_expression_column",
+    ),
+    pytest.param(
+        "SELECT ?s ?x ?n ?m WHERE { ?s :knows ?x OPTIONAL { ?s :name ?n "
+        "{ SELECT ?s (MIN(?k) AS ?x) WHERE { ?s :likes ?k } GROUP BY ?s } OPTIONAL { ?x :email ?m } } }",
+        id="subselect_aggregate_column",
+    ),
+    # A BIND in the group itself, even a plain copy: substituting the outer
+    # value into a computed one is not a match (main failed with an
+    # AqlEmitError on this one).
+    pytest.param(
+        "SELECT ?s ?x ?m WHERE { ?s :knows ?x OPTIONAL { ?s :likes ?k BIND(?k AS ?x) OPTIONAL { ?x :email ?m } } }",
+        id="group_bind_copy",
+    ),
 ]
 
 
