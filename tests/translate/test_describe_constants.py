@@ -39,20 +39,35 @@ def _resolver(ttl: str = _TTL, *, strict: bool = True) -> SchemaResolver:
 
 
 def test_the_sources_are_every_class_collection_and_triples_table() -> None:
-    collections, tables = _resolver().described_sources()
+    collections, tables = _resolver().store_sources()
     # The supertype has no collection; two RPT classes on one table read it once.
     assert collections == ("Org", "Person")
     assert [t.collection for t in tables] == ["triples"]
 
 
 def test_the_default_collection_counts_only_without_strict_resolution() -> None:
-    collections, _ = _resolver(strict=False).described_sources()
+    collections, _ = _resolver(strict=False).store_sources()
     assert collections == ("Document", "Org", "Person")
+
+
+def test_a_table_read_under_two_column_layouts_is_listed_for_each() -> None:
+    # The key is ResolvedClass.table_layout, which the mixed-store router
+    # dedupes a predicate's domain by too: the same rows under the same
+    # columns are read once, other columns are other triples.
+    ttl = (
+        _TTL
+        + ':Note a owl:Class ; phys:mappingStyle "RPT" ; phys:collectionName "triples" ; phys:objectUriColumn "o" .'
+    )
+    _, tables = _resolver(ttl).store_sources()
+    assert sorted(t.table_layout for t in tables) == [
+        ("triples", "subject_uri", "predicate", "o", "object_value"),
+        ("triples", "subject_uri", "predicate", "object_uri", "object_value"),
+    ]
 
 
 def test_a_triple_store_reads_only_its_table() -> None:
     ttl = _PREFIXES + ':Fact a owl:Class ; phys:mappingStyle "RPT" ; phys:collectionName "triples" .'
-    collections, tables = _resolver(ttl, strict=False).described_sources()
+    collections, tables = _resolver(ttl, strict=False).store_sources()
     assert collections == ()
     assert [t.collection for t in tables] == ["triples"]
 
@@ -62,7 +77,7 @@ def test_a_sharded_collection_reads_its_whole_family() -> None:
     resolver = SchemaResolver(
         ontology=graph, strict_subject_resolution=True, shard_families=(("Person", "Person_eu"),)
     )
-    assert resolver.described_sources()[0] == ("Org", "Person", "Person_eu")
+    assert resolver.store_sources()[0] == ("Org", "Person", "Person_eu")
 
 
 def test_a_bare_describe_reads_no_default_collection_under_strict_resolution() -> None:
@@ -149,7 +164,7 @@ def test_the_sources_keep_resolve_class_fallbacks() -> None:
     :Fact a owl:Class ; phys:mappingStyle "RPT" ; phys:triplesCollection "facts" .
     """
     )
-    collections, tables = _resolver(ttl).described_sources()
+    collections, tables = _resolver(ttl).store_sources()
     assert collections == ("Person",)
     assert [t.collection for t in tables] == ["facts"]
 
@@ -157,7 +172,7 @@ def test_the_sources_keep_resolve_class_fallbacks() -> None:
 def test_the_survey_leaves_no_advisory_and_no_cache_entry() -> None:
     ttl = _PREFIXES + ":Person a owl:Class ."
     resolver = _resolver(ttl)
-    resolver.described_sources()
+    resolver.store_sources()
     assert resolver.warnings == []
     assert resolver._class_cache == {}  # noqa: SLF001 - the survey caches nothing
 

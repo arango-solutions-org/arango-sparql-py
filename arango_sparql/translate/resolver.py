@@ -166,6 +166,20 @@ class ResolvedClass:
     the resolver's cache and for the builder's de-duplication of the
     ``WITH`` clause."""
 
+    @property
+    def table_layout(self) -> tuple[str, str, str, str, str]:
+        """A triples-table (RPT) class's collection and column names: two
+        classes with the same layout read the same rows, so a read of every
+        table reads each layout once (:meth:`SchemaResolver.store_sources`,
+        :mod:`.mixed_store`)."""
+        return (
+            self.collection,
+            self.subject_column,
+            self.predicate_column,
+            self.object_uri_column,
+            self.object_value_column,
+        )
+
 
 @dataclass
 class ResolvedProperty:
@@ -1171,25 +1185,10 @@ class SchemaResolver(AdvisoryLog):
         return tuple(c for c in self._tenant_scoped_classes if (c.style == "RPT") == rpt)
 
     def store_sources(self) -> tuple[tuple[str, ...], tuple[ResolvedClass, ...]]:
-        """The stores a triple can be in: the classes' document collections
-        (a sharded one's whole family) and triples tables (one class per
-        table and column layout), plus the default collection unless
-        :attr:`strict_subject_resolution` is on or the mapping is only
-        triples tables. The non-strict contract keeps an IRI no class places
-        in the default collection, so a read of every store reads it too
-        (review of #199). The class survey is cached: the visitor asks for
-        every triple on an unplaced subject (:mod:`.mixed_store`, #191)."""
-        if self._store_sources is None:
-            self._store_sources = self._class_sources()
-        collections, tables = self._store_sources
-        # A triple store (only RPT classes) keeps every triple in its tables.
-        if not self.strict_subject_resolution and (collections or not tables):
-            return tuple(sorted({*collections, self.default_collection})), tables
-        return collections, tables
-
-    def described_sources(self) -> tuple[tuple[str, ...], tuple[ResolvedClass, ...]]:
-        """Where a constant IRI's triples can be, for ``DESCRIBE <iri>`` (#150):
-        the document collections and the triples-table (RPT) classes.
+        """The stores a triple can be in: the document collections and the
+        triples-table (RPT) classes. ``DESCRIBE <iri>`` reads them all (#150),
+        and so does a triple on a subject no type pattern or domain places
+        (:mod:`.mixed_store`, #191).
 
         Every ``owl:Class`` is resolved as a type pattern resolves it, with
         its fallbacks (a class with no ``phys:collectionName`` reads its
@@ -1198,17 +1197,25 @@ class SchemaResolver(AdvisoryLog):
         translation's, as in :meth:`tenant_scoped_classes`. Document
         collections are each class's (a sharded one's whole family), plus
         the default collection unless :attr:`strict_subject_resolution` is
-        on: the non-strict contract keeps an IRI no class places there, as an
-        untyped read assumes (not in a triple store, whose tables hold every
-        triple). Supertypes (``UNION``) have no collection of their own; a
-        class that does not resolve is read by nothing. Triples tables are
-        listed once per collection and column layout.
+        on or the mapping is only triples tables: the non-strict contract
+        keeps an IRI no class places there, as an untyped read assumes
+        (review of #199), while a triple store's tables hold every triple.
+        Supertypes (``UNION``) have no collection of their own; a class that
+        does not resolve is read by nothing. Triples tables are listed once
+        per :attr:`ResolvedClass.table_layout`. The class survey is cached:
+        the visitor asks for every triple on an unplaced subject.
         """
-        return self.store_sources()
+        if self._store_sources is None:
+            self._store_sources = self._class_sources()
+        collections, tables = self._store_sources
+        # A triple store (only RPT classes) keeps every triple in its tables.
+        if not self.strict_subject_resolution and (collections or not tables):
+            return tuple(sorted({*collections, self.default_collection})), tables
+        return collections, tables
 
     def _class_sources(self) -> tuple[tuple[str, ...], tuple[ResolvedClass, ...]]:
         """Every class's document collections and triples tables, resolved
-        quietly (see :meth:`described_sources`)."""
+        quietly (see :meth:`store_sources`)."""
         collections: set[str] = set()
         tables: dict[tuple[str, ...], ResolvedClass] = {}
         warnings, warned, cache = list(self.warnings), set(self._warned_keys), dict(self._class_cache)
@@ -1223,14 +1230,7 @@ class SchemaResolver(AdvisoryLog):
                 if resolved.style == "UNION" or not resolved.collection:
                     continue
                 if resolved.style == "RPT":
-                    key = (
-                        resolved.collection,
-                        resolved.subject_column,
-                        resolved.predicate_column,
-                        resolved.object_uri_column,
-                        resolved.object_value_column,
-                    )
-                    tables.setdefault(key, resolved)
+                    tables.setdefault(resolved.table_layout, resolved)
                     continue
                 collections.update(resolved.shard_family or (resolved.collection,))
         finally:

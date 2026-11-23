@@ -643,7 +643,7 @@ class AlgebraVisitor:
         resolution), and missed every IRI a class places elsewhere. Now:
 
         * documents, from every document collection
-          (:meth:`SchemaResolver.described_sources`) at once, matched on
+          (:meth:`SchemaResolver.store_sources`) at once, matched on
           their IRI in each collection's ``_uri`` index, held to the tenant
           as a document no class opened is (:meth:`_tenant_test`), and
           fanned out into their attributes as ``DESCRIBE ?s`` does;
@@ -655,7 +655,7 @@ class AlgebraVisitor:
         """
         if not all(isinstance(u, URIRef) for u in uris):
             raise UnsupportedSparqlError("DESCRIBE without WHERE takes IRIs only")
-        collections, tables = self.resolver.described_sources()
+        collections, tables = self.resolver.store_sources()
         if not collections and not tables:
             raise SchemaResolutionError(
                 f"cannot DESCRIBE {', '.join(str(u) for u in uris)}: the mapping places no "

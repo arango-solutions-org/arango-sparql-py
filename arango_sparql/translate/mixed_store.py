@@ -176,7 +176,7 @@ def _route_of(classes: list[ResolvedClass]) -> StoreRoute:
     documents: dict[str, list[ResolvedClass]] = {}
     for c in classes:
         if c.style == "RPT":
-            tables.setdefault(_layout(c), c)
+            tables.setdefault(c.table_layout, c)
             continue
         for collection in c.shard_family or (c.collection,):
             documents.setdefault(collection, []).append(c)
@@ -184,10 +184,6 @@ def _route_of(classes: list[ResolvedClass]) -> StoreRoute:
         tables=tuple(tables[k] for k in sorted(tables)),
         documents=tuple((coll, tuple(documents[coll])) for coll in sorted(documents)),
     )
-
-
-def _layout(c: ResolvedClass) -> tuple[str, ...]:
-    return (c.collection, c.subject_column, c.predicate_column, c.object_uri_column, c.object_value_column)
 
 
 def emit_routed_triple(
@@ -372,7 +368,7 @@ def _table_arm(
     if isinstance(predicate, Variable):
         fields.append(("p", predicate_column))
     fields.append(("o", triple_object_ref(row, table)))
-    fields.append(("g", attribute_ref(row, arm.resolver.graph_field)))
+    fields.append(_graph_field(arm, row))
     return fields
 
 
