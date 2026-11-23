@@ -182,9 +182,12 @@ cases:
   # :attr:`SchemaResolver.property_path_max_depth` (set semantics —
   # SPARQL §9: path endpoints appear once even if many walks match).
   # ``:p?`` is bounded at 1 by the modifier itself; ``:p+`` / ``:p*``
-  # honour the resolver knob. The goldens below override the knob to
-  # keep the AQL short and reviewable; the default in production is 10.
-  # See :mod:`arango_sparql.translate.paths`.
+  # honour the resolver knob, and refuse rather than truncate (issue
+  # #183): the arms are bound with ``LET reach``, the path is walked
+  # once more (``LET beyond``), and ``FAIL(@…path_depth)`` stops the
+  # query when that walk reaches a pair the arms do not. The goldens
+  # below override the knob to keep the AQL short and reviewable; the
+  # default in production is 10. See :mod:`arango_sparql.translate.paths`.
 
   - name: mul_path_zero_or_one
     # ``?s :p? ?o`` — identity arm + one-hop arm. No knob needed
@@ -214,14 +217,15 @@ cases:
       "@c2_Document": "Document"
 
   - name: mul_path_one_or_more_depth_two
-    # ``?s :p+ ?o`` with max_depth=2 → two arms (one-hop, two-hop).
-    # Both arms gain the per-step ``FILTER HAS(doc, "p")`` guard.
+    # ``?s :p+ ?o`` with max_depth=2 → two arms (one-hop, two-hop),
+    # plus the three-hop walk the depth guard compares them with.
+    # Every arm gains the per-step ``FILTER HAS(doc, "p")`` guard.
     sparql: |
       PREFIX : <http://ex.org/>
       SELECT ?s ?o WHERE { ?s :p+ ?o }
     property_path_max_depth: 2
     expected_aql: |-
-      FOR row4 IN UNION_DISTINCT(
+      LET reach7 = UNION_DISTINCT(
       (
         FOR doc1 IN @@c1_Document
         FILTER HAS(doc1, "p")
@@ -236,19 +240,35 @@ cases:
         RETURN { o: doc3.p, s: NOT_NULL(doc2._uri, doc2._id) }
       )
       )
-      RETURN { s: row4.s, o: row4.o }
+      LET beyond8 = (
+        FOR doc4 IN @@c3_Document
+        FILTER HAS(doc4, "p")
+        FOR doc5 IN @@c3_Document
+        FILTER (doc4.p != null && (doc5._uri == doc4.p || (doc5._uri == null && doc5._id == doc4.p)))
+        FILTER HAS(doc5, "p")
+        FOR doc6 IN @@c3_Document
+        FILTER (doc5.p != null && (doc6._uri == doc5.p || (doc6._uri == null && doc6._id == doc5.p)))
+        FILTER HAS(doc6, "p")
+        RETURN { o: doc6.p, s: NOT_NULL(doc4._uri, doc4._id) }
+      )
+      FILTER LENGTH(MINUS(beyond8, reach7)) == 0 || FAIL(@_p1_path_depth)
+      FOR row9 IN reach7
+      RETURN { s: row9.s, o: row9.o }
     expected_bind_vars:
+      "_p1_path_depth": "E_SPARQL_PATH_DEPTH: property path <http://ex.org/p>+ reaches nodes more than 2 repetitions away, past SchemaResolver.property_path_max_depth (2). The query is refused rather than answered without them; raise property_path_max_depth to answer it."
       "@c1_Document": "Document"
       "@c2_Document": "Document"
+      "@c3_Document": "Document"
 
   - name: mul_path_zero_or_more_depth_two
-    # ``?s :p* ?o`` with max_depth=2 → three arms (identity, one-hop, two-hop).
+    # ``?s :p* ?o`` with max_depth=2 → three arms (identity, one-hop,
+    # two-hop) and the three-hop depth-guard walk.
     sparql: |
       PREFIX : <http://ex.org/>
       SELECT ?s ?o WHERE { ?s :p* ?o }
     property_path_max_depth: 2
     expected_aql: |-
-      FOR row5 IN UNION_DISTINCT(
+      LET reach8 = UNION_DISTINCT(
       (
         FOR doc1 IN @@c1_Document
         RETURN { o: NOT_NULL(doc1._uri, doc1._id), s: NOT_NULL(doc1._uri, doc1._id) }
@@ -267,11 +287,26 @@ cases:
         RETURN { o: doc4.p, s: NOT_NULL(doc3._uri, doc3._id) }
       )
       )
-      RETURN { s: row5.s, o: row5.o }
+      LET beyond9 = (
+        FOR doc5 IN @@c4_Document
+        FILTER HAS(doc5, "p")
+        FOR doc6 IN @@c4_Document
+        FILTER (doc5.p != null && (doc6._uri == doc5.p || (doc6._uri == null && doc6._id == doc5.p)))
+        FILTER HAS(doc6, "p")
+        FOR doc7 IN @@c4_Document
+        FILTER (doc6.p != null && (doc7._uri == doc6.p || (doc7._uri == null && doc7._id == doc6.p)))
+        FILTER HAS(doc7, "p")
+        RETURN { o: doc7.p, s: NOT_NULL(doc5._uri, doc5._id) }
+      )
+      FILTER LENGTH(MINUS(beyond9, reach8)) == 0 || FAIL(@_p1_path_depth)
+      FOR row10 IN reach8
+      RETURN { s: row10.s, o: row10.o }
     expected_bind_vars:
+      "_p1_path_depth": "E_SPARQL_PATH_DEPTH: property path <http://ex.org/p>* reaches nodes more than 2 repetitions away, past SchemaResolver.property_path_max_depth (2). The query is refused rather than answered without them; raise property_path_max_depth to answer it."
       "@c1_Document": "Document"
       "@c2_Document": "Document"
       "@c3_Document": "Document"
+      "@c4_Document": "Document"
 
   - name: sequence_with_sibling_attribute_triple
     # A path triple and a plain attribute triple sharing a subject.

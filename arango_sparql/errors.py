@@ -57,3 +57,15 @@ class CrossTenantJoinError(SparqlError):
     """
 
     code = "E_TRANSLATE_CROSS_TENANT_JOIN"
+
+
+#: Code a translated query raises *at run time* when a ``:p*`` / ``:p+`` path
+#: reaches a node more than ``SchemaResolver.property_path_max_depth``
+#: repetitions away (issue #183). The AQL ends in ``FAIL(@msg)``, whose message
+#: starts with this code; ArangoDB reports it as ERR 1569 ("AQL: <message>").
+#: Anyone who runs the translated AQL, the service or a caller that only
+#: translates, gets the refusal instead of an answer missing those pairs.
+PATH_DEPTH_EXCEEDED_CODE = "E_SPARQL_PATH_DEPTH"
+
+#: ArangoDB's error number for a query stopped by ``FAIL()``.
+ARANGO_ERROR_QUERY_FAIL_CALLED = 1569
