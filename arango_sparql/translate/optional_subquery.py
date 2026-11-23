@@ -34,7 +34,7 @@ from typing import TYPE_CHECKING, Any
 
 from rdflib import Variable
 
-from .builder import attribute_ref
+from .builder import attribute_ref, indent_aql
 from .mixed_store import route_subject
 from .union_paths import _spawn_child
 
@@ -264,7 +264,7 @@ def _translate_body(
         # per match (SPARQL multiset semantics), so count matches.
         child.builder.return_scalar("1")
     inner_aql = visitor.builder.absorb_child(child.builder)
-    return _Body("\n".join("  " + line for line in inner_aql.splitlines()), values)
+    return _Body(indent_aql(inner_aql), values)
 
 
 def emit_optional_subquery(visitor: AlgebraVisitor, node: Any, loose: dict[str, str] | None = None) -> None:

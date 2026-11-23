@@ -32,6 +32,7 @@ from .builder import (
     AqlQueryBuilder,
     attribute_path_ref,
     attribute_ref,
+    indent_aql,
     is_aql_identifier,
     subject_in,
     subject_matches,
@@ -1189,7 +1190,7 @@ class AlgebraVisitor:
         child.return_scalar("{" + projection + "}")
 
         inner_aql = self.builder.absorb_child(child)
-        indented = "\n".join("  " + line for line in inner_aql.splitlines())
+        indented = indent_aql(inner_aql)
         sub_alias = self.builder.fresh_alias(prefix="optsub")
         self.builder.let(sub_alias, f"(\n{indented}\n)")
         row_alias = self.builder.fresh_alias(prefix="optrow")

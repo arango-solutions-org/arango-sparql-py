@@ -49,7 +49,7 @@ from typing import TYPE_CHECKING, Any
 from rdflib import URIRef, Variable
 
 from ..errors import UnsupportedSparqlError
-from .builder import attribute_ref, triple_object_ref
+from .builder import attribute_ref, indent_aql, triple_object_ref
 from .mixed_store import route_subject
 from .resolver import ResolvedClass
 
@@ -222,7 +222,7 @@ def emit_rpt_cross_subject_optional(visitor: AlgebraVisitor, triple: tuple[Any, 
     child.return_scalar("{" + projection + "}")
 
     inner_aql = visitor.builder.absorb_child(child)
-    indented = "\n".join("  " + line for line in inner_aql.splitlines())
+    indented = indent_aql(inner_aql)
     opt_alias = visitor.builder.fresh_alias(prefix="optsub")
     visitor.builder.let(opt_alias, f"(\n{indented}\n)")
 

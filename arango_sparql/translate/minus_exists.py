@@ -58,6 +58,7 @@ from typing import TYPE_CHECKING, Any
 
 from rdflib import Variable
 
+from .builder import indent_aql
 from .optional_subquery import certain_variables
 
 if TYPE_CHECKING:
@@ -138,7 +139,7 @@ def emit_minus(visitor: AlgebraVisitor, node: Any) -> None:
     )
 
     probe_alias = visitor.builder.fresh_alias(prefix="minus_probe")
-    visitor.builder.let(probe_alias, f"LENGTH((\n{_indent(inner_aql)}\n))")
+    visitor.builder.let(probe_alias, f"LENGTH((\n{indent_aql(inner_aql)}\n))")
     visitor.builder.filter_raw(f"{probe_alias} == 0")
 
 
@@ -180,7 +181,7 @@ def emit_exists_filter(
     inner_aql = _translate_probe(visitor, inner_pattern, substitute=True)
 
     probe_alias = visitor.builder.fresh_alias(prefix=("not_exists_probe" if negated else "exists_probe"))
-    visitor.builder.let(probe_alias, f"LENGTH((\n{_indent(inner_aql)}\n))")
+    visitor.builder.let(probe_alias, f"LENGTH((\n{indent_aql(inner_aql)}\n))")
 
     return f"{probe_alias} == 0" if negated else f"{probe_alias} > 0"
 
@@ -388,12 +389,3 @@ def _walk_for_vars(node: Any, out: set[Variable]) -> None:
         child = getattr(node, attr, None)
         if child is not None and (isinstance(child, Variable) or hasattr(child, "name")):
             _walk_for_vars(child, out)
-
-
-def _indent(text: str) -> str:
-    """Two-space indent each line — purely cosmetic for the
-    generated LET block. Keeps EXPLAIN-output readable when an
-    inner probe is several lines long. Matches the indentation
-    style :meth:`AqlQueryBuilder.for_subquery` uses for the
-    ``ToMultiSet`` branch."""
-    return "\n".join("  " + line for line in text.splitlines())

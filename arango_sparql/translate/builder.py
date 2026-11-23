@@ -286,13 +286,19 @@ def triple_object_is_iri(alias: str, table: ResolvedClass, iri: str) -> str:
 _MISSING = object()
 
 
+def indent_aql(text: str) -> str:
+    """Indent each line of *text* two spaces: a nested query inside ``(`` /
+    ``)`` lines, kept readable in EXPLAIN output, and the layout the
+    cross-test interpreter (``tests/helpers/aql_interp.py``) reads. Every
+    nested block is indented through this, so they cannot drift apart."""
+    return "\n".join("  " + line for line in text.splitlines())
+
+
 def _union_clause(alias: str, arm_aqls: list[str], op: str) -> str:
     """``FOR <alias> IN <op>((<arm1>), …)``, each arm's lines indented two
     spaces inside its own ``(`` / ``)`` lines (EXPLAIN-readable, and the
     layout the cross-test interpreter reads)."""
-    arm_blocks = ",\n".join(
-        "(\n" + "\n".join("  " + line for line in arm.splitlines()) + "\n)" for arm in arm_aqls
-    )
+    arm_blocks = ",\n".join("(\n" + indent_aql(arm) + "\n)" for arm in arm_aqls)
     return f"FOR {alias} IN {op}(\n{arm_blocks}\n)"
 
 
@@ -1031,7 +1037,7 @@ class AqlQueryBuilder:
             raise ValueError(f"invalid FOR alias: {row_alias!r}")
         if not inner_aql or not inner_aql.strip():
             raise AqlEmitError("for_subquery requires a non-empty inner AQL block")
-        indented = "\n".join("  " + line for line in inner_aql.splitlines())
+        indented = indent_aql(inner_aql)
         self._body_clauses.append(
             _Clause(
                 _ClauseKind.FOR,
@@ -1259,7 +1265,7 @@ class AqlQueryBuilder:
         if self._empty_result_fallback:
             ordered.append(self._return_clause)
             inner = "\n".join(c.text for c in ordered)
-            indented = "\n".join("  " + line for line in inner.splitlines())
+            indented = indent_aql(inner)
             results_alias = self.fresh_alias(prefix="results")
             result_alias = self.fresh_alias(prefix="result")
             wrapper = [
@@ -1287,7 +1293,7 @@ class AqlQueryBuilder:
             # ORDER BY a variable it does not project, which COLLECT drops.
             ordered.append(self._return_clause)
             inner = "\n".join(c.text for c in ordered)
-            indented = "\n".join("  " + line for line in inner.splitlines())
+            indented = indent_aql(inner)
             rows_alias = self.fresh_alias(prefix="deduped")
             row_alias = self.fresh_alias(prefix="row")
             body = "\n".join(
@@ -1310,7 +1316,7 @@ class AqlQueryBuilder:
             # gets a single-row boolean result rather than a SPARQL-shaped
             # projection. Mirrors the legacy
             # ``aql-translator.js#translateQuery`` ASK branch.
-            indented = "\n".join("  " + line for line in body.splitlines())
+            indented = indent_aql(body)
             aql = f"RETURN LENGTH(\n{indented}\n) > 0"
         else:
             aql = body
