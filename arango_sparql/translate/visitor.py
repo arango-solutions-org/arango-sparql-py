@@ -73,6 +73,24 @@ class _SigilCounters:
 
 
 @dataclass
+class _TenantCommitment:
+    """The tenant root entity (e.g. ``"Org"``) a query has committed to
+    (PRD §6.5.1). Captured the first time a class with a tenant field
+    resolves; a class under a *different* root then raises
+    :class:`~arango_sparql.errors.CrossTenantJoinError`. ``None`` until the
+    first tenant-scoped class is seen, and for single-tenant mappings.
+
+    One instance per query, shared (not copied) by every nested scope: a
+    UNION arm, an OPTIONAL subquery, a MINUS / EXISTS probe, a sub-select.
+    Copied, a commitment made inside a scope never reached the parent, and
+    a probe or sub-select that did not copy it started uncommitted, so a
+    join across roots translated whenever the second root sat in one (#211).
+    """
+
+    entity: str | None = None
+
+
+@dataclass
 class _BindingState:
     """Per-query SPARQL→AQL binding tables.
 
@@ -145,21 +163,18 @@ class _BindingState:
     """AQL alias → physical collection name. Used to detect duplicate
     FOR clauses and to drive future joins."""
 
-    tenant_entity: str | None = None
-    """The tenant root entity (e.g. ``"Org"``) the visitor has
-    committed to for this query. Captured the first time a class
-    with a ``tenant_field`` resolves; subsequent class resolutions
-    that report a *different* ``tenant_entity`` raise
-    :class:`~arango_sparql.errors.CrossTenantJoinError`. ``None``
-    until the first tenant-scoped class is seen — single-tenant
-    queries (no class declares ``phys:tenantEntity``) leave this
-    untouched."""
+    tenant: _TenantCommitment = field(default_factory=_TenantCommitment)
+    """The query's tenant commitment, shared with every nested scope
+    (:meth:`share_query_state`)."""
 
     tenant_bind_placeholder: str | None = None
     """Cached ``@_pN_tenant`` bind placeholder so every tenant
     FILTER in the same query references the same bind variable.
     Without the cache each FOR would mint its own bind, multiplying
-    the bind-vars dict and obscuring the AQL."""
+    the bind-vars dict and obscuring the AQL. A nested scope inherits the
+    parent's (:meth:`share_query_state`) but does not hand back one it
+    mints: the bind lives in the child's builder, and a child discarded
+    after a probe pass (``union_paths``) would leave it undeclared."""
 
     guard_binds: dict[tuple[str, str], str] = field(default_factory=dict)
     """Bind parameters of the tenant test (:meth:`AlgebraVisitor._tenant_test`),
@@ -278,6 +293,22 @@ class _BindingState:
     ``(var_name, inner_value_expr, outer_bound_expr)`` here so
     ``emit_minus`` can build the disjoint-domain "overlap" guard
     (§8.3.4) the minuend semantics require."""
+
+    def share_query_state(self, child: _BindingState) -> None:
+        """Give a nested scope's *child* state what belongs to the whole
+        query rather than to a scope: the name counters and the tenant
+        commitment (shared, so what either side does the other sees), and
+        the tenant bind the parent already minted.
+
+        Every child visitor calls this — ``union_paths._spawn_child`` (UNION
+        arms, OPTIONAL subqueries, mixed-store arms), the MINUS / EXISTS
+        probe and the sub-select — whatever scope state it then copies or
+        leaves out (#211: the probe and the sub-select had left the tenant
+        commitment out, and a copied one never reached the parent).
+        """
+        child.counters = self.counters
+        child.tenant = self.tenant
+        child.tenant_bind_placeholder = self.tenant_bind_placeholder
 
 
 def _subject_equals(value: str) -> Callable[[str], str]:
@@ -2600,14 +2631,17 @@ class AlgebraVisitor:
         if resolved.tenant_field is None:
             return
         if resolved.tenant_entity is not None:
-            committed = self.state.tenant_entity
+            committed = self.state.tenant.entity
             if committed is None:
-                self.state.tenant_entity = resolved.tenant_entity
+                self.state.tenant.entity = resolved.tenant_entity
             elif committed != resolved.tenant_entity:
+                # Not only a join: a UNION of separately rooted arms is refused
+                # too, since one tenant cannot scope both roots (#211).
                 raise CrossTenantJoinError(
-                    f"SPARQL query joins entities across tenant roots "
-                    f"{committed!r} and {resolved.tenant_entity!r}; "
-                    f"cross-tenant joins are forbidden (PRD §6.5.1)"
+                    f"SPARQL query reads entities under two tenant roots, "
+                    f"{committed!r} and {resolved.tenant_entity!r}, joined or not; "
+                    f"one tenant cannot scope both, so a query across tenant roots "
+                    f"is forbidden (PRD §6.5.1)"
                 )
         if self.tenant_id is None:
             # A tenant-scoped class with no tenant context would
