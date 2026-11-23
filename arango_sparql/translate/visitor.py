@@ -52,7 +52,12 @@ from .optional_crosssubject import (
     emit_rpt_cross_subject_optional,
     is_rpt_cross_subject_optional,
 )
-from .optional_subquery import emit_optional_subquery, group_own_value, group_scoped_variables
+from .optional_subquery import (
+    certain_variables,
+    emit_optional_subquery,
+    group_own_value,
+    group_scoped_variables,
+)
 from .optional_subquery import needs_subquery as needs_optional_subquery
 from .paths import emit_path_triple
 from .predicates import LoopEmitter, LoopPlan, PredicateCall, extract_predicate_calls, resolve_call
@@ -955,6 +960,12 @@ class AlgebraVisitor:
             tuple[str, ResolvedProperty, str, str]
         ] = []  # (var, prop, edge collection, subject alias)
         seen_vars: set[str] = set()
+        # Variables the required side binds in every row, and the optional
+        # triples that only re-bind one of them inside a MINUS probe (#143).
+        required_certain = (
+            certain_variables(node.p1) if self.state.optional_rebind_sink is not None else set()
+        )
+        noop_rebinds: list[str] = []
         for triple in getattr(p2, "triples", []) or []:
             s, p, o = triple
             # OPTIONAL semantics in AQL only stay simple when the
@@ -990,6 +1001,14 @@ class AlgebraVisitor:
                 raise UnsupportedSparqlError(
                     f"OPTIONAL re-binds variable ?{o_name} that's already bound by the required side"
                 )
+            if is_rebind and o_name in required_certain:
+                # Inside a MINUS probe, the OPTIONAL's own required side binds
+                # the variable in every row: a failed match keeps the row
+                # unextended (§18.5 LeftJoin), so the triple cannot remove a
+                # row or change a shared value. Testing it as a conditional add
+                # dropped those rows and kept outer rows MINUS must remove (#143).
+                noop_rebinds.append(o_name)
+                continue
             if str(s) in self.state.var_to_rpt_class and is_rebind:
                 # Reached only inside a MINUS probe (elsewhere the subquery
                 # emitter takes a triples-table subject): the reads below are
@@ -1049,6 +1068,15 @@ class AlgebraVisitor:
             new_bindings.append((o_name, value_expr))
             seen_vars.add(o_name)
 
+        if noop_rebinds and len(noop_rebinds) < len(p2.triples):
+            # The other triples extend a row only where the re-binding ones
+            # match too; the inline emitter cannot gate them on that, so refuse
+            # rather than answer wrongly (#143).
+            names = ", ".join(f"?{name}" for name in noop_rebinds)
+            raise UnsupportedSparqlError(
+                f"OPTIONAL inside MINUS that re-binds {names}, already bound by its required side, "
+                f"together with other triples is not supported"
+            )
         if not new_bindings and not edge_bindings:
             # Empty OPTIONAL (e.g. only a FILTER, no triples) is a
             # no-op under our same-subject restriction — return cleanly

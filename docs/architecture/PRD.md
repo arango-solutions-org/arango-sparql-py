@@ -1064,8 +1064,11 @@ already bound is refused (`E_SPARQL_UNSUPPORTED`). It overwrote the
 binding instead of comparing it. Inside MINUS, one that re-binds a
 variable of the outer query binds its own value and compares it, since
 the right side is evaluated on its own (#194; it was refused; see the
-`OPTIONAL` group scope row in §6.6). An unshared OPTIONAL variable inside
-MINUS, filtered or not, cannot change the result and is translated.
+`OPTIONAL` group scope row in §6.6). An optional triple re-binding a
+variable the OPTIONAL's own required side binds in every row is skipped,
+and refused when it shares the OPTIONAL with other triples (#143). An
+unshared OPTIONAL variable inside MINUS, filtered or not, cannot change
+the result and is translated.
 Tested against pyoxigraph in
 `tests/cross/test_optional_crosssubject_cross.py` and live in
 `tests/integration/test_optional_triples_live.py`. Emitting one class per stored
@@ -5049,7 +5052,10 @@ bound emits a *conditional equality* rather than rejecting. Two parts:
    switches `visit_LeftJoin` out of "reject re-bind" mode inside a MINUS
    probe; each re-binding optional triple emits a compatibility FILTER
    `(<inner> == null || <outer> == null || <inner> == <outer>)` and
-   records `(var, inner_value, outer_bound)` — no fresh binding.
+   records `(var, inner_value, outer_bound)` — no fresh binding. An
+   optional triple re-binding a variable the OPTIONAL's own required side
+   binds in every row is skipped, and refused when it shares the OPTIONAL
+   with other triples (#143).
 2. **Disjoint-domain exemption (§8.3.4).** A MINUS inner row only removes
    an outer row when they share ≥ 1 bound variable; `_translate_probe`
    adds an overlap guard when every shared variable is bound by an
