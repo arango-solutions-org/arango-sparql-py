@@ -12,6 +12,7 @@ import pytest
 import yaml
 
 from arango_sparql.api import translate
+from arango_sparql.errors import UnsupportedSparqlError
 from arango_sparql.translate.resolver import SchemaResolver
 
 GOLDEN_PATH = Path(__file__).parent / "construct.yml"
@@ -56,3 +57,11 @@ def test_construct_golden(
         f"--- expected ---\n{expected_bind_vars}\n"
         f"--- actual ---\n{result.bind_vars}"
     )
+
+
+def test_construct_offset_without_limit_is_refused_like_select() -> None:
+    """#164: an OFFSET on CONSTRUCT is refused as on SELECT, never dropped."""
+    resolver = SchemaResolver.from_turtle(yaml.safe_load(GOLDEN_PATH.read_text())["ontology"])
+    sparql = "PREFIX : <http://ex.org/>\nCONSTRUCT { ?s :name ?n } WHERE { ?s a :Person ; :name ?n } OFFSET 1"
+    with pytest.raises(UnsupportedSparqlError, match="OFFSET without LIMIT"):
+        translate(sparql, resolver=resolver)

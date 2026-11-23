@@ -103,3 +103,56 @@ cases:
       "@c1_Person": "Person"
       "_p1": 18
       "_p2_uri": "http://xmlns.com/foaf/0.1/age"
+
+  # Solution modifiers apply to the WHERE solutions before the template
+  # is instantiated (SPARQL 1.1 §16.2, #164). rdflib puts LIMIT/OFFSET
+  # in a Slice above the Project; visiting it emitted the Project's
+  # RETURN before the triple RETURN ("RETURN already emitted").
+  - name: construct_with_limit
+    sparql: |
+      PREFIX : <http://ex.org/>
+      PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+      CONSTRUCT { ?s foaf:name ?n }
+      WHERE { ?s a :Person ; :name ?n }
+      LIMIT 2
+    expected_aql: |-
+      FOR doc1 IN @@c1_Person
+      FILTER HAS(doc1, "name")
+      LIMIT 2
+      RETURN [{subject: NOT_NULL(doc1._uri, doc1._id), predicate: @_p1_uri, object: doc1.name}]
+    expected_bind_vars:
+      "@c1_Person": "Person"
+      "_p1_uri": "http://xmlns.com/foaf/0.1/name"
+
+  - name: construct_with_order_by_offset_limit
+    sparql: |
+      PREFIX : <http://ex.org/>
+      PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+      CONSTRUCT { ?s foaf:name ?n }
+      WHERE { ?s a :Person ; :name ?n }
+      ORDER BY DESC(?n) OFFSET 1 LIMIT 2
+    expected_aql: |-
+      FOR doc1 IN @@c1_Person
+      FILTER HAS(doc1, "name")
+      SORT doc1.name DESC
+      LIMIT 1, 2
+      RETURN [{subject: NOT_NULL(doc1._uri, doc1._id), predicate: @_p1_uri, object: doc1.name}]
+    expected_bind_vars:
+      "@c1_Person": "Person"
+      "_p1_uri": "http://xmlns.com/foaf/0.1/name"
+
+  - name: construct_where_short_form_with_limit
+    sparql: |
+      PREFIX : <http://ex.org/>
+      CONSTRUCT WHERE { ?s a :Person ; :name ?n }
+      LIMIT 5
+    expected_aql: |-
+      FOR doc1 IN @@c1_Person
+      FILTER HAS(doc1, "name")
+      LIMIT 5
+      RETURN [{subject: NOT_NULL(doc1._uri, doc1._id), predicate: @_p1_uri, object: @_p2_uri}, {subject: NOT_NULL(doc1._uri, doc1._id), predicate: @_p3_uri, object: doc1.name}]
+    expected_bind_vars:
+      "@c1_Person": "Person"
+      "_p1_uri": "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+      "_p2_uri": "http://ex.org/Person"
+      "_p3_uri": "http://ex.org/name"

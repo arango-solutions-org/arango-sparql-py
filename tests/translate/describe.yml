@@ -52,6 +52,21 @@ cases:
       "@c1_Person": "Person"
       "_p1_name": "Alice"
 
+  - name: describe_var_where_pg_order_by_limit
+    # ORDER BY / LIMIT cut the WHERE solutions before each is described
+    # (#164); the LIMIT arrives as a Slice above the stripped Project.
+    sparql: |
+      PREFIX : <http://ex.org/>
+      DESCRIBE ?s WHERE { ?s a :Person ; :name ?n } ORDER BY ?n LIMIT 1
+    expected_aql: |-
+      FOR doc1 IN @@c1_Person
+      FILTER HAS(doc1, "name")
+      SORT doc1.name ASC
+      LIMIT 1
+      RETURN (FOR k IN ATTRIBUTES(doc1) FILTER k NOT IN ['_id', '_key', '_rev', '_uri', '_type'] RETURN {subject: NOT_NULL(doc1._uri, doc1._id), predicate: k, object: doc1[k]})
+    expected_bind_vars:
+      "@c1_Person": "Person"
+
   - name: describe_bare_single_iri
     # Bare DESCRIBE reads every collection the mapping can store the IRI
     # in (#150): each class's collection (``Person``), the default one
