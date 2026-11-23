@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import re
+import warnings
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
@@ -1123,17 +1124,8 @@ class SchemaResolver(AdvisoryLog):
         if not resolved or any(r.style != "RPT" for r in resolved):
             return None
 
-        def layout(r: ResolvedClass) -> tuple[str, ...]:
-            return (
-                r.collection,
-                r.subject_column,
-                r.predicate_column,
-                r.object_uri_column,
-                r.object_value_column,
-                str(r.tenant_field),
-            )
-
-        if len({layout(r) for r in resolved}) != 1:
+        # One table and column layout, and one tenant scoping of it.
+        if len({(*r.table_layout, str(r.tenant_field)) for r in resolved}) != 1:
             return None
         self._triple_store_class = replace(resolved[0], iri=TRIPLE_STORE_IRI)
         return self._triple_store_class
@@ -1212,6 +1204,16 @@ class SchemaResolver(AdvisoryLog):
         if not self.strict_subject_resolution and (collections or not tables):
             return tuple(sorted({*collections, self.default_collection})), tables
         return collections, tables
+
+    def described_sources(self) -> tuple[tuple[str, ...], tuple[ResolvedClass, ...]]:
+        """Deprecated alias of :meth:`store_sources` (shipped in 0.8.1 for
+        ``DESCRIBE``; the mixed-store reads use the same survey since #199)."""
+        warnings.warn(
+            "SchemaResolver.described_sources() is deprecated; call store_sources()",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.store_sources()
 
     def _class_sources(self) -> tuple[tuple[str, ...], tuple[ResolvedClass, ...]]:
         """Every class's document collections and triples tables, resolved

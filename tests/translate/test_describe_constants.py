@@ -200,3 +200,10 @@ def test_an_unindexed_collection_is_warned_about() -> None:
     )
     warned = {w["iri"] for w in result.schema_warnings if w["code"] == "W_SCHEMA_URI_INDEX_MISSING"}
     assert warned == {"Person"}
+
+
+def test_described_sources_is_a_deprecated_alias_of_store_sources() -> None:
+    # Public since 0.8.1; kept for callers outside this repo (review of #213).
+    resolver = _resolver()
+    with pytest.warns(DeprecationWarning, match="store_sources"):
+        assert resolver.described_sources() == resolver.store_sources()
