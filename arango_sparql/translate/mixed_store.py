@@ -110,8 +110,11 @@ def route_subject(visitor: AlgebraVisitor, subject: Any, predicate: Any) -> Stor
     ``None`` for: a mapping with no triples table, or one that is a single
     triple store (:meth:`SchemaResolver.triple_store_class`, whose reader
     already takes every unplaced subject); a subject already placed (opened
-    as a document or a triples row, a relationship node, a subject re-read
-    at its home inside a GRAPH); and a predicate whose triples are edges.
+    as a document or a triples row, a relationship node); and a predicate
+    whose triples are edges. A subject's home (the class collection a GRAPH
+    or a MINUS / EXISTS probe re-reads an outer subject from) does not place
+    it: the triples table may hold the fact (``?c a :Company GRAPH :g2 { ?c
+    :email ?m }``), so every store is read (#90).
 
     A route to documents only (``:cname``, domain ``:Company``) is still
     this module's: the visitor's domain routing would open the subject as a
@@ -135,14 +138,11 @@ def route_subject(visitor: AlgebraVisitor, subject: Any, predicate: Any) -> Stor
             name in state.var_to_doc_alias
             or name in state.var_to_rpt_class
             or name in state.relationship_nodes
-            or name in state.outer_subject_homes
         ):
             return None
     elif isinstance(subject, URIRef):
         key = str(subject)
         if key in state.const_subject_alias or key in state.const_subject_rpt_class:
-            return None
-        if key in state.outer_subject_homes:
             return None
     else:
         return None

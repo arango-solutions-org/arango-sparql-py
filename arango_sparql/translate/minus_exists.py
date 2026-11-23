@@ -282,6 +282,16 @@ def _translate_probe(
     # FILTER EXISTS { ?s :q ?v } }`` passed on ``:q`` in the default graph
     # (#195). ``_spawn_child`` (UNION, OPTIONAL subquery) carries it too.
     child_visitor.state.graph_scope = list(visitor.state.graph_scope)
+    # An outer subject typed outside the probe is re-read in its class's
+    # collection when no probe triple's domain routes it, not in the default
+    # collection (#90): ``?p a :Person FILTER EXISTS { ?p :age ?c }`` with
+    # ``:age`` unmapped read ``Document``, and strict resolution refused it.
+    # A home does not place the subject for ``route_subject`` (#191): on a
+    # mapping with a triples table an attribute triple is still read from
+    # every store, since the table may hold the fact. Homes serve the edge
+    # predicates #191 leaves to the visitor
+    # (``?c a :Company FILTER EXISTS { ?c :partner ?x }``).
+    child_visitor.state.outer_subject_homes = visitor._subject_homes()
     if substitute:
         # EXISTS substitutes the outer row into its pattern (§18.6): those
         # variables are constants throughout it, inside an OPTIONAL body too,

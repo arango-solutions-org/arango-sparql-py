@@ -82,6 +82,11 @@ ANSWERED = [
     pytest.param(
         "SELECT ?c ?m WHERE { ?s a :Person . ?s :worksFor ?c . ?c :email ?m }", id="default_graph_chain"
     ),
+    # A subject typed outside the GRAPH: its home does not place it, so the
+    # triples table's g2 email is read (#90; it read the document alone).
+    pytest.param(
+        'SELECT ?c WHERE { ?c a :Company GRAPH :g2 { ?c :email "g2mail" } }', id="named_graph_typed_outside"
+    ),
 ]
 # ``GRAPH ?g`` around a read of every store binds ?g from the row (#203).
 GRAPH_VARIABLE = [
@@ -100,7 +105,43 @@ GRAPH_VARIABLE = [
         "SELECT ?g ?m WHERE { GRAPH ?g { ?x a :Company } GRAPH ?g { :acme :email ?m } }", id="bound_by_type"
     ),
 ]
-ANSWERED = ANSWERED + GRAPH_VARIABLE
+# A MINUS / EXISTS probe on a typed document reads every store for an
+# attribute, inside a GRAPH or around one: the home #90 seeds a probe with
+# serves the edge emitter and does not place the subject for #191's routing.
+# ``g2mail`` is a triples-table fact in g2 only.
+PROBES = [
+    pytest.param(
+        'SELECT ?c WHERE { GRAPH :g2 { ?c a :Company FILTER EXISTS { ?c :email "g2mail" } } }',
+        id="exists_table_fact",
+    ),
+    pytest.param(
+        'SELECT ?c WHERE { GRAPH :g2 { ?c a :Company MINUS { ?c :email "g2mail" } } }', id="minus_table_fact"
+    ),
+    pytest.param(
+        'SELECT ?g ?c WHERE { GRAPH ?g { ?c a :Company FILTER EXISTS { ?c :email "g2mail" } } }',
+        id="exists_table_fact_graph_variable",
+    ),
+    pytest.param(
+        'SELECT * WHERE { GRAPH :g2 { :acme a :Company FILTER EXISTS { :acme :email "g2mail" } } }',
+        id="exists_table_fact_constant",
+    ),
+    # The GRAPH inside the probe (#90 review): the probe's home and the
+    # GRAPH's must not stop the table read either.
+    pytest.param(
+        'SELECT ?c WHERE { ?c a :Company FILTER EXISTS { GRAPH :g2 { ?c :email "g2mail" } } }',
+        id="graph_in_exists_table_fact",
+    ),
+    pytest.param(
+        'SELECT ?c WHERE { ?c a :Company MINUS { GRAPH :g2 { ?c :email "g2mail" } } }',
+        id="graph_in_minus_table_fact",
+    ),
+    pytest.param(
+        'SELECT * WHERE { :acme a :Company FILTER EXISTS { GRAPH :g2 { :acme :email "g2mail" } } }',
+        id="graph_in_exists_table_fact_constant",
+    ),
+]
+
+ANSWERED = ANSWERED + GRAPH_VARIABLE + PROBES
 
 
 def _row(s: str, p: str, o: str, iri: bool, g: str | None) -> dict[str, Any]:

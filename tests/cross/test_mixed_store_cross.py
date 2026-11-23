@@ -147,6 +147,10 @@ QUERIES = [
         "SELECT ?s ?c WHERE { ?s a :Person ; :worksFor ?c FILTER EXISTS { ?c :email ?m } }", id="exists_email"
     ),
     pytest.param("SELECT ?s ?x WHERE { ?s a :Person ; :knows ?x MINUS { ?x :email ?m } }", id="minus_email"),
+    # The same probes on a typed company: its document has a home, and the
+    # probe must still read the triples table (#90's fix kept off this route).
+    pytest.param("SELECT ?c WHERE { ?c a :Company FILTER EXISTS { ?c :email ?m } }", id="exists_email_typed"),
+    pytest.param("SELECT ?c WHERE { ?c a :Company MINUS { ?c :email ?m } }", id="minus_email_typed"),
     pytest.param(
         "SELECT ?s ?c WHERE { ?s a :Person ; :worksFor ?c FILTER NOT EXISTS { ?c ?p ?v } }",
         id="not_exists_variable_predicate",
@@ -322,3 +326,43 @@ def test_a_declared_domain_is_read_not_the_default_collection(mapping: str) -> N
 
     assert DEFAULT_COLLECTION not in result.bind_vars.values()
     assert run_aql_subset(result.aql, result.bind_vars, stored) == []
+
+
+# An edge predicate is the visitor's to route, not #191's (``route_subject``
+# steps aside for it), so a probe on a typed company walks the edge from the
+# company's own collection, the home #90's fix seeds (#90 on a mixed mapping).
+_PARTNERS = ':partner a owl:ObjectProperty ; phys:edgeCollectionName "R191" .\n'
+_PARTNER_FACTS = f"@prefix : <{EX}> .\n:acme :partner :globex .\n"
+
+
+@pytest.mark.cross
+@pytest.mark.parametrize("strict", [False, True], ids=["library", "strict"])
+@pytest.mark.parametrize("ontology", sorted(ONTOLOGIES))
+@pytest.mark.parametrize(
+    "where",
+    [
+        "SELECT ?c WHERE { ?c a :Company FILTER EXISTS { ?c :partner ?x } }",
+        "SELECT ?c WHERE { ?c a :Company MINUS { ?c :partner ?x } }",
+    ],
+    ids=["exists_edge_typed", "minus_edge_typed"],
+)
+def test_an_edge_probe_on_a_typed_document_in_a_mixed_mapping_matches_oxigraph(
+    where: str, ontology: str, strict: bool
+) -> None:
+    query = PREFIX + where
+    resolver = SchemaResolver.from_turtle(
+        ONTOLOGIES[ontology] + _PARTNERS, default_collection=DEFAULT_COLLECTION
+    )
+    resolver.strict_subject_resolution = strict
+    stored = {
+        **collections(),
+        "C191": [{**d, "_id": f"C191/{d['_key']}"} for d in DOCS],
+        "R191": [{"_from": "C191/acme", "_to": "C191/globex"}],
+    }
+
+    result = translate(query, resolver=resolver)
+    actual = [drop_null_bindings(r) for r in run_aql_subset(result.aql, result.bind_vars, stored)]
+
+    store = load_store_from_string(facts(strict) + _PARTNER_FACTS)
+    expected = [normalize_oxi_row(r) for r in oxi_bindings(store, query)]
+    assert_bindings_equal(expected, actual)
