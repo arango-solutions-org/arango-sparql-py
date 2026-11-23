@@ -205,6 +205,89 @@ def _multiset(rows: list[dict[str, Any]]) -> list[str]:
             "SELECT ?s ?o WHERE { ?s a :Person ; :knows ?o MINUS { ?t a :Person OPTIONAL { ?t :knows ?o } } }",
             id="minus_rebind",
         ),
+        # MINUS over a sub-select, with ?x unbound in the rows of d, e and g:
+        # those rows overlap the right side on ?s alone, so a right-side
+        # solution for their ?s removes them (§8.3.4). MINUS's walker could
+        # not see into a sub-select and joined ?x as a value, keeping d and g
+        # (code-quality review of #196–#199).
+        pytest.param(
+            "SELECT ?s ?x WHERE { ?s :name ?n OPTIONAL { ?s :likes ?x } "
+            "MINUS { SELECT ?s ?x WHERE { ?s :knows ?x } } }",
+            id="minus_subselect_open_outer",
+        ),
+        pytest.param(
+            "SELECT ?s ?x WHERE { ?s :name ?n OPTIONAL { ?s :likes ?x } "
+            "MINUS { SELECT DISTINCT ?s ?x WHERE { ?s :knows ?x } LIMIT 10 } }",
+            id="minus_subselect_distinct_limit",
+        ),
+        # The sub-select's ?x can itself be unbound: no row is certain to
+        # overlap, and every row is removed.
+        pytest.param(
+            "SELECT ?s ?x WHERE { ?s :name ?n OPTIONAL { ?s :likes ?x } "
+            "MINUS { SELECT ?s ?x WHERE { ?s :name ?m OPTIONAL { ?s :knows ?x } } } }",
+            id="minus_subselect_optional_column",
+        ),
+        pytest.param(
+            "SELECT ?s ?x WHERE { ?s :name ?n OPTIONAL { ?s :likes ?x } "
+            "MINUS { SELECT ?s (MIN(?k) AS ?x) WHERE { ?s :knows ?k } GROUP BY ?s } }",
+            id="minus_subselect_aggregate_column",
+            marks=pytest.mark.xfail(
+                strict=True,
+                reason="#212: the probe's sub-select join leaves out the outer row's unbound ?x",
+            ),
+        ),
+        # Any sub-select column the probe joins in its one-sided form, not
+        # only an aggregate: a projected copy too (#212).
+        pytest.param(
+            "SELECT ?s ?x WHERE { ?s :name ?n OPTIONAL { ?s :likes ?x } "
+            "MINUS { SELECT ?s (?k AS ?x) WHERE { ?s :knows ?k } } }",
+            id="minus_subselect_copy_column",
+            marks=pytest.mark.xfail(
+                strict=True,
+                reason="#212: the probe's sub-select join leaves out the outer row's unbound ?x",
+            ),
+        ),
+        # A BIND in an OPTIONAL of the group binds the group's own ?x: it is
+        # computed, never substituted by the outer value, so a later
+        # OPTIONAL and the padding read the group's value (review of #213;
+        # main counted the BIND target as always bound and kept a row for
+        # a's ?x = c with a's ?k = b).
+        pytest.param(
+            "SELECT ?s ?x ?n ?k WHERE { ?s :knows ?x OPTIONAL { ?s :name ?n "
+            "OPTIONAL { ?s :likes ?k BIND(?k AS ?x) } } }",
+            id="group_optional_bind_copy",
+        ),
+        pytest.param(
+            "SELECT ?s ?x ?n ?m WHERE { ?s :knows ?x OPTIONAL { ?s :name ?n "
+            "OPTIONAL { ?s :likes ?k BIND(?k AS ?x) } OPTIONAL { ?x :email ?m } } }",
+            id="group_optional_bind_copy_then_contact",
+        ),
+        pytest.param(
+            "SELECT ?s ?x WHERE { ?s :knows ?x MINUS { ?s :name ?n OPTIONAL { ?s :likes ?k BIND(?k AS ?x) } } }",
+            id="minus_optional_bind_copy",
+        ),
+        # Refused on main ("binds in only some solutions"), answered now.
+        pytest.param(
+            "SELECT ?s ?x ?n WHERE { ?s :knows ?x OPTIONAL { ?s :name ?n OPTIONAL { BIND(:c AS ?x) } } }",
+            id="group_optional_bind_constant",
+        ),
+        pytest.param(
+            "SELECT ?s ?x ?n ?m WHERE { ?s :knows ?x OPTIONAL { ?s :name ?n "
+            "OPTIONAL { ?s :likes ?k BIND(IF(?k = :c, ?k, 1/0) AS ?x) } OPTIONAL { ?x :email ?m } } }",
+            id="group_optional_bind_expression",
+        ),
+        # A sub-select column that copies a variable bound in every solution
+        # is substituted, as on main.
+        pytest.param(
+            "SELECT ?s ?x ?n ?m WHERE { ?s :knows ?x OPTIONAL { ?s :name ?n "
+            "{ SELECT ?s (?k AS ?x) WHERE { ?s :likes ?k } } OPTIONAL { ?x :email ?m } } }",
+            id="subselect_copy_column",
+        ),
+        pytest.param(
+            "SELECT ?s ?x ?n ?m WHERE { ?s :knows ?x OPTIONAL { ?s :name ?n "
+            "{ SELECT ?s ?x WHERE { ?s :likes ?k BIND(?k AS ?x) } } OPTIONAL { ?x :email ?m } } }",
+            id="subselect_bind_copy_column",
+        ),
     ],
 )
 def test_nested_optional_group_scope_matches_oxigraph(

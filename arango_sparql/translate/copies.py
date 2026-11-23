@@ -61,6 +61,7 @@ from .builder import (
     AqlQueryBuilder,
     attribute_path_ref,
     attribute_ref,
+    indent_aql,
     is_aql_identifier,
 )
 from .resolver import ResolvedClass, ResolvedProperty
@@ -204,7 +205,7 @@ def drop_repeated_copies(visitor: AlgebraVisitor) -> None:
             probe.return_scalar("1")
             text = builder.absorb_child(probe)
             repeated = builder.fresh_alias(prefix="repeated")
-            builder.let(repeated, f"({guard}) ? LENGTH((\n{_indent(text)}\n)) : 0")
+            builder.let(repeated, f"({guard}) ? LENGTH((\n{indent_aql(text)}\n)) : 0")
             builder.filter_raw(f"{repeated} == 0")
 
 
@@ -305,7 +306,7 @@ def emit_attribute_across_copies(
         f"[{attribute_path_ref(alias, prop.field_path)}] : [])"
     )
     builder.let(
-        values, f"({alias}._uri != null) ? UNIQUE((\n{_indent(builder.absorb_child(sub))}\n)) : {own}"
+        values, f"({alias}._uri != null) ? UNIQUE((\n{indent_aql(builder.absorb_child(sub))}\n)) : {own}"
     )
     # When the attribute fans out (``fan_out_list_values``, or declared
     # multi-valued) a list value is one triple per element, as a one-document
@@ -345,7 +346,3 @@ def emit_attribute_across_copies(
 def _distinct_tenants(classes: list[ResolvedClass]) -> list[ResolvedClass]:
     """One class per tenant scoping among *classes*."""
     return list({(c.tenant_field, c.tenant_entity): c for c in classes}.values())
-
-
-def _indent(text: str) -> str:
-    return "\n".join("  " + line for line in text.splitlines())

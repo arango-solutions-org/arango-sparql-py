@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING, Any
 from rdflib import Literal, URIRef, Variable
 
 from ..errors import AqlEmitError, UnsupportedSparqlError
-from .builder import attribute_ref, subject_ref
+from .builder import attribute_ref, subject_ref, triple_object_is_iri, triple_object_ref
 
 if TYPE_CHECKING:
     from .builder import AqlQueryBuilder
@@ -185,10 +185,7 @@ def _emit_rpt_branch(
     visitor._record_var_expr(predicate, attribute_ref(triples_alias, rpt_class.predicate_column))
     # ``?o`` follows the same NOT_NULL shape as
     # _emit_rpt_property_triple's Variable branch.
-    coalesce_expr = (
-        f"NOT_NULL({attribute_ref(triples_alias, rpt_class.object_uri_column)}, "
-        f"{attribute_ref(triples_alias, rpt_class.object_value_column)})"
-    )
+    coalesce_expr = triple_object_ref(triples_alias, rpt_class)
     if isinstance(obj, Variable):
         o_name = str(obj)
         existing = visitor.state.var_to_expr.get(o_name)
@@ -199,10 +196,7 @@ def _emit_rpt_branch(
         return
     if isinstance(obj, URIRef):
         uri_bind = visitor.builder.bind(str(obj), hint="obj")
-        visitor.builder.filter_raw(
-            f"({attribute_ref(triples_alias, rpt_class.object_uri_column)} == {uri_bind} "
-            f"|| {attribute_ref(triples_alias, rpt_class.object_value_column)} == {uri_bind})"
-        )
+        visitor.builder.filter_raw(triple_object_is_iri(triples_alias, rpt_class, uri_bind))
         return
     if isinstance(obj, Literal):
         # Local import to avoid circular dependency at module

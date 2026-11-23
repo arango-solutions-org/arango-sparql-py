@@ -32,9 +32,9 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from rdflib import Variable
+from rdflib import Literal, URIRef, Variable
 
-from .builder import attribute_ref
+from .builder import attribute_ref, indent_aql
 from .mixed_store import route_subject
 from .union_paths import _spawn_child
 
@@ -77,14 +77,31 @@ def group_scoped_variables(visitor: AlgebraVisitor, scope_before: set[str], node
 
 
 def certain_variables(node: Any) -> set[str]:
-    """The variables a graph pattern binds in every solution.
+    """The variables a graph pattern binds in every one of its solutions.
 
-    An OPTIONAL's side, a MINUS's right side, a variable only some UNION
-    arms bind, a VALUES column with an ``UNDEF`` cell and a sub-select
-    column its own pattern can leave unbound can each be unbound. A BIND
-    target counts as bound (a BIND onto an outer variable is refused), as
-    does every variable of a pattern this does not look inside: those keep
-    the sequential translation they had before #194.
+    The one walker for "bound in every solution": the group-scoped OPTIONAL
+    (#194, #197) and MINUS's disjoint-domain rule (:func:`.minus_exists.emit_minus`,
+    #196) both use it, so they cannot disagree on a pattern. Both rely on
+    it never claiming a variable that can be unbound, so it is conservative:
+    a pattern it does not look inside binds nothing for certain.
+
+    A BGP binds its variables; a join both sides'; a left join or MINUS its
+    left side's; a UNION what every arm binds; a GRAPH its pattern's plus a
+    GRAPH variable; a VALUES block the columns no row leaves ``UNDEF``; a
+    sub-select the columns its own pattern binds in every solution. A
+    FILTER, DISTINCT, ORDER BY, LIMIT or GROUP keeps its pattern's.
+
+    A BIND target in a group is not counted, even a plain copy of a bound
+    variable: an expression that errors leaves it unbound (§18.6), and the
+    group-scoped OPTIONAL substitutes what this returns by an index lookup
+    on the outer value, which a computed value cannot take (review of #213:
+    counting ``OPTIONAL { ?s :likes ?k BIND(?k AS ?x) }`` gave wrong rows).
+    A sub-select's column is joined by value instead, so it counts when it
+    cannot be unbound: a constant, or a plain copy of a variable its pattern
+    binds in every solution (``SELECT ?s (?k AS ?x)``, or ``BIND(?k AS ?x)``
+    as the sub-select's last step; :func:`_column_certain`). An aggregate
+    column never counts (SAMPLE, MIN over nothing; review of #197): rdflib
+    reads it through an ``__agg_<n>__`` variable its pattern never binds.
     """
     if node is None:
         return set()
@@ -95,31 +112,52 @@ def certain_variables(node: Any) -> set[str]:
         return certain_variables(node.p1) | certain_variables(node.p2)
     if name in ("LeftJoin", "Minus"):
         return certain_variables(node.p1)
-    if name in ("Filter", "ToMultiSet", "Distinct", "Reduced", "OrderBy", "Slice", "Group", "AggregateJoin"):
-        # An aggregate's result can be unbound (SAMPLE, MIN over nothing):
-        # only the grouped pattern's own variables count (review of #197).
+    if name in (
+        "Filter",
+        "Extend",
+        "ToMultiSet",
+        "Distinct",
+        "Reduced",
+        "OrderBy",
+        "Slice",
+        "Group",
+        "AggregateJoin",
+    ):
         return certain_variables(node.p)
     if name in ("Project", "SelectQuery"):
-        # A sub-select's column is bound in every row only if its own
-        # pattern binds it in every solution (review of #197).
-        return {str(v) for v in node.get("PV") or []} & certain_variables(node.p)
+        return {str(v) for v in node.get("PV") or []} & _column_certain(node.p)
     if name == "values":
-        # A column with an ``UNDEF`` cell (or a row without it) can be unbound.
         rows = node.get("res") or []
         columns = {str(var) for row in rows for var in row}
-        return {
-            column
-            for column in columns
-            if all(row.get(Variable(column)) not in (None, "UNDEF") for row in rows)
-        }
+        return {column for column in columns if all(_bound_cell(row.get(Variable(column))) for row in rows)}
     if name == "Union":
         return certain_variables(node.p1) & certain_variables(node.p2)
-    if name == "Extend":
-        return certain_variables(node.p) | {str(node.var)}
     if name == "Graph":
         term = node.term
         return certain_variables(node.p) | ({str(term)} if isinstance(term, Variable) else set())
-    return bound_variables(node)
+    return set()
+
+
+def _column_certain(node: Any) -> set[str]:
+    """:func:`certain_variables` of a sub-select's pattern, where the
+    ``Extend`` steps directly under its projection (``SELECT (… AS ?x)``, a
+    trailing ``BIND``) also count a constant or a plain copy of a variable
+    bound in every solution: the column is joined with the outside by
+    value, never substituted."""
+    if getattr(node, "name", None) != "Extend":
+        return certain_variables(node)
+    inner = _column_certain(node.p)
+    expr = node.expr
+    if isinstance(expr, (URIRef, Literal)) or (isinstance(expr, Variable) and str(expr) in inner):
+        return inner | {str(node.var)}
+    return inner
+
+
+def _bound_cell(value: Any) -> bool:
+    """Whether a VALUES cell binds its variable: rdflib writes ``UNDEF`` as
+    the plain string ``'UNDEF'`` (a ``Literal`` is a ``str`` subclass, so
+    the type is tested exactly; see ``subselect``)."""
+    return value is not None and not (type(value) is str and value == "UNDEF")
 
 
 def group_own_value(visitor: AlgebraVisitor, node: Any, name: str) -> str | None:
@@ -250,7 +288,7 @@ def _translate_body(
         # per match (SPARQL multiset semantics), so count matches.
         child.builder.return_scalar("1")
     inner_aql = visitor.builder.absorb_child(child.builder)
-    return _Body("\n".join("  " + line for line in inner_aql.splitlines()), values)
+    return _Body(indent_aql(inner_aql), values)
 
 
 def emit_optional_subquery(visitor: AlgebraVisitor, node: Any, loose: dict[str, str] | None = None) -> None:

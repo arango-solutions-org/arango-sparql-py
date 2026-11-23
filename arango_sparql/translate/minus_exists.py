@@ -58,6 +58,9 @@ from typing import TYPE_CHECKING, Any
 
 from rdflib import Variable
 
+from .builder import indent_aql
+from .optional_subquery import certain_variables
+
 if TYPE_CHECKING:
     from .visitor import AlgebraVisitor
 
@@ -124,7 +127,7 @@ def emit_minus(visitor: AlgebraVisitor, node: Any) -> None:
     # bound what — the probe keeps joining the variable as a value, as
     # before #193 (review of #196).
     open_outer = shared_names & visitor.state.maybe_unbound
-    certain = certainly_bound_variables(node.p2)
+    certain = certain_variables(node.p2)
     anchors = (shared_names & certain) - visitor.state.maybe_unbound
     free_outer = open_outer if open_outer and (anchors or shared_names <= certain) else None
     inner_aql = _translate_probe(
@@ -136,7 +139,7 @@ def emit_minus(visitor: AlgebraVisitor, node: Any) -> None:
     )
 
     probe_alias = visitor.builder.fresh_alias(prefix="minus_probe")
-    visitor.builder.let(probe_alias, f"LENGTH((\n{_indent(inner_aql)}\n))")
+    visitor.builder.let(probe_alias, f"LENGTH((\n{indent_aql(inner_aql)}\n))")
     visitor.builder.filter_raw(f"{probe_alias} == 0")
 
 
@@ -178,7 +181,7 @@ def emit_exists_filter(
     inner_aql = _translate_probe(visitor, inner_pattern, substitute=True)
 
     probe_alias = visitor.builder.fresh_alias(prefix=("not_exists_probe" if negated else "exists_probe"))
-    visitor.builder.let(probe_alias, f"LENGTH((\n{_indent(inner_aql)}\n))")
+    visitor.builder.let(probe_alias, f"LENGTH((\n{indent_aql(inner_aql)}\n))")
 
     return f"{probe_alias} == 0" if negated else f"{probe_alias} > 0"
 
@@ -344,51 +347,6 @@ def _translate_probe(
     return visitor.builder.absorb_child(child_builder)
 
 
-def certainly_bound_variables(node: Any) -> set[str]:
-    """The variables *node* binds in every one of its solutions.
-
-    Conservative: a pattern this does not know binds nothing for certain.
-    A BGP binds its variables; a join both sides'; a left join, MINUS,
-    FILTER, BIND or GRAPH its required part's (plus a GRAPH variable); a
-    UNION what every arm binds; a VALUES block the columns no row leaves
-    ``UNDEF``. A sub-select, an aggregate or a path is left out.
-    """
-    from rdflib import Variable as _Variable
-
-    if node is None:
-        return set()
-    name = getattr(node, "name", None)
-    if name == "BGP":
-        return {str(term) for triple in node.triples for term in triple if isinstance(term, _Variable)}
-    if name == "Join":
-        return certainly_bound_variables(node.p1) | certainly_bound_variables(node.p2)
-    if name == "Union":
-        return certainly_bound_variables(node.p1) & certainly_bound_variables(node.p2)
-    if name in ("LeftJoin", "Minus"):
-        return certainly_bound_variables(node.p1)
-    if name in ("Filter", "Extend"):
-        return certainly_bound_variables(node.p)
-    if name == "Graph":
-        term = node.term
-        return certainly_bound_variables(node.p) | ({str(term)} if isinstance(term, _Variable) else set())
-    if name == "ToMultiSet":
-        return certainly_bound_variables(node.p)
-    if name == "values":
-        rows = node.get("res") or []
-        if not rows:
-            return set()
-        columns = {str(var) for row in rows for var in row}
-        return {col for col in columns if all(_bound_cell(row.get(_Variable(col))) for row in rows)}
-    return set()
-
-
-def _bound_cell(value: Any) -> bool:
-    """Whether a VALUES cell binds its variable: rdflib writes ``UNDEF`` as
-    the plain string ``'UNDEF'`` (a ``Literal`` is a ``str`` subclass, so
-    the type is tested exactly; see ``subselect``)."""
-    return value is not None and not (type(value) is str and value == "UNDEF")
-
-
 def _collect_referenced_variables(node: Any) -> set[Variable]:
     """Walk an algebra subtree and collect every ``Variable`` term
     referenced in triples or expressions.
@@ -431,12 +389,3 @@ def _walk_for_vars(node: Any, out: set[Variable]) -> None:
         child = getattr(node, attr, None)
         if child is not None and (isinstance(child, Variable) or hasattr(child, "name")):
             _walk_for_vars(child, out)
-
-
-def _indent(text: str) -> str:
-    """Two-space indent each line — purely cosmetic for the
-    generated LET block. Keeps EXPLAIN-output readable when an
-    inner probe is several lines long. Matches the indentation
-    style :meth:`AqlQueryBuilder.for_subquery` uses for the
-    ``ToMultiSet`` branch."""
-    return "\n".join("  " + line for line in text.splitlines())
