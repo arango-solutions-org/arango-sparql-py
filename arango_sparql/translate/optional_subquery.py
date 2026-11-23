@@ -29,7 +29,8 @@ unbound, which aggregates rely on (SPARQL §18.5.1).
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
 from rdflib import Literal, URIRef, Variable
@@ -444,6 +445,44 @@ def _hide_unshared(child: AlgebraVisitor, names: set[str]) -> dict[str, str]:
         state.var_to_rpt_class.pop(name, None)
         state.maybe_unbound.discard(name)
     return hidden
+
+
+@contextmanager
+def group_filter_scope(visitor: AlgebraVisitor, node: Any) -> Iterator[None]:
+    """While a FILTER of ``Filter(expr, node)`` is translated, hide what its group does not bind.
+
+    A filter is scoped to its group (SPARQL 1.1 §18.2.2): it sees only the
+    variables the group's own pattern *node* binds. The translator visits a
+    nested group or a UNION arm after the pattern around it, so the filter
+    found the outer bindings in scope and read them:
+    ``?a a :Person { FILTER EXISTS { ?a :knows ?x } } UNION { … }`` tested
+    each person, where ``?a`` is unbound in the arm and the EXISTS is true
+    once anyone knows anyone (#107). Hidden here, an EXISTS reads the
+    variable as free and any other read is an unbound variable's error.
+    Kept, as :func:`_translate_body` keeps them: variables an enclosing
+    EXISTS substitutes (constants in its pattern, §18.6) and the active
+    GRAPH variables.
+    """
+    state = visitor.state
+    graph_vars = {str(t) for t in state.graph_scope if isinstance(t, Variable)}
+    names = {
+        name
+        for name in set(state.var_to_expr) - bound_variables(node) - state.substituted - graph_vars
+        if not name.startswith(_INTERNAL_PREFIXES)
+    }
+    saved = {name: (state.var_to_doc_alias.get(name), state.var_to_rpt_class.get(name)) for name in names}
+    maybe = names & state.maybe_unbound
+    hidden = _hide_unshared(visitor, names)
+    try:
+        yield
+    finally:
+        state.var_to_expr.update(hidden)
+        for name, (alias, rpt_class) in saved.items():
+            if alias is not None:
+                state.var_to_doc_alias[name] = alias
+            if rpt_class is not None:
+                state.var_to_rpt_class[name] = rpt_class
+        state.maybe_unbound |= maybe
 
 
 def needs_subquery(visitor: AlgebraVisitor, p2: Any) -> bool:
