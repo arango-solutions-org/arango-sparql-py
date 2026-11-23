@@ -205,6 +205,37 @@ def _multiset(rows: list[dict[str, Any]]) -> list[str]:
             "SELECT ?s ?o WHERE { ?s a :Person ; :knows ?o MINUS { ?t a :Person OPTIONAL { ?t :knows ?o } } }",
             id="minus_rebind",
         ),
+        # MINUS over a sub-select, with ?x unbound in the rows of d, e and g:
+        # those rows overlap the right side on ?s alone, so a right-side
+        # solution for their ?s removes them (§8.3.4). MINUS's walker could
+        # not see into a sub-select and joined ?x as a value, keeping d and g
+        # (code-quality review of #196–#199).
+        pytest.param(
+            "SELECT ?s ?x WHERE { ?s :name ?n OPTIONAL { ?s :likes ?x } "
+            "MINUS { SELECT ?s ?x WHERE { ?s :knows ?x } } }",
+            id="minus_subselect_open_outer",
+        ),
+        pytest.param(
+            "SELECT ?s ?x WHERE { ?s :name ?n OPTIONAL { ?s :likes ?x } "
+            "MINUS { SELECT DISTINCT ?s ?x WHERE { ?s :knows ?x } LIMIT 10 } }",
+            id="minus_subselect_distinct_limit",
+        ),
+        # The sub-select's ?x can itself be unbound: no row is certain to
+        # overlap, and every row is removed.
+        pytest.param(
+            "SELECT ?s ?x WHERE { ?s :name ?n OPTIONAL { ?s :likes ?x } "
+            "MINUS { SELECT ?s ?x WHERE { ?s :name ?m OPTIONAL { ?s :knows ?x } } } }",
+            id="minus_subselect_optional_column",
+        ),
+        pytest.param(
+            "SELECT ?s ?x WHERE { ?s :name ?n OPTIONAL { ?s :likes ?x } "
+            "MINUS { SELECT ?s (MIN(?k) AS ?x) WHERE { ?s :knows ?k } GROUP BY ?s } }",
+            id="minus_subselect_aggregate_column",
+            marks=pytest.mark.xfail(
+                strict=True,
+                reason="#212: the probe's sub-select join leaves out the outer row's unbound ?x",
+            ),
+        ),
     ],
 )
 def test_nested_optional_group_scope_matches_oxigraph(

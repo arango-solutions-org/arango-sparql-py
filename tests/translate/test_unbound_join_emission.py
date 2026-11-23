@@ -92,14 +92,37 @@ def _minus_body(where: str) -> object:
     return node.p2
 
 
-def test_certainly_bound_variables_follow_every_solution() -> None:
-    from arango_sparql.translate.minus_exists import certainly_bound_variables
+def test_certain_variables_follow_every_solution() -> None:
+    from arango_sparql.translate.optional_subquery import certain_variables
 
     # Recheck of #196: the MINUS overlap test needs the variables every
     # solution of the body binds, not every variable it mentions.
-    assert certainly_bound_variables(_minus_body("?s :name ?n . ?x :email ?m")) == {"s", "n", "x", "m"}
-    assert certainly_bound_variables(_minus_body('{ ?x :email ?m } UNION { ?s :name "Z" }')) == set()
-    assert certainly_bound_variables(_minus_body("?s :name ?n OPTIONAL { ?s :knows ?x }")) == {"s", "n"}
-    assert certainly_bound_variables(_minus_body("VALUES (?s ?x) { (:a UNDEF) (:b :c) }")) == {"s"}
-    assert certainly_bound_variables(_minus_body("?y :name ?n FILTER(?y = ?x)")) == {"y", "n"}
-    assert certainly_bound_variables(_minus_body("{ SELECT ?s WHERE { ?s :name ?n } }")) == set()
+    assert certain_variables(_minus_body("?s :name ?n . ?x :email ?m")) == {"s", "n", "x", "m"}
+    assert certain_variables(_minus_body('{ ?x :email ?m } UNION { ?s :name "Z" }')) == set()
+    assert certain_variables(_minus_body("?s :name ?n OPTIONAL { ?s :knows ?x }")) == {"s", "n"}
+    assert certain_variables(_minus_body("VALUES (?s ?x) { (:a UNDEF) (:b :c) }")) == {"s"}
+    assert certain_variables(_minus_body("?y :name ?n FILTER(?y = ?x)")) == {"y", "n"}
+    # A sub-select's column counts only where its own pattern binds it in
+    # every solution; DISTINCT and LIMIT keep that.
+    assert certain_variables(_minus_body("{ SELECT ?s WHERE { ?s :name ?n } }")) == {"s"}
+    assert certain_variables(_minus_body("{ SELECT DISTINCT ?s WHERE { ?s :name ?n } LIMIT 3 }")) == {"s"}
+    assert certain_variables(
+        _minus_body("{ SELECT ?s ?x WHERE { ?s :name ?n OPTIONAL { ?s :knows ?x } } }")
+    ) == {"s"}
+    # A BIND target or an aggregate can be unbound (an expression error,
+    # SAMPLE over nothing), so neither counts.
+    assert certain_variables(_minus_body("?s :name ?n BIND(?n + 1 AS ?x)")) == {"s", "n"}
+    assert certain_variables(
+        _minus_body("{ SELECT ?s (SAMPLE(?n) AS ?x) WHERE { ?s :name ?n } GROUP BY ?s }")
+    ) == {"s"}
+    # A pattern the walker does not look inside binds nothing for certain.
+    assert certain_variables(_minus_body("SERVICE <http://ex.org/sparql> { ?s :name ?n }")) == set()
+
+
+def test_minus_and_the_group_scoped_optional_share_one_walker() -> None:
+    # Two "bound in every solution" walkers had drifted apart (code-quality
+    # review of #196–#199); MINUS now imports the OPTIONAL one.
+    from arango_sparql.translate import minus_exists, optional_subquery
+
+    assert minus_exists.certain_variables is optional_subquery.certain_variables
+    assert not hasattr(minus_exists, "certainly_bound_variables")
