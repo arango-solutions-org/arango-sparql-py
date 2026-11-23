@@ -824,10 +824,13 @@ class SchemaResolver(AdvisoryLog):
                 mapping_style = "GENERIC_WITH_TYPE"
             elif edge_collection:
                 mapping_style = "DEDICATED_COLLECTION"
-        if mapping_style is not None and mapping_style not in RELATIONSHIP_MAPPING_STYLES:
+        if edge_collection and mapping_style is not None and mapping_style not in RELATIONSHIP_MAPPING_STYLES:
             # Read as a dedicated edge collection, an unknown or misspelt
             # GENERIC_WITH_TYPE dropped its type test and returned every
-            # relationship's edges, with no error (#89).
+            # relationship's edges, with no error (#89). Only an edge-backed
+            # property can be misread that way; an edgeless one (FOREIGN_KEY,
+            # EMBEDDED, ...) is left out of ``?s ?p ?o`` scans and must not
+            # refuse them.
             raise SchemaResolutionError(
                 f"object property {key!r} has phys:mappingStyle {mapping_style!r}, which this translator "
                 f"does not support (known: {', '.join(sorted(RELATIONSHIP_MAPPING_STYLES))})"
