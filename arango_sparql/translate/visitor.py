@@ -37,6 +37,8 @@ from .builder import (
     subject_matches,
     subject_matches_value,
     subject_ref,
+    triple_object_is_iri,
+    triple_object_ref,
     type_predicate,
 )
 from .copies import CopyRow, copies_interchangeable, drop_repeated_copies, emit_attribute_across_copies
@@ -709,8 +711,7 @@ class AlgebraVisitor:
             child.return_scalar(
                 f"{{subject: {attribute_ref(row, table.subject_column)}, "
                 f"predicate: {attribute_ref(row, table.predicate_column)}, "
-                f"object: NOT_NULL({attribute_ref(row, table.object_uri_column)}, "
-                f"{attribute_ref(row, table.object_value_column)})}}"
+                f"object: {triple_object_ref(row, table)}}}"
             )
             parts.append(f"[({self.builder.absorb_child(child)})]")
         # A document part is one triple list per document, a table part one
@@ -759,7 +760,7 @@ class AlgebraVisitor:
 
         alias = self.builder.fresh_alias(prefix="d")
         coll_ref = self.builder.bind_collection(rpt_class.collection)
-        coalesce = f"NOT_NULL({attribute_ref(alias, rpt_class.object_uri_column)}, {attribute_ref(alias, rpt_class.object_value_column)})"
+        coalesce = triple_object_ref(alias, rpt_class)
         return (
             f"FOR {alias} IN {coll_ref} "
             f"FILTER {attribute_ref(alias, rpt_class.subject_column)} == {subject_expr} "
@@ -2841,10 +2842,7 @@ class AlgebraVisitor:
             ):
                 self.builder.filter_raw(f"{new_subj_expr} == {subj_expr}")
         # OBJECT — variable / IRI / literal each take a different shape.
-        coalesce_expr = (
-            f"NOT_NULL({attribute_ref(triples_alias, rpt_class.object_uri_column)}, "
-            f"{attribute_ref(triples_alias, rpt_class.object_value_column)})"
-        )
+        coalesce_expr = triple_object_ref(triples_alias, rpt_class)
         if isinstance(obj, Variable):
             o_name = str(obj)
             existing = self.state.var_to_expr.get(o_name)
@@ -2867,10 +2865,7 @@ class AlgebraVisitor:
             # ``object_value`` (rare but observed in legacy fixtures)
             # still bind correctly. Mirrors the legacy
             # ``rpt-translator.js`` OR-filter.
-            self.builder.filter_raw(
-                f"({attribute_ref(triples_alias, rpt_class.object_uri_column)} == {uri_bind} "
-                f"|| {attribute_ref(triples_alias, rpt_class.object_value_column)} == {uri_bind})"
-            )
+            self.builder.filter_raw(triple_object_is_iri(triples_alias, rpt_class, uri_bind))
             return
         if isinstance(obj, Literal):
             val_bind = self.builder.bind(_term_to_python(obj), hint="obj")

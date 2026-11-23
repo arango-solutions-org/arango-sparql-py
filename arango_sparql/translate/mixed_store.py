@@ -68,7 +68,15 @@ from typing import TYPE_CHECKING, Any
 from rdflib import OWL, RDF, Literal, URIRef, Variable
 
 from ..errors import UnsupportedSparqlError
-from .builder import attribute_path_ref, attribute_ref, subject_matches, subject_matches_value, subject_ref
+from .builder import (
+    attribute_path_ref,
+    attribute_ref,
+    subject_matches,
+    subject_matches_value,
+    subject_ref,
+    triple_object_is_iri,
+    triple_object_ref,
+)
 from .resolver import ResolvedClass
 from .union_paths import _spawn_child
 from .variable_predicates import attribute_triple_loop, document_triple_arms, refuse_nested_attribute_scan
@@ -347,16 +355,15 @@ def _table_arm(
     scope = arm._graph_scope_test(row)
     if scope is not None:
         builder.filter_raw(scope)
-    uri_column = attribute_ref(row, table.object_uri_column)
-    value_column = attribute_ref(row, table.object_value_column)
     if isinstance(obj, URIRef):
         # Either column, as the triples-table reader matches an IRI object.
-        bind = builder.bind(str(obj), hint="obj")
-        builder.filter_raw(f"({uri_column} == {bind} || {value_column} == {bind})")
+        builder.filter_raw(triple_object_is_iri(row, table, builder.bind(str(obj), hint="obj")))
     elif isinstance(obj, Literal):
         from .visitor import _term_to_python
 
-        builder.filter_eq(value_column, builder.bind(_term_to_python(obj), hint="obj"))
+        builder.filter_eq(
+            attribute_ref(row, table.object_value_column), builder.bind(_term_to_python(obj), hint="obj")
+        )
     elif not isinstance(obj, Variable):
         raise UnsupportedSparqlError(
             f"object term type {type(obj).__name__!r} is not supported in {triple!r}"
@@ -364,7 +371,7 @@ def _table_arm(
     fields = [("s", subject_column)]
     if isinstance(predicate, Variable):
         fields.append(("p", predicate_column))
-    fields.append(("o", f"NOT_NULL({uri_column}, {value_column})"))
+    fields.append(("o", triple_object_ref(row, table)))
     fields.append(("g", attribute_ref(row, arm.resolver.graph_field)))
     return fields
 

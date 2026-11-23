@@ -17,9 +17,12 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..errors import AqlEmitError, UnsupportedSparqlError
+
+if TYPE_CHECKING:
+    from .resolver import ResolvedClass
 
 _AQL_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -249,6 +252,31 @@ def attribute_path_ref(alias: str, path: tuple[str, ...]) -> str:
     for segment in path:
         ref = attribute_ref(ref, segment)
     return ref
+
+
+def triple_object_ref(alias: str, table: ResolvedClass) -> str:
+    """A triples-table (RPT) row's object as one value: the IRI column, else
+    the literal column (``NOT_NULL(row.object_uri, row.object_value)``).
+
+    The one spelling of a triples-table object, as :func:`subject_ref` is of
+    a document's IRI, so every reader of a table binds ``?o`` to the same
+    expression and a join between two of them compares like with like.
+    """
+    return (
+        f"NOT_NULL({attribute_ref(alias, table.object_uri_column)}, "
+        f"{attribute_ref(alias, table.object_value_column)})"
+    )
+
+
+def triple_object_is_iri(alias: str, table: ResolvedClass, iri: str) -> str:
+    """Whether a triples-table row's object is the IRI *iri* (an AQL
+    expression, usually a bind variable): either column matches, so a
+    table that loaded IRIs into the literal column still binds (the legacy
+    ``rpt-translator.js`` OR-filter)."""
+    return (
+        f"({attribute_ref(alias, table.object_uri_column)} == {iri} "
+        f"|| {attribute_ref(alias, table.object_value_column)} == {iri})"
+    )
 
 
 # Sentinel for distinguishing "bind name absent" from "bind value is None"
