@@ -6,6 +6,9 @@ Document"), and a copy a class places elsewhere was not described. The
 documents of every class's collection and the rows of every triples table
 are read now. Gated like the rest of the integration suite
 (``RUN_INTEGRATION=1``).
+
+The same harness runs ``LIMIT`` / ``OFFSET`` on CONSTRUCT and ASK (#164),
+which failed to translate ("RETURN already emitted") before.
 """
 
 from __future__ import annotations
@@ -78,13 +81,18 @@ def db() -> Iterator[Any]:
                 handle.delete_collection(name)
 
 
-def _describe(db: Any, query: str, tenant_id: str = "A", **resolver_kwargs: Any) -> set[tuple[str, str, str]]:
+def _execute(db: Any, query: str, tenant_id: str = "A", **resolver_kwargs: Any) -> list[Any]:
     # The service's resolver: no default collection to fall back to.
     resolver = SchemaResolver(
         ontology=Graph().parse(data=_TTL, format="turtle"), strict_subject_resolution=True, **resolver_kwargs
     )
     result = translate("PREFIX : <http://ex.org/>\n" + query, resolver=resolver, tenant_id=tenant_id)
-    rows = db.aql.execute(result.aql, bind_vars=result.bind_vars, max_runtime=15)
+    return list(db.aql.execute(result.aql, bind_vars=result.bind_vars, max_runtime=15))
+
+
+def _describe(db: Any, query: str, tenant_id: str = "A", **resolver_kwargs: Any) -> set[tuple[str, str, str]]:
+    """The triples of a DESCRIBE or CONSTRUCT: each row is a list of them."""
+    rows = _execute(db, query, tenant_id, **resolver_kwargs)
     return {(t["subject"], t["predicate"], str(t["object"])) for row in rows for t in row}
 
 
@@ -143,3 +151,36 @@ def test_a_strict_default_graph_does_not_describe_a_named_graph_copy(db: Any) ->
     assert _describe(db, "DESCRIBE :g", default_graph_includes_named=False) == set()
     described = _describe(db, "DESCRIBE :g")
     assert ("http://ex.org/g", "name", "G") in described
+
+
+# Tenant A's people are named G, S and T (#164).
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        (
+            "CONSTRUCT { ?s :label ?n } WHERE { ?s a :Person ; :name ?n } ORDER BY DESC(?n) OFFSET 1 LIMIT 2",
+            {(S, "http://ex.org/label", "S"), ("http://ex.org/g", "http://ex.org/label", "G")},
+        ),
+        (
+            "CONSTRUCT WHERE { ?s :name ?n } ORDER BY ?n LIMIT 1",
+            {("http://ex.org/g", "http://ex.org/name", "G")},
+        ),
+        ("CONSTRUCT { ?s :label ?n } WHERE { ?s a :Person ; :name ?n } ORDER BY ?n OFFSET 3 LIMIT 2", set()),
+    ],
+)
+def test_construct_slices_the_where_solutions_before_the_template(
+    db: Any, query: str, expected: set[tuple[str, str, str]]
+) -> None:
+    assert _describe(db, query) == expected
+
+
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        ("ASK { ?s a :Person } OFFSET 2 LIMIT 5", True),
+        ("ASK { ?s a :Person } OFFSET 3 LIMIT 5", False),
+        ("ASK { ?s a :Person } LIMIT 0", False),
+    ],
+)
+def test_ask_answers_from_the_sliced_solutions(db: Any, query: str, expected: bool) -> None:
+    assert _execute(db, query) == [expected]
