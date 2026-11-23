@@ -242,9 +242,10 @@ def _translate_probe(
 
     Carried over: ``var_to_rpt_class`` and ``const_subject_rpt_class``,
     so a probe triple on an outer triples-table (RPT) subject reads the
-    table rather than a document collection (#190). NOT carried over:
-    ``tenant_entity`` (the inner re-derives its own tenant scope from the
-    resolver).
+    table rather than a document collection (#190). Shared with the outer
+    query (:meth:`_BindingState.share_query_state`): the name counters and
+    the tenant commitment, so a class under another tenant root is refused
+    inside the probe too (#211; it used to start uncommitted).
     """
     # Local import to avoid the visitor ↔ minus_exists module
     # cycle at import time.
@@ -303,9 +304,10 @@ def _translate_probe(
         # shared variable is bound on both sides (§8.3.4). It used to be
         # joined as a value, matched nothing, and kept the row (review of #196).
         child_visitor.state.maybe_unbound = set(free_outer)
-    # Shared, so names minted inside the probe never collide with the
-    # outer scope's ``_path_<n>`` / ``_bn_…`` (see _BindingState.counters).
-    child_visitor.state.counters = visitor.state.counters
+    # Per-query state: names minted inside the probe never collide with the
+    # outer scope's ``_path_<n>`` / ``_bn_…``, and a class under another
+    # tenant root is refused in the probe as outside it (#211).
+    visitor.state.share_query_state(child_visitor.state)
     if allow_optional_rebind:
         # Switch the child out of "reject re-bind" mode (ADR-0002
         # Problem 2) into conditional-add mode; visit_LeftJoin appends

@@ -335,22 +335,20 @@ def _spawn_child(visitor: AlgebraVisitor) -> AlgebraVisitor:
       route through the RPT reader, not the PG/LPG emitter. Same
       copy-on-spawn discipline as ``var_to_expr``.
 
-    * ``tenant_entity`` / ``tenant_bind_placeholder`` — the
-      per-query tenant commitment and its cached AQL bind variable
-      (PRD §6.5.1). A UNION arm that opens a tenant-scoped class
-      must apply the SAME tenant filter, not mint a fresh one, so
-      EXPLAIN output stays clean and cross-tenant-join detection
-      stays consistent. Propagating both the commitment and the
-      cached placeholder is what keeps the per-query tenant bind
-      a single AQL parameter no matter how many UNION arms touch
-      tenant-scoped collections.
+    * the tenant commitment and its cached AQL bind variable (PRD
+      §6.5.1). The commitment is SHARED with the parent, so a class
+      under another tenant root is refused wherever it sits, in the
+      arm or after it (#211); the parent's tenant bind is reused, so
+      the arm's tenant filter is the same AQL parameter.
 
     The sigil counters (``state.counters``: ``_path_<n>`` /
     ``_bn_<bgp>_<label>``) are SHARED with the parent, not reset: the
     child is seeded with the outer bindings, so a child restarting at
     ``_path_1`` would re-use an outer ``_path_1`` and join unrelated
     intermediates (LDBC IC6). Sharing keeps every minted name unique in
-    the query and the AQL deterministic.
+    the query and the AQL deterministic. Both come from
+    :meth:`_BindingState.share_query_state`, which every child visitor
+    calls.
 
     Counter sharing follows the standard
     :meth:`AqlQueryBuilder.create_child` /
@@ -372,7 +370,7 @@ def _spawn_child(visitor: AlgebraVisitor) -> AlgebraVisitor:
         describe_resources=visitor.describe_resources,
     )
     cv.state.var_to_expr = dict(visitor.state.var_to_expr)
-    cv.state.counters = visitor.state.counters
+    visitor.state.share_query_state(cv.state)
     # An outer variable an arm re-projects keeps "can be unbound" (#59).
     cv.state.maybe_unbound = set(visitor.state.maybe_unbound)
     cv.state.graph_scope = list(visitor.state.graph_scope)
@@ -408,6 +406,4 @@ def _spawn_child(visitor: AlgebraVisitor) -> AlgebraVisitor:
     # all of them in the arm or OPTIONAL body too (#147).
     cv.state.copy_members = dict(visitor.state.copy_members)
     cv.state.relationship_nodes = {name: set(rels) for name, rels in visitor.state.relationship_nodes.items()}
-    cv.state.tenant_entity = visitor.state.tenant_entity
-    cv.state.tenant_bind_placeholder = visitor.state.tenant_bind_placeholder
     return cv

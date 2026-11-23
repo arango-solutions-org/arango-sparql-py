@@ -165,8 +165,9 @@ def _emit_subselect(
         query_triples=visitor.query_triples,
         describe_resources=visitor.describe_resources,
     )
-    # Shared sigil counters (see _BindingState.counters).
-    child_visitor.state.counters = visitor.state.counters
+    # Per-query state: sigil counters and the tenant commitment (#211); the
+    # sub-select's own scope stays its own.
+    visitor.state.share_query_state(child_visitor.state)
     graph_column = _inherit_graph_scope(visitor, child_visitor, inner)
     child_visitor.visit(inner)
 
