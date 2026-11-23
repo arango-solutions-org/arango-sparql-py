@@ -496,6 +496,14 @@ Relationship styles, attached to OWL `owl:ObjectProperty`:
 | `GENERIC_WITH_TYPE` | **LPG-typed edge** | One shared edge collection holding multiple relationship types, discriminated by a `typeField` | `FOR v, e IN OUTBOUND doc @@edgeColl FILTER e.<typeField> == @typeValue` |
 | `RPT_EDGE` | **RDF object property** | An object-property triple in the `_triples` collection (`object_uri` populated, `object_value` null) | Same as `RPT` entity read; the predicate IRI carries the relationship semantics |
 
+Any other `phys:mappingStyle` on an object property is refused
+(`E_SCHEMA_RESOLVE`) when a query resolves that property, not read as a
+dedicated edge collection: a misspelt `GENERIC_WITH_TYPE` used to drop its type
+test and return every relationship's edges in the shared collection, with no
+error (`translate/resolver.py::RELATIONSHIP_MAPPING_STYLES`). A query with a
+variable predicate resolves every object property, so one such property refuses
+it as a whole.
+
 **Relationships that carry data** (LDBC plan decision D8). RDF reifies a
 relationship with its own data as a node — LDBC writes `?p :knows ?k . ?k
 :hasPerson ?f ; :creationDate ?d` — while a property graph stores it as one

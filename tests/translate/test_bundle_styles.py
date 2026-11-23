@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 
 from arango_sparql.api import translate
+from arango_sparql.errors import SchemaResolutionError
 from arango_sparql.translate.mapping import MappingBundle, MappingSource
 from arango_sparql.translate.resolver import SchemaResolver
 from tests.helpers.aql_interp import run_aql_subset
@@ -87,6 +88,32 @@ def test_a_bundle_without_owl_reads_the_style_as_its_owl_mapping_does(cls: str, 
     from_bundle = _rows(SchemaResolver.from_mapping_bundle(bundle), cls)
     assert from_bundle == expected
     assert from_bundle == _rows(SchemaResolver.from_turtle(_OWL), cls)
+
+
+def test_a_bundle_relationship_with_an_unknown_style_is_refused() -> None:
+    """#89: the bundle path reads an unknown relationship style the way the OWL
+    path does — refused, not read as a dedicated edge collection whose other
+    relationships' edges come back under this one."""
+    bundle = MappingBundle(
+        conceptual_schema=_CONCEPTUAL,
+        physical_mapping={
+            **_PHYSICAL,
+            "relationships": {
+                "replyOf": {
+                    "style": "GENERIC_WITH_TYP",
+                    "edgeCollectionName": "edges",
+                    "typeField": "relation",
+                    "typeValue": "replyOf",
+                }
+            },
+        },
+        source=MappingSource(kind="manual"),
+    )
+    with pytest.raises(SchemaResolutionError, match="GENERIC_WITH_TYP"):
+        translate(
+            f"SELECT ?a ?b WHERE {{ ?a <{_C}replyOf> ?b }}",
+            resolver=SchemaResolver.from_mapping_bundle(bundle),
+        )
 
 
 def test_a_bundle_reads_endpoints_and_properties_from_its_conceptual_schema() -> None:

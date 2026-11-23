@@ -37,7 +37,7 @@ import re
 import warnings
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, get_args
 from urllib.parse import quote
 
 from rdflib import OWL, RDF, RDFS, Graph, Literal, Namespace, URIRef
@@ -46,7 +46,7 @@ from rdflib.collection import Collection
 from ..errors import SchemaResolutionError
 from .advisories import AdvisoryLog
 from .builder import parse_flag
-from .mapping import MappingError, property_field_path
+from .mapping import MappingError, RelationshipStyle, property_field_path
 from .predicates import PredicateHandler
 
 if TYPE_CHECKING:
@@ -70,6 +70,10 @@ _LOCAL_NAME_RE = re.compile(r"[#/]([^#/]+)$")
 #: are arango-query-core's supertype styles; any other value is refused
 #: rather than read as a plain collection.
 CLASS_MAPPING_STYLES = frozenset({"COLLECTION", "DOCUMENT", "LABEL", "LABELS", "MULTI_LABEL", "RPT", "UNION"})
+
+#: ``phys:mappingStyle`` values an object property may carry (PRD §6.1); any
+#: other value is refused rather than read as a dedicated edge collection (#89).
+RELATIONSHIP_MAPPING_STYLES = frozenset(get_args(RelationshipStyle))
 
 # Synthetic-IRI namespace used by :meth:`SchemaResolver.from_mapping_bundle`
 # when a :class:`~arango_sparql.translate.mapping.MappingBundle` carries no
@@ -820,6 +824,14 @@ class SchemaResolver(AdvisoryLog):
                 mapping_style = "GENERIC_WITH_TYPE"
             elif edge_collection:
                 mapping_style = "DEDICATED_COLLECTION"
+        if mapping_style is not None and mapping_style not in RELATIONSHIP_MAPPING_STYLES:
+            # Read as a dedicated edge collection, an unknown or misspelt
+            # GENERIC_WITH_TYPE dropped its type test and returned every
+            # relationship's edges, with no error (#89).
+            raise SchemaResolutionError(
+                f"object property {key!r} has phys:mappingStyle {mapping_style!r}, which this translator "
+                f"does not support (known: {', '.join(sorted(RELATIONSHIP_MAPPING_STYLES))})"
+            )
         domain_iri = self._first_object(ref, RDFS.domain)
         range_iris = self.class_list(ref, RDFS.range)
         # ``phys:attributeName`` maps an OWL-style conceptual property name to
