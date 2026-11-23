@@ -338,8 +338,9 @@ def _spawn_child(visitor: AlgebraVisitor) -> AlgebraVisitor:
     * the tenant commitment and its cached AQL bind variable (PRD
       §6.5.1). The commitment is SHARED with the parent, so a class
       under another tenant root is refused wherever it sits, in the
-      arm or after it (#211); the parent's tenant bind is reused, so
-      the arm's tenant filter is the same AQL parameter.
+      arm or after it (#211). A tenant bind the parent already has is
+      reused, so the arm's tenant filter is the same AQL parameter;
+      one the arm mints stays the arm's.
 
     The sigil counters (``state.counters``: ``_path_<n>`` /
     ``_bn_<bgp>_<label>``) are SHARED with the parent, not reset: the

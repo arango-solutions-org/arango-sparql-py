@@ -1349,16 +1349,15 @@ store in a mixed mapping (#191).
 **Cross-tenant joins are forbidden.** When two BGP triples touch two
 entities that have different `tenantEntity` values, the translator
 raises `E_TRANSLATE_CROSS_TENANT_JOIN` (HTTP 422) rather than emit a
-join that could broadcast across tenant boundaries. The query commits to
+join that could broadcast across tenant boundaries. A query commits to
 one tenant root wherever its classes sit: in a UNION arm, an OPTIONAL, a
 MINUS, a FILTER EXISTS / NOT EXISTS or a sub-select, before or after the
-pattern on the other root. Until #211 a nested scope copied the
-commitment or started without it, so a join across roots was refused in
-one pattern but translated when the second root sat inside MINUS, EXISTS
-or a sub-select, or in a UNION or OPTIONAL placed first. Every nested
-scope now shares the query's commitment and reuses its tenant bind
-parameter (`translate/visitor.py::_BindingState.share_query_state`;
-`tests/translate/test_tenant_commitment.py`).
+pattern on the other root, and two roots in one query are refused even
+when nothing joins them (`{ ?d a :Doc } UNION { ?p a :Person }`), since
+one tenant value cannot scope both (#211). The commitment is shared by
+every nested scope (`translate/visitor.py::_BindingState.share_query_state`;
+`tests/translate/test_tenant_commitment.py`, and live in
+`tests/integration/test_tenant_commitment_live.py`).
 
 #### 6.5.2 `metadata.multitenancy` — database-wide tenant model
 

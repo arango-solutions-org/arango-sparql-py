@@ -2633,10 +2633,13 @@ class AlgebraVisitor:
             if committed is None:
                 self.state.tenant.entity = resolved.tenant_entity
             elif committed != resolved.tenant_entity:
+                # Not only a join: a UNION of separately rooted arms is refused
+                # too, since one tenant cannot scope both roots (#211).
                 raise CrossTenantJoinError(
-                    f"SPARQL query joins entities across tenant roots "
-                    f"{committed!r} and {resolved.tenant_entity!r}; "
-                    f"cross-tenant joins are forbidden (PRD §6.5.1)"
+                    f"SPARQL query reads entities under two tenant roots, "
+                    f"{committed!r} and {resolved.tenant_entity!r}, joined or not; "
+                    f"one tenant cannot scope both, so a query across tenant roots "
+                    f"is forbidden (PRD §6.5.1)"
                 )
         if self.tenant_id is None:
             # A tenant-scoped class with no tenant context would
