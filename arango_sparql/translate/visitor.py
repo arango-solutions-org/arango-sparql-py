@@ -1770,15 +1770,7 @@ class AlgebraVisitor:
         # probes spawned inside copy what is visible.
         outer_docs, outer_consts = self.state.var_to_doc_alias, self.state.const_subject_alias
         outer_homes = self.state.outer_subject_homes
-        homes = dict(outer_homes)
-        for key, alias in [*outer_docs.items(), *outer_consts.items()]:
-            # Only a document opened as a class has a known home: an edge's
-            # far vertex is recorded under the edge collection, and a union
-            # row has no one collection (review of 43ee964).
-            resolved = self.state.doc_to_class.get(alias)
-            if resolved is not None:
-                homes[key] = (resolved.collection, resolved)
-        self.state.outer_subject_homes = homes
+        self.state.outer_subject_homes = self._subject_homes()
         self.state.var_to_doc_alias, self.state.const_subject_alias = {}, {}
         graph_var = str(term) if isinstance(term, Variable) else None
         bound_before = graph_var is not None and graph_var in self.state.var_to_expr
@@ -3921,10 +3913,25 @@ class AlgebraVisitor:
             return alias
         raise UnsupportedSparqlError(f"subject term type {type(subject).__name__!r} is not supported")
 
+    def _subject_homes(self) -> dict[str, tuple[str, ResolvedClass]]:
+        """The class collection of every subject this scope has a document
+        for, plus the homes it inherited: what a scope that cannot reuse the
+        document (a GRAPH, a MINUS / EXISTS probe) re-reads it from."""
+        homes = dict(self.state.outer_subject_homes)
+        for key, alias in [*self.state.var_to_doc_alias.items(), *self.state.const_subject_alias.items()]:
+            # Only a document opened as a class has a known home: an edge's
+            # far vertex is recorded under the edge collection, and a union
+            # row has no one collection (review of 43ee964).
+            resolved = self.state.doc_to_class.get(alias)
+            if resolved is not None:
+                homes[key] = (resolved.collection, resolved)
+        return homes
+
     def _reopen_at_home(self, subject: Variable | URIRef) -> str | None:
-        """Inside a GRAPH, re-read a subject bound outside it in the collection
-        its outer document is in, on its IRI, under the scope's filter; or
-        ``None`` when it was not bound outside (review R128-1).
+        """Inside a GRAPH or a MINUS / EXISTS probe, re-read a subject bound
+        outside it in the collection its outer document is in, on its IRI,
+        under the scope's filter; or ``None`` when it was not bound outside
+        (review R128-1; #90 for probes).
 
         The outer document itself is hidden in the scope (#119: it is the
         copy in another graph). With no domain to route by, the default
