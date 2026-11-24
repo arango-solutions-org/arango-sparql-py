@@ -487,7 +487,9 @@ class AqlQueryBuilder:
         self._scanned_aliases.append(alias)
         return self
 
-    def split_scan_on_value(self, alias: str, value: str, match: Callable[[str], str]) -> bool:
+    def split_scan_on_value(
+        self, alias: str, value: str, match: Callable[[str], str], *, attribute: bool = False
+    ) -> bool:
         """Join the scan ``FOR <alias> IN @@coll`` to *value*, which can be null.
 
         An unbound variable is compatible with any value (SPARQL 1.1 §18.3),
@@ -526,25 +528,36 @@ class AqlQueryBuilder:
                 # scanned document itself (``doc1.email`` joined to doc1's
                 # own attribute: ERR 1203 on the split; recheck of #236).
                 return False
-            if self._anchored_after(index, alias):
+            if self._anchored_after(index, alias, attribute=attribute):
                 return False
             collection = found.group(1)
             hit = self.fresh_alias()
             free = self.fresh_alias()
-            arms = [
-                f"FOR {hit} IN {collection}\nFILTER ({value} != null && {match(hit)})\nRETURN {hit}",
-                f"FOR {free} IN {collection}\nFILTER {value} == null\nRETURN {free}",
-            ]
+            if attribute:
+                # The null test before the FOR: written in one FILTER with the
+                # match, ArangoDB planned the attribute's index lookup on
+                # ``attr == null`` for a null value, which every document
+                # lacking the attribute satisfies (11 s against 2.5 s; recheck
+                # of #236). Here a null value never enters the lookup.
+                hit_arm = (
+                    f"FILTER {value} != null\nFOR {hit} IN {collection}\nFILTER {match(hit)}\nRETURN {hit}"
+                )
+            else:
+                hit_arm = f"FOR {hit} IN {collection}\nFILTER ({value} != null && {match(hit)})\nRETURN {hit}"
+            arms = [hit_arm, f"FOR {free} IN {collection}\nFILTER {value} == null\nRETURN {free}"]
             self._body_clauses[index] = _Clause(_ClauseKind.FOR, _union_clause(alias, arms, "UNION"))
             return True
         return False
 
-    def _anchored_after(self, index: int, alias: str) -> bool:
-        """Whether a FILTER after clause *index* already pins *alias* by its
-        IRI (``alias._uri == …``): its index lookup is kept as it is, which
-        a split around the scan would lose (0.05 s became 0.20 s; recheck of
-        #236)."""
-        pinned = re.compile(rf"(?<![@.\w]){re.escape(alias)}\._(?:uri|id) == ")
+    def _anchored_after(self, index: int, alias: str, *, attribute: bool = False) -> bool:
+        """Whether a FILTER after clause *index* already pins *alias* by an
+        equality its index can serve: its IRI (``alias._uri == …``), and for
+        an attribute split any attribute (``alias.email == …``). That lookup
+        is kept as it is, which a split around the scan would lose (0.05 s
+        became 0.20 s for ``_uri``, 0.01 s became 0.28 s for an attribute;
+        rechecks of #236)."""
+        attr = r"\.(?:`[^`]+`|\w+)(?:\.(?:`[^`]+`|\w+))*" if attribute else r"\._(?:uri|id)"
+        pinned = re.compile(rf"(?<![@.\w]){re.escape(alias)}{attr} == ")
         return any(
             clause.kind == _ClauseKind.FILTER and pinned.search(clause.text)
             for clause in self._body_clauses[index + 1 :]

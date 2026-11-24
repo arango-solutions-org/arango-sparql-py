@@ -85,8 +85,18 @@ def test_a_computed_value_joined_to_an_attribute_splits_the_document_scan() -> N
     # Null only where ``?a + 1`` errors: the bound value keeps an index on the
     # attribute (one FILTER cost 0.19 s -> 2.8 s; review of #236).
     aql = _aql("SELECT ?s ?t WHERE { ?s :age ?a BIND(?a + 1 AS ?b) ?t :age ?b }")
-    assert "bv4 != null && " in aql
+    # The null test comes before the FOR, so a null value never enters the
+    # attribute's index lookup (recheck of #236).
+    assert "FILTER bv4 != null\n  FOR " in aql
     assert ".age == bv4" in aql
+
+
+def test_a_scan_pinned_by_another_attribute_is_not_split() -> None:
+    # ``?t :email "…"`` already pins doc's index lookup: a split around the
+    # scan would trade it for the age index (0.01 s -> 0.28 s; recheck of #236).
+    aql = _aql('SELECT ?s ?t WHERE { ?s :age ?a BIND(?a * 1 AS ?b) ?t :email "p30@x.org" ; :age ?b }')
+    assert "!= null\n  FOR " not in aql
+    assert "(bv4 == null || " in aql
 
 
 def test_an_attribute_joined_to_a_value_read_after_its_scan_is_filtered() -> None:

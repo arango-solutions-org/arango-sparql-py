@@ -2250,6 +2250,7 @@ class AlgebraVisitor:
                             read,
                             lambda doc: f"{attribute_path_ref(doc, field_path)} == {existing}",
                             alias=alias,
+                            attribute=True,
                         )
                 elif existing != attr_path:
                     # The variable is already bound by an earlier
@@ -4054,6 +4055,7 @@ class AlgebraVisitor:
         match: str | Callable[[str], str],
         *,
         alias: str | None = None,
+        attribute: bool = False,
     ) -> bool:
         """Join *name*, which an earlier OPTIONAL can leave unbound, to *new_expr*.
 
@@ -4067,7 +4069,7 @@ class AlgebraVisitor:
         """
         if name not in self.state.maybe_unbound:
             return False
-        self._emit_unbound_join(existing, match, alias=alias)
+        self._emit_unbound_join(existing, match, alias=alias, attribute=attribute)
         self.state.var_to_expr[name] = new_expr
         self.state.maybe_unbound.discard(name)
         return True
@@ -4079,6 +4081,7 @@ class AlgebraVisitor:
         *,
         alias: str | None = None,
         builder: AqlQueryBuilder | None = None,
+        attribute: bool = False,
     ) -> None:
         """Emit the compatible join of a value that can be null: the one
         place the triple emitters write it. (A VALUES or sub-select column
@@ -4092,7 +4095,11 @@ class AlgebraVisitor:
         is the FILTER ``(existing == null || match)``, which costs no index.
         """
         target = builder if builder is not None else self.builder
-        if alias is not None and callable(match) and target.split_scan_on_value(alias, existing, match):
+        if (
+            alias is not None
+            and callable(match)
+            and target.split_scan_on_value(alias, existing, match, attribute=attribute)
+        ):
             return
         if callable(match):
             if alias is None:
