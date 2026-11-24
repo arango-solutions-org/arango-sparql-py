@@ -122,3 +122,14 @@ def test_a_solution_binding_no_shared_variable_removes_nothing(query: str) -> No
     aql = _aql(query)
     probe = aql[aql.index("minus_probe") :]
     assert "!= null && " in probe
+
+
+def test_a_body_evaluated_apart_is_computed_once_before_the_outer_loop() -> None:
+    """It reads nothing of the outer row, so it is a LET before the first FOR
+    rather than a subquery per outer row (second review of #227: 0.02 s on
+    main became 14 s on 12,000 documents)."""
+    aql = _aql(
+        "SELECT ?s ?a WHERE { ?s :age ?a MINUS { SELECT (MIN(?x) AS ?a) WHERE { ?t :age ?x FILTER(?x > 100) } } }"
+    )
+    assert aql.startswith("LET minus_rows")
+    assert aql.index("LET minus_rows") < aql.index("FOR doc1 IN")

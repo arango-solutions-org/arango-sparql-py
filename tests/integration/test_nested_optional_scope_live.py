@@ -324,6 +324,26 @@ def _multiset(rows: list[dict[str, Any]]) -> list[str]:
             "MINUS { ?x :name ?nn OPTIONAL { ?x :email ?e } } }",
             id="minus_optional_only_shared",
         ),
+        # Mixed certainty: ?s is bound in every right-side solution but the
+        # outer row can leave it unbound, and ?n / ?e are bound by only some
+        # solutions. No anchor, so the body is evaluated apart; joined with
+        # the outer values the unbound ?s matched nothing and kept rows
+        # §8.3.4 removes (second review of #227; wrong on main).
+        pytest.param(
+            "SELECT ?x ?n ?s WHERE { ?x :name ?n OPTIONAL { ?x :likes ?s } "
+            'MINUS { ?s :knows ?k VALUES ?n { "G" UNDEF } } }',
+            id="minus_mixed_certainty_values",
+        ),
+        pytest.param(
+            "SELECT ?x ?n ?s WHERE { ?x :name ?n OPTIONAL { ?x :likes ?s } "
+            "MINUS { ?s :knows ?k OPTIONAL { ?s :name ?n } } }",
+            id="minus_mixed_certainty_optional",
+        ),
+        pytest.param(
+            "SELECT ?x ?e ?s WHERE { ?x :name ?nn OPTIONAL { ?x :likes ?s } OPTIONAL { ?x :email ?e } "
+            "MINUS { ?s :name ?w OPTIONAL { ?s :email ?e } } }",
+            id="minus_mixed_certainty_two_optionals",
+        ),
         # ?x is read by the right side's FILTER, never bound by it: it is
         # outside every right-side solution, the sides share nothing, and
         # MINUS removes nothing (#209, its first shape).
