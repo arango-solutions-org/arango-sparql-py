@@ -78,7 +78,8 @@ def test_a_text_match_iterates_the_view_and_binds_bm25() -> None:
     )
     assert result.aql == (
         "FOR doc1 IN @@c1_chunks_text "
-        "SEARCH ANALYZER(TOKENS(@_p1_text, @_p2_analyzer) ALL == doc1.text, @_p2_analyzer) "
+        "SEARCH LENGTH(TOKENS(@_p1_text, @_p2_analyzer)) > 0 "
+        "AND ANALYZER(TOKENS(@_p1_text, @_p2_analyzer) ALL == doc1.text, @_p2_analyzer) "
         "OPTIONS { collections: [@_p3_collection] }\n"
         "FILTER IS_SAME_COLLECTION(@_p4_coll, doc1)\n"
         "RETURN { c: NOT_NULL(doc1._uri, doc1._id), score: BM25(doc1) }"
@@ -103,6 +104,15 @@ def test_a_text_match_with_a_limit_keeps_the_best_scored_before_the_rest_of_the_
     ]
     assert lines[4] == 'FILTER HAS(doc1, "seq")'
     assert result.bind_vars["_p4_limit"] == 3
+
+
+def test_a_text_match_with_a_limit_still_guards_against_terms_with_no_token() -> None:
+    # The guard sits in SEARCH, before SORT / LIMIT: a limit must not turn
+    # "no token, every document" into "no token, the top k" (#159).
+    result = _translate('SELECT ?c WHERE { ?c a :Chunk ; f:matchesText (:text "?" 3) }')
+    first = result.aql.splitlines()[0]
+    assert " SEARCH LENGTH(TOKENS(@_p1_text, @_p2_analyzer)) > 0 AND ANALYZER(" in first
+    assert result.bind_vars["_p1_text"] == "?"
 
 
 def test_a_nearest_neighbour_handler_sorts_and_limits_the_entitys_loop() -> None:

@@ -209,7 +209,8 @@ def text_match_handler(indexes: Mapping[str, TextIndex]) -> PredicateHandler:
 
     ``indexes`` is by collection. An entity matches when every term of
     ``"terms"``, tokenized by the view's analyzer, occurs in the searched
-    property's field. The entity's loop iterates the view, restricted to the
+    property's field; terms the analyzer keeps no token of match nothing.
+    The entity's loop iterates the view, restricted to the
     entity's collection; ``?score`` is BM25; a limit keeps the best-scored
     matches.
     """
@@ -244,9 +245,14 @@ def text_match_handler(indexes: Mapping[str, TextIndex]) -> PredicateHandler:
         collection = emit.bind(call.collection, hint="collection")
         score = f"BM25({emit.alias})"
         bindings = {str(call.subjects[1]): score} if len(call.subjects) == 2 else {}
+        tokens = f"TOKENS({query}, {analyzer})"
+        # ``[] ALL == field`` is vacuously true, so terms the analyzer keeps
+        # no token of ("?", an emoji, "²") would match every document (#159).
+        # Only the analyzer knows which those are; ArangoDB folds the guard
+        # to a constant, so an empty token list plans as no results.
         return LoopPlan(
             source=emit.bind_source(index.view),
-            search=f"ANALYZER(TOKENS({query}, {analyzer}) ALL == {emit.field(path)}, {analyzer})",
+            search=f"LENGTH({tokens}) > 0 AND ANALYZER({tokens} ALL == {emit.field(path)}, {analyzer})",
             options=f"{{ collections: [{collection}] }}",
             sort=score if limit is not None else None,
             limit=emit.bind(limit, hint="limit") if limit is not None else None,

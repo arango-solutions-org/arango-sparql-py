@@ -139,6 +139,25 @@ def test_no_hit_is_an_empty_answer(db: Any) -> None:
     assert _ask(db, 'SELECT ?c WHERE { ?c a :Chunk ; f:matchesText (:text "invoice") }') == []
 
 
+@pytest.mark.parametrize("terms", ["?", "-", "\U0001f620", "²", "々"])
+def test_terms_the_analyzer_keeps_no_token_of_match_nothing(db: Any, terms: str) -> None:
+    # TOKENS(...) is [] for these, and ``[] ALL == field`` is vacuously true:
+    # unguarded, every chunk in the view matched (#159). ``²`` and ``々`` are
+    # letters or digits to Unicode, so only the analyzer can say.
+    assert _ask(db, f'SELECT ?c WHERE {{ ?c a :Chunk ; f:matchesText (:text "{terms}") }}') == []
+
+
+def test_terms_with_no_token_match_nothing_under_a_limit(db: Any) -> None:
+    assert _ask(db, 'SELECT ?c WHERE { ?c a :Chunk ; f:matchesText (:text "?" 3) }') == []
+
+
+def test_a_term_with_no_token_beside_a_real_one_leaves_the_real_ones_matches(db: Any) -> None:
+    assert _keys(_ask(db, 'SELECT ?c WHERE { ?c a :Chunk ; f:matchesText (:text "? frustrated") }')) == [
+        "a",
+        "c",
+    ]
+
+
 def test_scores_are_bm25_and_order_the_answer(db: Any) -> None:
     rows = _ask(
         db, 'SELECT ?c ?s WHERE { ?c a :Chunk . (?c ?s) f:matchesText (:text "renewal") } ORDER BY DESC(?s)'
