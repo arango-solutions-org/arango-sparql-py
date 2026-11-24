@@ -70,8 +70,15 @@ analyzer = [
   # reads since 0.8.0 (#182), so on 0.20 an acquired mapping reads such an
   # attribute one value per element. No API this package calls changed
   # (signatures checked on 0.20.0), and the fast suite is green on 0.20.0.
+  # Ceiling <0.23.0 (2026-11-24, raised together with arango-cypher-py): 0.21
+  # keeps metadata.statistics for polymorphic relationships and supertypes,
+  # annotates tenant scope on the no-LLM path, stops splitting an edge
+  # collection by a field that only repeats its endpoints, gives both OWL
+  # exports the same `phys:` annotations, and adds CSI mapping ids and
+  # relational details; 0.22 writes full IRIs as JSON-LD ids. No API this
+  # package calls changed (signatures checked on 0.22.0).
   # tests/test_analyzer_band_parity.py enforces the shared ceiling.
-  "arangodb-schema-analyzer[anthropic,openai]>=0.14.1,<0.21.0",
+  "arangodb-schema-analyzer[anthropic,openai]>=0.14.1,<0.23.0",
 ]
 service = [
   "arango-sparql-py[analyzer]",

@@ -147,7 +147,7 @@ requires-dist = [
     { name = "arango-sparql-py", extras = ["analyzer"], marker = "extra == 'dev'" },
     { name = "arango-sparql-py", extras = ["analyzer"], marker = "extra == 'service'" },
     { name = "arango-sparql-py", extras = ["nl"], marker = "extra == 'dense'" },
-    { name = "arangodb-schema-analyzer", extras = ["anthropic", "openai"], marker = "extra == 'analyzer'", specifier = ">=0.14.1,<0.21.0" },
+    { name = "arangodb-schema-analyzer", extras = ["anthropic", "openai"], marker = "extra == 'analyzer'", specifier = ">=0.14.1,<0.23.0" },
     { name = "fastapi", specifier = ">=0.100.0" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.24.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.11" },
@@ -180,16 +180,16 @@ deploy = [{ name = "arango-byoc-deploy", git = "https://github.com/ArthurKeen/ar
 
 [[package]]
 name = "arangodb-schema-analyzer"
-version = "0.20.0"
+version = "0.22.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "jsonschema" },
     { name = "pydantic" },
     { name = "python-arango" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/e7/c9/83e3ce64f463a8eb2b8034a9f3e54bb3e75b8f7e6b48d90065325a0fdc78/arangodb_schema_analyzer-0.20.0.tar.gz", hash = "sha256:6401993b1b3278d2d8ddae1e15837414db280e792fd933727c8686f7355fc2fd", size = 464367, upload-time = "2026-11-16T18:40:05.458Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/5c/dc/b11d1b65de884d0d0ecd449e34df13e3d0f3edbd58fd5160c18509cb2680/arangodb_schema_analyzer-0.22.0.tar.gz", hash = "sha256:bc9c67f347042a764165b0ec97a9860f172102b562b47bb27a4d26e0535bac75", size = 477482, upload-time = "2026-11-24T02:00:03.35Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/f7/f7/648379a8dcd07374aa7d2a34bc75c1e1d1a31a79f6de547a013023b89f4e/arangodb_schema_analyzer-0.20.0-py3-none-any.whl", hash = "sha256:541cdf5b25f9be2e55cc6a32e6b6a67cea20cbea16fbf497492d54b7f2c20fdc", size = 454186, upload-time = "2026-11-16T18:40:03.734Z" },
+    { url = "https://files.pythonhosted.org/packages/36/5e/cf7152b9caadc2ee0eda28ded3383f3c231bcf0ec8e42cab50dc4bf9f2ba/arangodb_schema_analyzer-0.22.0-py3-none-any.whl", hash = "sha256:8c5bb466c897b5cc8a68fe91b9429fa41b5b5ce4babdfb177c699049770f9ffb", size = 461442, upload-time = "2026-11-24T02:00:01.375Z" },
 ]
 
 [package.optional-dependencies]

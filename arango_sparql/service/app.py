@@ -123,7 +123,7 @@ app.add_middleware(CorrelationIdMiddleware)
 # (``ANALYZER_VERSION_RANGE``). When the range bumps, the test in
 # ``tests/test_service_startup_guard.py::test_install_hint_matches_acquire``
 # will fail and force the operator to update both sites in lockstep.
-ANALYZER_VERSION_RANGE: str = ">=0.14.1,<0.21.0"
+ANALYZER_VERSION_RANGE: str = ">=0.14.1,<0.23.0"
 ANALYZER_INSTALL_HINT: str = (
     f"pip install 'arangodb-schema-analyzer{ANALYZER_VERSION_RANGE}' "
     "(or set SCHEMA_ANALYZER_REQUIRED=false for a heuristic-only deployment)"
