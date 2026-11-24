@@ -177,13 +177,16 @@ def test_a_supertype_over_triples_is_refused() -> None:
         _aql(ttl, "SELECT ?m WHERE { ?m a :Message }")
 
 
-def test_members_with_different_tenant_scoping_are_refused() -> None:
+def test_members_with_different_tenant_scoping_are_each_held_to_their_own() -> None:
+    """Refused before #218; now a Post is held to ``org`` and a Comment passes
+    (``translate/tenant_scope.py``)."""
     ttl = UNION_TTL.replace(
         ':Post a owl:Class ; phys:collectionName "Post" .',
         ':Post a owl:Class ; phys:collectionName "Post" ; phys:tenantField "org" .',
     )
-    with pytest.raises(UnsupportedSparqlError, match="different tenant scoping"):
-        _aql(ttl, "SELECT ?m WHERE { ?m a :Message }", tenant_id="t1")
+    aql = _aql(ttl, "SELECT ?m WHERE { ?m a :Message }", tenant_id="t1")
+    assert "FILTER (!(IS_SAME_COLLECTION(@" in aql
+    assert ".org == @" in aql
 
 
 def test_a_supertype_range_looks_the_object_up_in_each_member() -> None:

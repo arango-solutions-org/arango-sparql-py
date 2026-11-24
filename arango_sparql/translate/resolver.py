@@ -312,7 +312,11 @@ class SchemaResolver(AdvisoryLog):
 
     property_path_max_depth: int = 10
     """Maximum repetitions when lowering ``:p+`` / ``:p*`` / ``:p?``; see
-    :mod:`arango_sparql.translate.paths`."""
+    :mod:`arango_sparql.translate.paths`. A ``*`` / ``+`` path whose answer
+    needs more repetitions is refused when the query runs: the AQL stops with
+    ``FAIL`` and a message starting ``E_SPARQL_PATH_DEPTH`` (ArangoDB ERR
+    1569), never answering with the pairs found within the limit (issue #183).
+    Must be at least 1."""
 
     predicates: Mapping[str, PredicateHandler] = field(default_factory=dict)
     """Caller-registered predicates (magic properties), by IRI: the seam in

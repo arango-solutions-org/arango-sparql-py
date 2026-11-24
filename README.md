@@ -161,7 +161,10 @@ Visitors shipped today: `BGP`, `Filter`, `Project`, `Distinct`, `Slice`,
 lowered to AQL equality FILTERs), and property-path expansion
 (`SequencePath`, `InvPath`, `AlternativePath`, bounded `:p+` /
 `:p*` / `:p?` via UNION desugaring with nested-modifier collapsing
-e.g. `((:p)*)*` → `:p*`, and forward-only `NegatedPath` via
+e.g. `((:p)*)*` → `:p*` — a `:p+` / `:p*` path longer than
+`SchemaResolver.property_path_max_depth` (default 10) makes the query
+fail with `E_SPARQL_PATH_DEPTH` rather than return a short answer —
+and forward-only `NegatedPath` via
 ATTRIBUTES fan-out with NOT IN guard). FILTER expressions also
 cover `IN` / `NOT IN` (including the empty-set form) and XSD
 constructor casts (`xsd:double` / `xsd:integer` / `xsd:string` / …).

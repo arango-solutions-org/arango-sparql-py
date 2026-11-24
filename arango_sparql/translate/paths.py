@@ -69,7 +69,7 @@ from rdflib.paths import (
     SequencePath,
 )
 
-from ..errors import UnsupportedSparqlError
+from ..errors import PATH_DEPTH_EXCEEDED_CODE, UnsupportedSparqlError
 from .builder import subject_ref
 
 if TYPE_CHECKING:
@@ -80,7 +80,10 @@ if TYPE_CHECKING:
 # ``:p*`` / ``:p+`` / ``:p?`` to a UNION of fixed-length paths
 # (0..N hops) so each arm reuses the existing SequencePath / edge
 # emitters. N is configurable per deployment via
-# ``SchemaResolver.property_path_max_depth`` (default below).
+# ``SchemaResolver.property_path_max_depth`` (default below). A ``*`` /
+# ``+`` path whose answer needs more than N repetitions makes the query
+# fail at run time (``FAIL``, code ``E_SPARQL_PATH_DEPTH``) rather than
+# return the pairs found within N (issue #183; see :func:`_emit_mul_path`).
 PROPERTY_PATH_MAX_DEPTH: int = 10
 
 
@@ -247,7 +250,34 @@ def _emit_mul_path(
     default-collection joins compose without duplicating traversal logic.
 
     ``N`` is :attr:`SchemaResolver.property_path_max_depth` (default
-    :data:`PROPERTY_PATH_MAX_DEPTH`). Paths longer than ``N`` are not matched.
+    :data:`PROPERTY_PATH_MAX_DEPTH`).
+
+    **Refuse, never truncate (issue #183).** ``*`` and ``+`` have no length
+    limit, so ``N`` arms can miss pairs. Each such path also walks ``N + 1``
+    repetitions, and the query fails (``FAIL``, message starting
+    :data:`~arango_sparql.errors.PATH_DEPTH_EXCEEDED_CODE`) when that walk
+    ends at a node the arms do not reach from the same subject. The check is
+    exact. Let ``R(s)`` be the nodes reachable from ``s`` in ``1..N`` steps
+    (``0..N`` for ``*``) and ``V(s)`` those exactly ``N + 1`` steps away.
+    If ``V(s) ⊆ R(s)``, every later step stays inside ``R(s)`` (the step
+    after ``V(s)`` lies in the steps after ``R(s)``, which are ``R(s) ∪
+    V(s)``), so the answer is complete. If a node ``o`` is first reached
+    after ``d > N`` steps, the node ``N + 1`` steps along a shortest walk to
+    ``o`` is in ``V(s)`` and not in ``R(s)``, so the query fails. A graph
+    with cycles is not refused for having them: walks around a cycle revisit
+    nodes already in ``R(s)``.
+
+    The check is anchored on the subject, with the object free: it must see
+    every node past the limit, and a fixed object (a constant, a variable
+    bound earlier, the subject itself) would hide them. When the object is
+    free the arms already give ``R(s)`` and are reused; otherwise a separate
+    check walks from the subject to a fresh end point first, and then the
+    arms run as before. With a free subject the check covers every subject
+    the arms would scan, so ``?s :p+ :b`` is refused when any chain in that
+    scan is longer than ``N``, even one that never reaches ``:b``. Refusing
+    is the price of not answering short; raise the limit to answer.
+
+    ``:p?`` is bounded by the modifier itself and has no check.
     """
     # Widen to ``str`` up front: the fold loop below re-assigns from
     # ``_combine_mul_modifiers`` (plain ``str``), which a narrower
@@ -287,6 +317,8 @@ def _emit_mul_path(
         raise UnsupportedSparqlError("property paths on RPT-mapped subjects are not yet supported")
 
     max_depth = visitor.resolver.property_path_max_depth
+    if isinstance(max_depth, bool) or not isinstance(max_depth, int) or max_depth < 1:
+        raise ValueError(f"SchemaResolver.property_path_max_depth must be an integer >= 1, got {max_depth!r}")
     if mod == "?":
         min_len, max_len = 0, 1
     elif mod == "+":
@@ -309,23 +341,87 @@ def _emit_mul_path(
 
         return drive
 
-    arm_drivers: list[Callable[[AlgebraVisitor], None]] = []
-    if min_len == 0:
-        arm_drivers.append(_zero_hop_driver(subject, obj))
-    for length in range(max(1, min_len), max_len + 1):
-        expanded = _repeat_inner_path(inner, length)
-        arm_drivers.append(_expanded_arm_driver(subject, expanded, obj))
+    def _arm_drivers(end: Any) -> list[Callable[[AlgebraVisitor], None]]:
+        drivers: list[Callable[[AlgebraVisitor], None]] = []
+        if min_len == 0:
+            drivers.append(_zero_hop_driver(subject, end))
+        for length in range(max(1, min_len), max_len + 1):
+            drivers.append(_expanded_arm_driver(subject, _repeat_inner_path(inner, length), end))
+        return drivers
 
+    from .union_paths import DepthGuard, _emit_union_of_arms
+
+    # The path's end points are projected even when they are internal
+    # sigils: ``:p+/:q`` hands its ``_path_<n>`` object to ``:q``.
+    endpoints = frozenset(str(term) for term in (subject, obj) if isinstance(term, Variable))
+    arm_drivers = _arm_drivers(obj)
+
+    if mod == "?":
+        if len(arm_drivers) == 1:
+            arm_drivers[0](visitor)
+            return
+        # Repetition arms are per-length walks; when both ends are constant
+        # they bind only internal sigils, so collapse to the existence
+        # sentinel rather than re-projecting a fresh intermediate per length.
+        _emit_union_of_arms(visitor, arm_drivers, distinct=True, existence_collapse=True, keep_vars=endpoints)
+        return
+
+    # ``*`` / ``+``: guard the bound (issue #183, docstring above).
+    repeated = _path_text(inner) if isinstance(inner, URIRef) else f"({_path_text(inner)})"
+    message = visitor.builder.bind(_depth_limit_message(f"{repeated}{mod}", max_depth), hint="path_depth")
+    beyond_path = _repeat_inner_path(inner, max_len + 1)
+    if _is_unbound_variable(visitor, obj, subject):
+        _emit_union_of_arms(
+            visitor,
+            arm_drivers,
+            distinct=True,
+            existence_collapse=True,
+            keep_vars=endpoints,
+            depth_guard=DepthGuard(_expanded_arm_driver(subject, beyond_path, obj), message),
+        )
+        return
+
+    end = visitor._fresh_path_var()
+    _emit_union_of_arms(
+        visitor,
+        _arm_drivers(end),
+        distinct=True,
+        existence_collapse=True,
+        keep_vars=endpoints | {str(end)},
+        depth_guard=DepthGuard(_expanded_arm_driver(subject, beyond_path, end), message, only=True),
+    )
     if len(arm_drivers) == 1:
         arm_drivers[0](visitor)
         return
+    _emit_union_of_arms(visitor, arm_drivers, distinct=True, existence_collapse=True, keep_vars=endpoints)
 
-    from .union_paths import _emit_union_of_arms
 
-    # Repetition arms are per-length walks; when both ends are constant
-    # they bind only internal sigils, so collapse to the existence
-    # sentinel rather than re-projecting a fresh intermediate per length.
-    _emit_union_of_arms(visitor, arm_drivers, distinct=True, existence_collapse=True)
+def _is_unbound_variable(visitor: AlgebraVisitor, term: Any, subject: Any) -> bool:
+    """Whether *term* is a variable nothing has bound yet, other than *subject*.
+
+    Such an object leaves the path's arms unconstrained at the far end, so
+    their rows are every pair the depth guard needs to see.
+    """
+    if not isinstance(term, Variable) or term == subject:
+        return False
+    name = str(term)
+    return name not in visitor.state.var_to_expr and name not in visitor.state.var_to_doc_alias
+
+
+def _path_text(path: Any) -> str:
+    """The path as SPARQL writes it, for messages (``<http://ex.org/p>``)."""
+    n3 = getattr(path, "n3", None)
+    return n3() if callable(n3) else str(path)
+
+
+def _depth_limit_message(path: str, max_depth: int) -> str:
+    """The run-time refusal for a ``*`` / ``+`` path longer than the limit."""
+    return (
+        f"{PATH_DEPTH_EXCEEDED_CODE}: property path {path} reaches nodes more than "
+        f"{max_depth} repetitions away, past SchemaResolver.property_path_max_depth "
+        f"({max_depth}). The query is refused rather than answered without them; "
+        "raise property_path_max_depth to answer it."
+    )
 
 
 def _emit_negated_path(

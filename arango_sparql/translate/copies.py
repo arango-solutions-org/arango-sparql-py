@@ -65,6 +65,7 @@ from .builder import (
     is_aql_identifier,
 )
 from .resolver import ResolvedClass, ResolvedProperty
+from .tenant_scope import enforce_classes_tenant_scope
 
 if TYPE_CHECKING:
     from .visitor import AlgebraVisitor
@@ -194,8 +195,8 @@ def drop_repeated_copies(visitor: AlgebraVisitor) -> None:
             scope = visitor._graph_scope_test(other)
             if scope is not None:
                 probe.filter_raw(scope)
-            for tenant in _distinct_tenants(by_collection[earlier]):
-                visitor._enforce_tenant_scope(other, tenant, builder=probe)
+            # Class-tested just above: an unlisted class cannot reach the probe.
+            enforce_classes_tenant_scope(visitor, other, by_collection[earlier], builder=probe)
             for path in fields:
                 probe.filter_raw(
                     f"{probe.attribute_exists(other, path)} == {probe.attribute_exists(alias, path)}"
@@ -282,8 +283,7 @@ def emit_attribute_across_copies(
         scope = visitor._graph_scope_test(inner)
         if scope is not None:
             into.filter_raw(scope)
-        for tenant in _distinct_tenants(sources[collection]):
-            visitor._enforce_tenant_scope(inner, tenant, builder=into)
+        enforce_classes_tenant_scope(visitor, inner, sources[collection], builder=into, class_tested=False)
         # An indexed ``_uri`` lookup per row, as the probe's (§6.1).
         indexes = visitor.resolver.uri_indexes
         if indexes is not None and indexes.scanned(collection, members):
@@ -341,8 +341,3 @@ def emit_attribute_across_copies(
     raise UnsupportedSparqlError(
         f"object term type {type(obj).__name__!r} is not supported in triple {triple!r}"
     )
-
-
-def _distinct_tenants(classes: list[ResolvedClass]) -> list[ResolvedClass]:
-    """One class per tenant scoping among *classes*."""
-    return list({(c.tenant_field, c.tenant_entity): c for c in classes}.values())

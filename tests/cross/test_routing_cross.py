@@ -235,11 +235,17 @@ def test_a_union_domain_in_lpg_is_an_any_of_label_test(oxi_store: Any) -> None:
     assert_bindings_equal(expected, _run(LPG_ONTOLOGY, _lpg_docs, sparql))
 
 
-def test_a_pg_union_across_tenant_scopes_fails_closed() -> None:
+def test_a_pg_union_across_tenant_scopes_holds_each_member_to_its_own() -> None:
+    """Only Post is tenant-scoped: its documents are held to ``org`` and
+    Comments pass. Refused before #218 ("different tenant scoping")."""
     ttl = PG_ONTOLOGY.replace(
         ':Post a owl:Class ; phys:collectionName "Post" .',
         ':Post a owl:Class ; phys:collectionName "Post" ; phys:tenantField "org" .',
     )
+    docs = _pg_docs()
+    for post in docs["Post"]:
+        post["org"] = "t2" if post["_uri"] == EX + "post2" else "t1"
     sparql = "PREFIX : <http://ex.org/>\nSELECT ?c WHERE { ?m :content ?c }"
-    with pytest.raises(UnsupportedSparqlError, match="different tenant scoping"):
-        translate(sparql, resolver=_strict(ttl), tenant_id="t1")
+    result = translate(sparql, resolver=_strict(ttl), tenant_id="t1")
+    rows = [drop_null_bindings(r) for r in run_aql_subset(result.aql, result.bind_vars, docs)]
+    assert sorted(r["c"] for r in rows) == ["hello", "nice", "thanks"]
