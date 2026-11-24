@@ -76,3 +76,71 @@ def _operands(node: Any) -> Any:
             # literal is an operand too: ``COALESCE(?z, "x")`` is no error.
             if isinstance(item, Identifier) or isinstance(getattr(item, "name", None), str):
                 yield item
+
+
+#: Functions that never raise, whatever their arguments: BOUND reads an
+#: unbound variable as false (§17.4.1.1).
+_NEVER_ERROR = frozenset({"Builtin_BOUND"})
+
+#: Functions whose AQL translation is never null, whatever its input: an
+#: error there cannot leave the target unbound in the emitted query (it is
+#: not represented at all, #82), so marking the target possibly-unbound
+#: would change no answer and only cost the join its index (review of #236).
+#: Checked on ArangoDB 3.12: ``CONCAT(null)`` and ``TO_STRING(null)`` are
+#: ``""``, ``LENGTH(null)`` and ``ABS(null)`` 0, ``MD5(null)`` a hash. Not
+#: ``REPLACE``: ``REGEX_REPLACE`` is null for an invalid pattern.
+_AQL_NEVER_NULL = frozenset(
+    {
+        "Builtin_CONCAT",
+        "Builtin_STR",
+        "Builtin_IRI",
+        "Builtin_UCASE",
+        "Builtin_LCASE",
+        "Builtin_STRAFTER",
+        "Builtin_STRBEFORE",
+        "Builtin_SUBSTR",
+        "Builtin_STRLEN",
+        "Builtin_ENCODE_FOR_URI",
+        "Builtin_MD5",
+        "Builtin_SHA1",
+        "Builtin_SHA256",
+        "Builtin_SHA512",
+        "Builtin_ABS",
+        "Builtin_STRUUID",
+        "Builtin_UUID",
+        "Builtin_NOW",
+    }
+)
+#: XSD constructor casts emitted as ``TO_NUMBER`` / ``TO_STRING`` / ``TO_BOOL``.
+_XSD = "http://www.w3.org/2001/XMLSchema#"
+_AQL_NEVER_NULL_CASTS = frozenset(
+    _XSD + name for name in ("integer", "decimal", "double", "float", "string", "boolean", "dateTime")
+)
+
+
+def can_error(node: Any) -> bool:
+    """Whether *node* can be an error in some solution that the emitted AQL
+    represents as ``null``, leaving a BIND or projection target unbound
+    there (§18.5, Extend; #226).
+
+    Conservative: a constant and a plain variable never error, nor does
+    ``BOUND``, nor a ``COALESCE`` whose last operand cannot. A function whose
+    AQL is never null (``_AQL_NEVER_NULL``, the XSD casts) is not counted
+    either. Anything else can: arithmetic (a division by zero, a non-numeric
+    operand), an ``IF`` whose condition errors, ``ROUND`` / ``CEIL`` /
+    ``FLOOR`` of a non-number. A target that can be unbound is joined
+    compatibly (either side unbound, or equal) rather than by value.
+    """
+    if isinstance(node, (Variable, Identifier)):
+        return False
+    name = getattr(node, "name", None)
+    if not isinstance(name, str):
+        return False
+    if name in _NEVER_ERROR or name in _ERROR_TOLERANT or name in _AQL_NEVER_NULL:
+        return False
+    if name == "Function" and str(node.get("iri")) in _AQL_NEVER_NULL_CASTS:
+        return False
+    if name == "Builtin_COALESCE":
+        operands = list(_operands(node))
+        return not operands or can_error(operands[-1])
+    return True

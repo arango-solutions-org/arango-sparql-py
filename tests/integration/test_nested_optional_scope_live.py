@@ -366,6 +366,41 @@ def _multiset(rows: list[dict[str, Any]]) -> list[str]:
             "SELECT ?s ?n WHERE { ?s :name ?n FILTER NOT EXISTS { ?t :knows ?k MINUS { ?s :likes ?y } } }",
             id="exists_minus_right_binds_outer",
         ),
+        # A column or BIND whose expression can error is unbound where it
+        # errors (§18.5), compatible with any value; joined as bound it found
+        # no match there (#226; wrong on main).
+        pytest.param(
+            "SELECT ?s ?x WHERE { ?s :likes ?x { SELECT ?s (IF(?k = :c, ?k, 1/0) AS ?x) WHERE { ?s :knows ?k } } }",
+            id="erroring_column_join_after",
+        ),
+        pytest.param(
+            "SELECT ?s ?x WHERE { { SELECT ?s (IF(?k = :c, ?k, 1/0) AS ?x) WHERE { ?s :knows ?k } } ?s :likes ?x }",
+            id="erroring_column_join_before",
+        ),
+        pytest.param(
+            "SELECT ?s ?x WHERE { ?s :name ?n OPTIONAL { ?s :likes ?x } "
+            "MINUS { SELECT ?s (IF(?k = :c, ?k, 1/0) AS ?x) WHERE { ?s :knows ?k } } }",
+            id="erroring_column_minus",
+        ),
+        pytest.param(
+            "SELECT ?s ?x WHERE { ?s :knows ?k BIND(IF(?k = :c, ?k, 1/0) AS ?x) ?s :likes ?x }",
+            id="erroring_bind_join",
+        ),
+        pytest.param(
+            "SELECT ?s ?x WHERE { ?s :knows ?k BIND(IF(?k = :c, ?k, 1/0) AS ?x) ?x :name ?n }",
+            id="erroring_bind_subject",
+        ),
+        pytest.param(
+            "SELECT ?s ?a ?b WHERE { ?s :age ?a BIND(?a + 1 AS ?b) ?t :age ?b }",
+            id="arithmetic_bind_join",
+        ),
+        # An OPTIONAL value joined to an attribute of its own document: the
+        # scan is never split around itself (ERR 1203 on an earlier head of
+        # #236).
+        pytest.param(
+            "SELECT ?s ?x WHERE { ?s a :Person OPTIONAL { ?s :email ?x } ?s :name ?x }",
+            id="optional_value_own_attribute",
+        ),
         # A MINUS evaluated apart inside an OPTIONAL, a UNION arm or an ASK
         # is computed once at the top of the query (#234); its answers are
         # unchanged.

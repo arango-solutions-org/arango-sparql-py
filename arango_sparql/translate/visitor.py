@@ -44,7 +44,7 @@ from .builder import (
 )
 from .copies import CopyRow, copies_interchangeable, drop_repeated_copies, emit_attribute_across_copies
 from .date_arithmetic import compare_instants, date_shift, instant, is_date_shift, is_duration_literal
-from .expression_errors import certainly_error, unbound_variables
+from .expression_errors import can_error, certainly_error, unbound_variables
 from .filter_builtins import translate_builtin, translate_function
 from .minus_exists import emit_minus
 from .mixed_store import emit_routed_triple, route_subject
@@ -218,6 +218,12 @@ class _BindingState:
     error inside SUM / AVG / MIN / MAX / GROUP_CONCAT (issue #59). A null
     anywhere else is a stored null on a required triple — no triple, which
     those aggregates already skip — and is left alone."""
+    rarely_unbound: set[str] = field(default_factory=set)
+    """Of ``maybe_unbound``: computed variables unbound only where their own
+    expression errors (#226), so null in few rows. A join on an attribute
+    splits the document scan for them, keeping its index (review of #236);
+    for an OPTIONAL or VALUES value, often null, the split cost more than
+    the FILTER, so they keep it."""
     var_to_rpt_class: dict[str, ResolvedClass] = field(default_factory=dict)
     """SPARQL subject variable → :class:`ResolvedClass` for the RPT
     triples table that backs this subject's class.
@@ -1290,6 +1296,14 @@ class AlgebraVisitor:
         self.state.var_to_expr[var_name] = alias
         if _expression_variable_names(expr) & self.state.maybe_unbound:
             self.state.maybe_unbound.add(var_name)
+        elif can_error(expr) or unbound_variables(expr, lambda name: name in self.state.var_to_expr):
+            # Unbound where an input is, where the expression is an error the
+            # AQL shows as null, or everywhere when it reads a variable nothing
+            # in scope binds (§18.5): a later join on it must be compatible,
+            # not by value. ``IF(?k = :c, ?k, 1/0)`` and ``BIND(?zz AS ?x)``
+            # joined as bound found no match where unbound (#226).
+            self.state.maybe_unbound.add(var_name)
+            self.state.rarely_unbound.add(var_name)
         if self._is_date_valued(expr):
             self.state.date_shift_vars.add(var_name)
 
@@ -2219,7 +2233,25 @@ class AlgebraVisitor:
                     if fan_out:
                         read = self.builder.fresh_alias(prefix="lv")
                         self.builder.for_inline(read, self._fan_out_source(attr_path))
-                    self._join_maybe_unbound(str(o), existing, read, f"{read} == {existing}")
+                        self._join_maybe_unbound(str(o), existing, read, f"{read} == {existing}")
+                    elif str(o) not in self.state.rarely_unbound:
+                        self._join_maybe_unbound(str(o), existing, read, f"{read} == {existing}")
+                    else:
+                        # A computed value, null only where it errors: split
+                        # the document scan, as for a subject, so the bound
+                        # value keeps an attribute index (``?t :age ?b`` with
+                        # ``?b`` from ``?a + 1`` went from 0.19 s to 2.8 s with
+                        # the FILTER; review of #236). Not for an OPTIONAL or
+                        # VALUES value: often null, its split cost 9-170x.
+                        field_path = prop.field_path
+                        self._join_maybe_unbound(
+                            str(o),
+                            existing,
+                            read,
+                            lambda doc: f"{attribute_path_ref(doc, field_path)} == {existing}",
+                            alias=alias,
+                            attribute=True,
+                        )
                 elif existing != attr_path:
                     # The variable is already bound by an earlier
                     # triple to a different AQL expression — turn the
@@ -4023,6 +4055,7 @@ class AlgebraVisitor:
         match: str | Callable[[str], str],
         *,
         alias: str | None = None,
+        attribute: bool = False,
     ) -> bool:
         """Join *name*, which an earlier OPTIONAL can leave unbound, to *new_expr*.
 
@@ -4036,7 +4069,7 @@ class AlgebraVisitor:
         """
         if name not in self.state.maybe_unbound:
             return False
-        self._emit_unbound_join(existing, match, alias=alias)
+        self._emit_unbound_join(existing, match, alias=alias, attribute=attribute)
         self.state.var_to_expr[name] = new_expr
         self.state.maybe_unbound.discard(name)
         return True
@@ -4048,6 +4081,7 @@ class AlgebraVisitor:
         *,
         alias: str | None = None,
         builder: AqlQueryBuilder | None = None,
+        attribute: bool = False,
     ) -> None:
         """Emit the compatible join of a value that can be null: the one
         place the triple emitters write it. (A VALUES or sub-select column
@@ -4061,7 +4095,17 @@ class AlgebraVisitor:
         is the FILTER ``(existing == null || match)``, which costs no index.
         """
         target = builder if builder is not None else self.builder
-        if alias is not None and callable(match) and target.split_scan_on_value(alias, existing, match):
+        if (
+            alias is not None
+            and callable(match)
+            and target.split_scan_on_value(
+                alias,
+                existing,
+                match,
+                attribute=attribute,
+                structural_fields=self.resolver.structural_fields() if attribute else frozenset(),
+            )
+        ):
             return
         if callable(match):
             if alias is None:

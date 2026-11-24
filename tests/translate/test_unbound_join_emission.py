@@ -75,9 +75,43 @@ def test_a_certainly_bound_variable_keeps_the_plain_indexed_join() -> None:
 
 
 def test_an_attribute_value_that_can_be_unbound_is_joined_by_a_filter() -> None:
-    # No document to look up by index: the value is read from the document.
+    # An OPTIONAL value is often null: splitting the scan cost 9-170x at
+    # 12,000 people (recheck of #236), so the join stays a FILTER, as on main.
     aql = _aql("SELECT ?s ?x ?y WHERE { ?s a :Person OPTIONAL { ?s :email ?x } ?y :email ?x }")
     assert "== null || doc" in aql
+
+
+def test_a_computed_value_joined_to_an_attribute_splits_the_document_scan() -> None:
+    # Null only where ``?a + 1`` errors: the bound value keeps an index on the
+    # attribute (one FILTER cost 0.19 s -> 2.8 s; review of #236).
+    aql = _aql("SELECT ?s ?t WHERE { ?s :age ?a BIND(?a + 1 AS ?b) ?t :age ?b }")
+    # The null test comes before the FOR, so a null value never enters the
+    # attribute's index lookup (recheck of #236).
+    assert "FILTER bv4 != null\n  FOR " in aql
+    assert ".age == bv4" in aql
+
+
+def test_a_scan_pinned_by_another_attribute_is_not_split() -> None:
+    # ``?t :email "…"`` already pins doc's index lookup: a split around the
+    # scan would trade it for the age index (0.01 s -> 0.28 s; recheck of #236).
+    aql = _aql('SELECT ?s ?t WHERE { ?s :age ?a BIND(?a * 1 AS ?b) ?t :email "p30@x.org" ; :age ?b }')
+    assert "!= null\n  FOR " not in aql
+    assert "(bv4 == null || " in aql
+
+
+def test_an_attribute_joined_to_a_value_read_after_its_scan_is_filtered() -> None:
+    # The value is computed from the same document after its scan; the scan
+    # cannot read it, so the join stays a FILTER (#226 recheck).
+    aql = _aql("SELECT ?s ?b WHERE { ?s :age ?a BIND(?a + 1 AS ?b) ?s :email ?b }")
+    assert "(bv4 == null || doc7.email == bv4)" in aql
+    assert "bv4 != null" not in aql  # no split arm reads it
+
+
+def test_an_attribute_joined_to_its_own_document_is_never_split() -> None:
+    # ``?s :name ?x`` with ``?x`` read from doc1 itself: a split around doc1's
+    # scan referenced doc1 inside it (ERR 1203; recheck of #236).
+    aql = _aql("SELECT ?s ?x WHERE { ?s a :Person OPTIONAL { ?s :email ?x } ?s :name ?x }")
+    assert "FOR doc1 IN UNION(" not in aql
 
 
 def _minus_body(where: str) -> object:
@@ -147,3 +181,25 @@ def test_minus_and_the_group_scoped_optional_share_one_walker() -> None:
 
     assert minus_exists.certain_variables is optional_subquery.certain_variables
     assert not hasattr(minus_exists, "certainly_bound_variables")
+
+
+def test_a_tenant_or_label_filter_is_no_pin() -> None:
+    # The tenant field and an LPG label test narrow the scan but are not the
+    # lookup to keep; counted as pins they turned the split off and left the
+    # FILTER that scans per row (third recheck of #236).
+    from arango_sparql.api import translate
+    from arango_sparql.translate.resolver import SchemaResolver
+
+    ttl = """
+@prefix : <http://ex.org/> . @prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> . @prefix phys: <https://arango.solutions/phys#> .
+:Person a owl:Class ; phys:collectionName "nodes" ; phys:mappingStyle "LABEL" ; phys:typeField "type" ;
+    phys:typeValue "Person" ; phys:tenantField "org" ; phys:tenantEntity "Org" .
+:age a owl:DatatypeProperty ; rdfs:domain :Person ; phys:attributeName "age" .
+"""
+    aql = translate(
+        "PREFIX : <http://ex.org/> SELECT ?s ?t WHERE { ?s :age ?a BIND(?a + 1 AS ?b) ?t :age ?b }",
+        resolver=SchemaResolver.from_turtle(ttl),
+        tenant_id="t1",
+    ).aql
+    assert "!= null\n  FOR " in aql  # split: the age index is kept

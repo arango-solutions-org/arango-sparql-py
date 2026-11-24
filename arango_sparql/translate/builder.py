@@ -492,7 +492,15 @@ class AqlQueryBuilder:
         self._scanned_aliases.append(alias)
         return self
 
-    def split_scan_on_value(self, alias: str, value: str, match: Callable[[str], str]) -> bool:
+    def split_scan_on_value(
+        self,
+        alias: str,
+        value: str,
+        match: Callable[[str], str],
+        *,
+        attribute: bool = False,
+        structural_fields: frozenset[str] = frozenset(),
+    ) -> bool:
         """Join the scan ``FOR <alias> IN @@coll`` to *value*, which can be null.
 
         An unbound variable is compatible with any value (SPARQL 1.1 §18.3),
@@ -514,7 +522,10 @@ class AqlQueryBuilder:
 
         Returns ``False``, changing nothing, when *alias* is not a plain
         collection scan of this builder (a traversal vertex, a union row,
-        a view search, a sharded family): the caller then filters instead.
+        a view search, a sharded family), or when *value* reads a variable
+        this builder defines after that scan, which the scan could not see
+        (an attribute joined to a value computed from the same document,
+        #226): the caller then filters instead.
         """
         pattern = re.compile(rf"FOR {re.escape(alias)} IN (@@\w+)")
         for index, clause in enumerate(self._body_clauses):
@@ -523,15 +534,70 @@ class AqlQueryBuilder:
             found = pattern.fullmatch(clause.text)
             if found is None:
                 continue
+            if self._defined_after(index, value) or re.search(rf"(?<![@.\w]){re.escape(alias)}\b", value):
+                # The value reads a variable defined after the scan, or the
+                # scanned document itself (``doc1.email`` joined to doc1's
+                # own attribute: ERR 1203 on the split; recheck of #236).
+                return False
+            if self._anchored_after(index, alias, attribute=attribute, structural_fields=structural_fields):
+                return False
             collection = found.group(1)
             hit = self.fresh_alias()
             free = self.fresh_alias()
-            arms = [
-                f"FOR {hit} IN {collection}\nFILTER ({value} != null && {match(hit)})\nRETURN {hit}",
-                f"FOR {free} IN {collection}\nFILTER {value} == null\nRETURN {free}",
-            ]
+            if attribute:
+                # The null test before the FOR: written in one FILTER with the
+                # match, ArangoDB planned the attribute's index lookup on
+                # ``attr == null`` for a null value, which every document
+                # lacking the attribute satisfies (11 s against 2.5 s; recheck
+                # of #236). Here a null value never enters the lookup.
+                hit_arm = (
+                    f"FILTER {value} != null\nFOR {hit} IN {collection}\nFILTER {match(hit)}\nRETURN {hit}"
+                )
+            else:
+                hit_arm = f"FOR {hit} IN {collection}\nFILTER ({value} != null && {match(hit)})\nRETURN {hit}"
+            arms = [hit_arm, f"FOR {free} IN {collection}\nFILTER {value} == null\nRETURN {free}"]
             self._body_clauses[index] = _Clause(_ClauseKind.FOR, _union_clause(alias, arms, "UNION"))
             return True
+        return False
+
+    def _anchored_after(
+        self,
+        index: int,
+        alias: str,
+        *,
+        attribute: bool = False,
+        structural_fields: frozenset[str] = frozenset(),
+    ) -> bool:
+        """Whether a FILTER after clause *index* already pins *alias* by an
+        equality its index can serve: its IRI (``alias._uri == …``), and for
+        an attribute split a plain ``FILTER alias.<field> == <value>`` on a
+        data field. That lookup is kept as it is, which a split around the
+        scan would lose (0.05 s became 0.20 s for ``_uri``, 0.01 s became
+        0.28 s for an attribute; rechecks of #236). The mapping's graph,
+        tenant and type fields (*structural_fields*) narrow the scan but are
+        not such a lookup, and an ``OR`` (a compatible join, an LPG label
+        test) is no pin: counted, they turned the split off and left one
+        FILTER that scans per row."""
+        iri = re.compile(rf"(?<![@.\w]){re.escape(alias)}\._(?:uri|id) == ")
+        plain = re.compile(rf"FILTER {re.escape(alias)}\.(`[^`]+`|\w+) == (@\w+|[A-Za-z_]\w*(?:\.\w+)*)")
+        for clause in self._body_clauses[index + 1 :]:
+            if clause.kind != _ClauseKind.FILTER:
+                continue
+            if iri.search(clause.text):
+                return True
+            found = plain.fullmatch(clause.text) if attribute else None
+            if found and found.group(1).strip("`") not in structural_fields:
+                return True
+        return False
+
+    def _defined_after(self, index: int, expression: str) -> bool:
+        """Whether *expression* reads a variable that a ``FOR`` or ``LET`` of
+        this builder after clause *index* defines."""
+        names = set(re.findall(r"(?<![@.\w])([A-Za-z_]\w*)", expression))
+        for clause in self._body_clauses[index + 1 :]:
+            defined = re.match(r"(?:FOR|LET) ([A-Za-z_]\w*)(?:, ([A-Za-z_]\w*))?", clause.text)
+            if defined and names & {name for name in defined.groups() if name}:
+                return True
         return False
 
     def sort_here(self, expression: str, *, descending: bool) -> AqlQueryBuilder:
