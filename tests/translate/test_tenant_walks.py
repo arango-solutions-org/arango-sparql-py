@@ -72,12 +72,13 @@ def test_one_ternary_per_tenant_field_whatever_the_number_of_classes() -> None:
     # ``:p+`` path ran ArangoDB's planner out of memory; one ternary per
     # walked document, keyed by its collection, does not. The collection
     # list is bound once per sub-query (each length of the path is an arm),
-    # not once per class and hop.
+    # not once per class and hop. A sequence keeps the arms (``:knows+`` is
+    # one traversal: ``tests/translate/test_edge_closure.py``).
     ttl = _PG + "".join(
         f':C{i} a owl:Class ; phys:collectionName "C{i}" ; phys:tenantField "tenant" .\n' for i in range(20)
     )
     result = translate(
-        "PREFIX : <http://ex.org/>\nSELECT ?x WHERE { :a :knows+ ?x }",
+        "PREFIX : <http://ex.org/>\nSELECT ?x WHERE { :a (:knows/:knows)+ ?x }",
         resolver=SchemaResolver.from_turtle(ttl),
         tenant_id="t1",
     )

@@ -7,12 +7,20 @@ chain returned 65 of its 66 pairs. Now the path is also walked once more,
 and the query stops with ``FAIL`` (``E_SPARQL_PATH_DEPTH``) when that walk
 reaches a pair the arms do not.
 
+An object property in an edge collection of its own is walked by a
+traversal instead, with no limit (``paths._emit_edge_closure_arm``), so it
+answers the long chain in full; ``tests/cross/test_edge_closure_cross.py``
+covers that walk in depth.
+
 Each case runs the same SPARQL through pyoxigraph and through the AQL
-interpreter, on both storage shapes the path goldens use: an undeclared
-predicate stored as a document attribute holding the next node's IRI (the
-default-collection layout of ``property_paths.yml`` and the W3C loader), and
-an object property backed by an edge collection. ``tests/integration/
-test_path_depth_live.py`` runs the same cases on ArangoDB.
+interpreter, on three storage shapes: an undeclared predicate stored as a
+document attribute holding the next node's IRI (the default-collection
+layout of ``property_paths.yml`` and the W3C loader) and an object property
+in an edge collection shared by several relationship types (an edge type
+test), both of which keep the arms; and an object property backed by an
+edge collection of its own, which is walked by a traversal.
+``tests/integration/test_path_depth_live.py`` runs the same cases on
+ArangoDB.
 """
 
 from __future__ import annotations
@@ -72,6 +80,8 @@ class Shape:
     name: str
     ontology: str
     edges: bool
+    #: The edges' type field and value, in a collection shared by types.
+    edge_type: tuple[str, str] | None = None
 
     def resolver(self, max_depth: int | None = None) -> SchemaResolver:
         resolver = SchemaResolver.from_turtle(self.ontology, default_collection=DOC)
@@ -107,7 +117,13 @@ class Shape:
             ],
             DOC: [{"_id": f"{DOC}/n{n}", "_key": f"n{n}", "_uri": f"{EX}n{n}"} for n in graph.nodes],
             NEXT: [
-                {"_id": f"{NEXT}/{a}_{b}", "_key": f"{a}_{b}", "_from": f"{NODE}/n{a}", "_to": f"{NODE}/n{b}"}
+                {
+                    "_id": f"{NEXT}/{a}_{b}",
+                    "_key": f"{a}_{b}",
+                    "_from": f"{NODE}/n{a}",
+                    "_to": f"{NODE}/n{b}",
+                    **(dict([self.edge_type]) if self.edge_type else {}),
+                }
                 for a, b in graph.links
             ],
         }
@@ -125,7 +141,26 @@ EDGE = Shape(
 """,
     edges=True,
 )
-SHAPES = [pytest.param(ATTRIBUTE, id="attribute"), pytest.param(EDGE, id="edge")]
+TYPED_EDGE = Shape(
+    "typed_edge",
+    f"""
+@prefix : <{EX}> . @prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix phys: <https://arango.solutions/phys#> . @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+:Node a owl:Class ; phys:collectionName "{NODE}" .
+:label a owl:DatatypeProperty ; rdfs:domain :Node .
+:next a owl:ObjectProperty ; phys:edgeCollectionName "{NEXT}" ; phys:mappingStyle "GENERIC_WITH_TYPE" ;
+    phys:typeField "type" ; phys:typeValue "next" ; rdfs:domain :Node ; rdfs:range :Node .
+""",
+    edges=True,
+    edge_type=("type", "next"),
+)
+SHAPES = [
+    pytest.param(ATTRIBUTE, id="attribute"),
+    pytest.param(EDGE, id="edge"),
+    pytest.param(TYPED_EDGE, id="typed_edge"),
+]
+#: The shapes lowered to bounded arms, which refuse a chain past the limit.
+BOUNDED = [pytest.param(ATTRIBUTE, id="attribute"), pytest.param(TYPED_EDGE, id="typed_edge")]
 
 #: Queries over the whole chain: every one needs all 11 hops of LONG.
 WHOLE_CHAIN = [
@@ -154,7 +189,7 @@ def oracle(graph: Graph, query: str) -> list[dict[str, Any]]:
     return [normalize_oxi_row(r) for r in oxi_bindings(store, PREFIX + query)]
 
 
-@pytest.mark.parametrize("shape", SHAPES)
+@pytest.mark.parametrize("shape", BOUNDED)
 @pytest.mark.parametrize("query", WHOLE_CHAIN)
 def test_a_chain_longer_than_the_limit_is_refused(shape: Shape, query: str) -> None:
     with pytest.raises(AqlFailCalled) as failure:
@@ -162,6 +197,14 @@ def test_a_chain_longer_than_the_limit_is_refused(shape: Shape, query: str) -> N
     message = str(failure.value)
     assert message.startswith(PATH_DEPTH_EXCEEDED_CODE)
     assert f"property_path_max_depth ({PROPERTY_PATH_MAX_DEPTH})" in message
+
+
+@pytest.mark.parametrize("query", WHOLE_CHAIN)
+def test_an_edge_collection_of_its_own_answers_the_long_chain_in_full(query: str) -> None:
+    # Walked by a traversal: no limit to refuse at.
+    expected = oracle(LONG, query)
+    assert expected
+    assert_bindings_equal(expected, run(EDGE, LONG, query))
 
 
 @pytest.mark.parametrize("shape", SHAPES)
@@ -208,7 +251,7 @@ def test_a_path_anchored_within_the_limit_is_answered(shape: Shape, query: str) 
     assert_bindings_equal(oracle(LONG, query), run(shape, LONG, query))
 
 
-@pytest.mark.parametrize("shape", SHAPES)
+@pytest.mark.parametrize("shape", BOUNDED)
 def test_a_free_subject_is_checked_over_every_subject(shape: Shape) -> None:
     # ``?s :next+ :n6`` needs 6 steps at most, but its subject is free, so the
     # check walks from every subject the arms scan and meets n0 → n11. Walking
@@ -238,7 +281,7 @@ def test_a_cycle_is_answered_not_refused(shape: Shape, query: str) -> None:
     assert_bindings_equal(oracle(CYCLE, query), run(shape, CYCLE, query))
 
 
-@pytest.mark.parametrize("shape", SHAPES)
+@pytest.mark.parametrize("shape", BOUNDED)
 def test_a_limit_of_one_still_checks(shape: Shape) -> None:
     # One arm for ``+``: the union pairs it with ``[]``.
     with pytest.raises(AqlFailCalled):

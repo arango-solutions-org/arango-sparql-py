@@ -70,7 +70,7 @@ from rdflib.paths import (
 )
 
 from ..errors import PATH_DEPTH_EXCEEDED_CODE, UnsupportedSparqlError
-from .builder import subject_ref
+from .builder import indent_aql, subject_ref
 
 if TYPE_CHECKING:
     from .visitor import AlgebraVisitor
@@ -85,6 +85,15 @@ if TYPE_CHECKING:
 # fail at run time (``FAIL``, code ``E_SPARQL_PATH_DEPTH``) rather than
 # return the pairs found within N (issue #183; see :func:`_emit_mul_path`).
 PROPERTY_PATH_MAX_DEPTH: int = 10
+
+# The depth bound of the traversal that answers ``:p*`` / ``:p+`` over an
+# edge collection (:func:`_emit_edge_closure_arm`). AQL takes only a constant
+# there. The walk reaches each vertex once, along a path with no repeated
+# vertex, so no two of its steps are the same edge: no answer is more steps
+# away than the edge collection has edges. The query checks that count
+# against this bound and refuses past it, so the bound never cuts an answer.
+# 2**53 - 1 is the largest integer every JSON client keeps exact.
+EDGE_CLOSURE_MAX_DEPTH: int = 2**53 - 1
 
 
 def emit_path_triple(
@@ -277,6 +286,12 @@ def _emit_mul_path(
     scan is longer than ``N``, even one that never reaches ``:b``. Refusing
     is the price of not answering short; raise the limit to answer.
 
+    **No limit over an edge collection of its own.** Where the repeated step
+    is ``:p`` or ``^:p`` and ``:p`` is such a collection, walked with no
+    test on the edge (:func:`_edge_closure`), the ``1..N`` arms and their
+    check are replaced by one traversal that walks to the end
+    (:func:`_emit_edge_closure_arm`); ``*`` keeps its zero-length arm.
+
     ``:p?`` is bounded by the modifier itself and has no check.
     """
     # Widen to ``str`` up front: the fold loop below re-assigns from
@@ -366,8 +381,18 @@ def _emit_mul_path(
         _emit_union_of_arms(visitor, arm_drivers, distinct=True, existence_collapse=True, keep_vars=endpoints)
         return
 
-    # ``*`` / ``+``: guard the bound (issue #183, docstring above).
     repeated = _path_text(inner) if isinstance(inner, URIRef) else f"({_path_text(inner)})"
+    closure = _edge_closure(visitor, subject, inner, obj)
+    if closure is not None:
+        # One edge collection, walked to the end: complete, no depth limit
+        # and no depth check (:func:`_emit_edge_closure_arm`).
+        start, prop, end = closure
+        drivers = [_zero_hop_driver(subject, obj)] if mod == "*" else []
+        drivers.append(_edge_closure_driver(start, prop, end, f"{repeated}{mod}"))
+        _emit_union_of_arms(visitor, drivers, distinct=True, existence_collapse=True, keep_vars=endpoints)
+        return
+
+    # ``*`` / ``+``: guard the bound (issue #183, docstring above).
     message = visitor.builder.bind(_depth_limit_message(f"{repeated}{mod}", max_depth), hint="path_depth")
     beyond_path = _repeat_inner_path(inner, max_len + 1)
     if _is_unbound_variable(visitor, obj, subject):
@@ -406,6 +431,213 @@ def _is_unbound_variable(visitor: AlgebraVisitor, term: Any, subject: Any) -> bo
         return False
     name = str(term)
     return name not in visitor.state.var_to_expr and name not in visitor.state.var_to_doc_alias
+
+
+def _edge_closure(visitor: AlgebraVisitor, subject: Any, inner: Any, obj: Any) -> tuple[Any, Any, Any] | None:
+    """``(start, property, end)`` when ``subject inner* obj`` (or ``+``) can be
+    answered by one traversal of an edge collection; ``None`` otherwise.
+
+    *inner* is ``:p`` or ``^:p`` with ``:p`` stored in an edge collection that
+    the per-hop triple walks with no condition on the edge itself: a
+    dedicated collection, or a shared one without a type discriminator. Not
+    for an edge type test (a walk that reaches a vertex once must not reach
+    it first along an edge of another type, and only a test inside the
+    traversal could stop that), a reified relationship (its triples end at
+    the edge, not a vertex), an exit predicate, or triples stored as rows
+    (RPT). The start must be read as a document, as the triple's own subject
+    is: not routed to a triples table.
+
+    ``(^:p)+`` is ``^(:p+)`` (SPARQL 1.1 §9.3: a path's inverse repeated is
+    the repeated path inverted), so it is walked forwards from the object,
+    as ``?s ^:p+ ?o`` is (:func:`_emit_inverse_path`). Anything else (a
+    sequence ``(:p/:q)+``, a property stored as a document attribute, a pure
+    triple store) keeps the bounded arms and their depth check, as does
+    ``:x (^:p)+ ?y``, which the arms walk backwards from ``:x``.
+    """
+    if isinstance(inner, InvPath) and isinstance(inner.arg, URIRef):
+        start, iri, end = obj, inner.arg, subject
+        if _is_unbound_variable(visitor, start, None) and not _is_unbound_variable(visitor, end, None):
+            # ``:x (^:p)+ ?y``: the arms walk back from ``:x`` hop by hop;
+            # forwards, the walk would start from every candidate ``?y``, a
+            # scan the arms never make for this shape. ``?y :p+ :x`` (and
+            # ``:x ^:p+ ?y``) walk forwards in the arms too, and are walked.
+            return None
+    elif isinstance(inner, URIRef):
+        start, iri, end = subject, inner, obj
+    else:
+        return None
+    resolver = visitor.resolver
+    if resolver.triple_store_class() is not None:
+        return None
+    if isinstance(start, Variable):
+        if str(start) in visitor.state.var_to_rpt_class:
+            return None
+    elif isinstance(start, URIRef):
+        if str(start) in visitor.state.const_subject_rpt_class:
+            return None
+    else:
+        return None
+    if _walked_back_from_document(visitor, start, end):
+        return None
+    if resolver.is_reified_entry(iri) or resolver.is_edge_exit(iri):
+        return None
+    prop = resolver.resolve_property(iri)
+    if (
+        not prop.is_object_property
+        or prop.edge_collection is None
+        or prop.mapping_style == "RPT_EDGE"
+        or prop.reified_edge
+        or prop.edge_target_of
+        or (prop.mapping_style == "GENERIC_WITH_TYPE" and prop.type_field and prop.type_value)
+    ):
+        return None
+    return start, prop, end
+
+
+def _walked_back_from_document(visitor: AlgebraVisitor, start: Any, end: Any) -> bool:
+    """Whether the one-hop arm walks backwards from a document the query
+    already holds for *end*, which a traversal from *start* cannot match.
+
+    With the start a variable nothing has bound, the edge triple walks back
+    from its object when that is a document
+    (:meth:`AlgebraVisitor._reverse_traversal_source`). An end bound to a
+    document (or a constant read as one) can be one row per copy of its IRI
+    (an entity of two classes, ``copies.copies_interchangeable``), and the
+    walk back from each row's own document is what keeps one answer per
+    entity; a walk forwards meets each copy by IRI and answers once per copy
+    (``tests/cross/test_multi_document_iri_cross.py``, ``incoming_path``).
+    Those paths keep the arms. An end known only by its IRI, a constant or a
+    value, is met by IRI either way.
+    """
+    state = visitor.state
+    if (
+        not isinstance(start, Variable)
+        or str(start) in state.var_to_doc_alias
+        or str(start) in state.var_to_expr
+    ):
+        return False
+    if isinstance(end, Variable):
+        return str(end) in state.var_to_doc_alias
+    return isinstance(end, URIRef) and str(end) in state.const_subject_alias
+
+
+def _edge_closure_driver(start: Any, prop: Any, end: Any, path: str) -> Callable[[AlgebraVisitor], None]:
+    def drive(v: AlgebraVisitor) -> None:
+        _emit_edge_closure_arm(v, start, prop, end, path)
+
+    return drive
+
+
+def _emit_edge_closure_arm(visitor: AlgebraVisitor, start: Any, prop: Any, end: Any, path: str) -> None:
+    """Bind *end* to every node one or more ``prop`` edges from *start*, once.
+
+    The arms of :func:`_emit_mul_path` walk the path ``1..N`` times; this is
+    the same walk taken to the end, by one breadth-first traversal per
+    start. What each hop enforces is kept:
+
+    * The start is read as the first hop's subject is
+      (:meth:`AlgebraVisitor._ensure_subject_alias` with the property):
+      its domain collection and class, its tenant filter, the named-graph
+      scope, a constant IRI or a value bound earlier. Later hops start from
+      a reached vertex, which the arms do not re-read, so neither does this.
+    * Every vertex a hop reaches is held to the tenant
+      (:meth:`AlgebraVisitor._tenant_test`), as the arms' ``FILTER`` holds
+      each hop's vertex: a vertex that fails is not an answer
+      (``FILTER``), and nothing is reached through it (``PRUNE``; ``e !=
+      null`` spares the start, which ArangoDB's ``PRUNE`` also sees at
+      depth 0 and which the arms never test this way).
+    * The end is bound as the last hop's object is
+      (:meth:`AlgebraVisitor._bind_vertex_object`): a fresh variable takes
+      the vertex, a constant or a bound variable is compared by IRI.
+
+    ``uniqueVertices: "global"`` reaches each vertex once, breadth first,
+    which makes the walk linear in the edges reached rather than in the
+    walks. It is exact: a vertex reachable along vertices that pass the
+    tenant test is reached along the shortest such path (pruning stops
+    only at vertices that fail, which no such path uses), and a vertex
+    reached is reachable. Two consequences are handled here:
+
+    * The start counts as visited, so a cycle back to it is not reported,
+      though ``:p+`` holds there. ``back`` adds it: the start is one or more
+      steps from itself exactly when an edge leads to it from the start or
+      from a reached vertex (and it passes the test a reached vertex must).
+    * A path that reaches each vertex once uses each edge at most once, so
+      no answer is more than ``LENGTH(edge collection)`` steps away. The
+      depth bound is :data:`EDGE_CLOSURE_MAX_DEPTH`, and the arm refuses
+      (``FAIL``, :data:`~arango_sparql.errors.PATH_DEPTH_EXCEEDED_CODE`)
+      when the collection holds more edges than that, so the bound cannot
+      cut an answer short.
+
+    Rows repeat only where the start has several documents; the caller's
+    ``UNION_DISTINCT`` keeps each pair once (set semantics, SPARQL 1.1 §9.3).
+    """
+    builder = visitor.builder
+    assert prop.edge_collection is not None  # _edge_closure guarantees it
+    edges = builder.bind_collection(prop.edge_collection)
+    depth = builder.bind(EDGE_CLOSURE_MAX_DEPTH, hint="depth")
+    refusal = builder.bind(_edge_count_message(path, prop.edge_collection), hint="path_depth")
+    builder.filter_raw(f"LENGTH({edges}) <= {depth} || FAIL({refusal})")
+    source = visitor._ensure_subject_alias(start, prop)
+    direction = "ANY" if prop.symmetric else "OUTBOUND"
+
+    # Every vertex reachable in one or more steps, except (see ``back``) the
+    # start itself.
+    walked, walked_edge = builder.fresh_alias(prefix="v"), builder.fresh_alias(prefix="e")
+    test = visitor._tenant_test(walked)
+    order = builder.bind("bfs", hint="order")
+    unique = builder.bind("global", hint="unique")
+    walk = builder.create_child()
+    walk.for_reachable(
+        walked,
+        walked_edge,
+        source,
+        prop.edge_collection,
+        direction=direction,
+        min_depth=1,
+        max_depth=depth,
+        order=order,
+        unique_vertices=unique,
+        prune=None if test is None else f"{walked_edge} != null && !({test})",
+    )
+    if test is not None:
+        walk.filter_raw(test)
+    walk.return_scalar(walked)
+    reach = builder.fresh_alias(prefix="reach")
+    builder.let(reach, f"(\n{indent_aql(builder.absorb_child(walk))}\n)")
+
+    # The start, when one more step from it or from a reached vertex returns
+    # to it: found one step backwards from the start (its in-edges, usually
+    # few), not one step forwards from every reached vertex, which cost a
+    # 1,000-hop chain three times the walk itself.
+    back_test = visitor._tenant_test(source)
+    hop_from, hop_edge = builder.fresh_alias(prefix="v"), builder.fresh_alias(prefix="e")
+    probe = builder.create_child()
+    if back_test is not None:
+        probe.filter_raw(back_test)
+    probe.for_traversal(
+        hop_from, hop_edge, source, prop.edge_collection, direction="ANY" if prop.symmetric else "INBOUND"
+    )
+    probe.filter_raw(f"{hop_from}._id == {source}._id || {hop_from}._id IN {reach}[*]._id")
+    probe.limit(1)
+    probe.return_scalar(source)
+    back = builder.fresh_alias(prefix="back")
+    builder.let(back, f"(\n{indent_aql(builder.absorb_child(probe))}\n)")
+
+    reached = builder.fresh_alias(prefix="v")
+    builder.for_inline(reached, f"APPEND({reach}, {back})")
+    visitor.state.doc_to_collection[reached] = prop.edge_collection
+    visitor._record_vertex_home(reached, visitor._usable_range(prop))
+    visitor._bind_vertex_object(end, reached, prop)
+
+
+def _edge_count_message(path: str, edge_collection: str) -> str:
+    """The run-time refusal for an edge collection too large for the depth bound."""
+    return (
+        f"{PATH_DEPTH_EXCEEDED_CODE}: property path {path} is walked as a traversal of at "
+        f"most {EDGE_CLOSURE_MAX_DEPTH} steps, and edge collection {edge_collection!r} holds "
+        "more edges than that, so a longer path could exist. The query is refused rather "
+        "than answered without it."
+    )
 
 
 def _path_text(path: Any) -> str:

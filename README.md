@@ -161,7 +161,12 @@ Visitors shipped today: `BGP`, `Filter`, `Project`, `Distinct`, `Slice`,
 lowered to AQL equality FILTERs), and property-path expansion
 (`SequencePath`, `InvPath`, `AlternativePath`, bounded `:p+` /
 `:p*` / `:p?` via UNION desugaring with nested-modifier collapsing
-e.g. `((:p)*)*` → `:p*` — a `:p+` / `:p*` path longer than
+e.g. `((:p)*)*` → `:p*` — over an object property in an edge
+collection of its own (`:p+`, `:p*`, `^:p+`), the path is one
+breadth-first AQL traversal and answers in full at any length; any
+other `:p+` / `:p*` path (a document attribute, a typed shared edge
+collection, a sequence such as `(:p/:q)+`, a triple store; see the
+scorecard for the full list) longer than
 `SchemaResolver.property_path_max_depth` (default 10) makes the query
 fail with `E_SPARQL_PATH_DEPTH` rather than return a short answer —
 and forward-only `NegatedPath` via

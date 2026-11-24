@@ -196,14 +196,14 @@ def _emit_union_of_arms(
     ``depth_guard`` binds the arms with ``LET`` and checks them against one
     more repetition before iterating them (:class:`DepthGuard`).
     """
-    if len(arm_drivers) < (1 if depth_guard is not None else 2):
+    if len(arm_drivers) < (1 if depth_guard is not None or distinct else 2):
         # Defensive — AlternativePath always has ≥ 2 arms (otherwise
         # rdflib would have collapsed to the single inner path),
         # Union always has p1 + p2. If a future caller hands us a
         # degenerate single-arm list, fail loudly rather than emit
         # an AQL ``UNION((x))`` that ArangoDB would reject. A guarded
-        # repetition (``:p+`` at depth 1) may have one arm: its LET pairs
-        # it with ``[]``.
+        # repetition (``:p+`` at depth 1) or a de-duplicated one (``:p+``
+        # walked as a traversal) may have one arm: it is paired with ``[]``.
         raise ValueError(f"UNION requires at least 2 arms, got {len(arm_drivers)}")
 
     # ---- Phase 1: probe each arm to collect its bound variables -----

@@ -316,7 +316,9 @@ class SchemaResolver(AdvisoryLog):
     needs more repetitions is refused when the query runs: the AQL stops with
     ``FAIL`` and a message starting ``E_SPARQL_PATH_DEPTH`` (ArangoDB ERR
     1569), never answering with the pairs found within the limit (issue #183).
-    Must be at least 1."""
+    A ``*`` / ``+`` over an object property in an edge collection of its own
+    is walked by a traversal instead and has no limit
+    (:func:`arango_sparql.translate.paths._edge_closure`). Must be at least 1."""
 
     predicates: Mapping[str, PredicateHandler] = field(default_factory=dict)
     """Caller-registered predicates (magic properties), by IRI: the seam in
