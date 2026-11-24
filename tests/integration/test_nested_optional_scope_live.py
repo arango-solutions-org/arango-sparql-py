@@ -231,21 +231,147 @@ def _multiset(rows: list[dict[str, Any]]) -> list[str]:
             "SELECT ?s ?x WHERE { ?s :name ?n OPTIONAL { ?s :likes ?x } "
             "MINUS { SELECT ?s (MIN(?k) AS ?x) WHERE { ?s :knows ?k } GROUP BY ?s } }",
             id="minus_subselect_aggregate_column",
-            marks=pytest.mark.xfail(
-                strict=True,
-                reason="#212: the probe's sub-select join leaves out the outer row's unbound ?x",
-            ),
         ),
-        # Any sub-select column the probe joins in its one-sided form, not
-        # only an aggregate: a projected copy too (#212).
+        # A sub-select column computed by an aggregate, a projected copy, a
+        # BIND or a constant: MINUS did not count it as shared at all, since
+        # it read only triples and expressions, and matched on ?s alone,
+        # keeping a's (a, b) or removing rows it must keep (#212).
+        pytest.param(
+            "SELECT ?s ?x WHERE { ?s :name ?n OPTIONAL { ?s :likes ?x } "
+            "MINUS { SELECT ?s (COUNT(?k) AS ?x) WHERE { ?s :knows ?k } GROUP BY ?s } }",
+            id="minus_subselect_count_column",
+        ),
         pytest.param(
             "SELECT ?s ?x WHERE { ?s :name ?n OPTIONAL { ?s :likes ?x } "
             "MINUS { SELECT ?s (?k AS ?x) WHERE { ?s :knows ?k } } }",
             id="minus_subselect_copy_column",
-            marks=pytest.mark.xfail(
-                strict=True,
-                reason="#212: the probe's sub-select join leaves out the outer row's unbound ?x",
-            ),
+        ),
+        pytest.param(
+            "SELECT ?s ?x WHERE { ?s :name ?n OPTIONAL { ?s :likes ?x } "
+            "MINUS { SELECT ?s ?x WHERE { ?s :knows ?k BIND(?k AS ?x) } } }",
+            id="minus_subselect_bind_column",
+        ),
+        pytest.param(
+            "SELECT ?s ?x WHERE { ?s :name ?n OPTIONAL { ?s :likes ?x } "
+            "MINUS { SELECT ?s (:c AS ?x) WHERE { ?s :knows ?k } } }",
+            id="minus_subselect_constant_column",
+        ),
+        pytest.param(
+            "SELECT ?s ?x WHERE { ?s :knows ?x MINUS { SELECT (?k AS ?x) WHERE { ?t :likes ?k } } }",
+            id="minus_subselect_only_shared_column",
+        ),
+        # ?s is bound inside the sub-select but not projected: not shared.
+        pytest.param(
+            "SELECT ?s WHERE { ?s :name ?n MINUS { SELECT ?k WHERE { ?s :knows ?k } } }",
+            id="minus_subselect_unprojected",
+        ),
+        # A right side that binds the shared variables only through VALUES
+        # (#216), with UNDEF cells (#208): MINUS saw no shared variable and
+        # removed nothing.
+        pytest.param(
+            "SELECT ?s WHERE { ?s :name ?n MINUS { VALUES ?s { :a :d } } }",
+            id="minus_values_only",
+        ),
+        pytest.param(
+            "SELECT ?s ?x WHERE { ?s :name ?n OPTIONAL { ?s :likes ?x } MINUS { VALUES (?s ?x) { (:a :b) } } }",
+            id="minus_values_open_outer",
+        ),
+        pytest.param(
+            "SELECT ?s ?x WHERE { ?s :knows ?x MINUS { VALUES ?x { :c } } }",
+            id="minus_values_object",
+        ),
+        pytest.param(
+            "SELECT ?s ?x WHERE { ?s a :Person OPTIONAL { ?s :knows ?x } "
+            "MINUS { VALUES (?s ?x) { (:z UNDEF) (UNDEF :b) } } }",
+            id="minus_values_undef_per_row",
+        ),
+        pytest.param(
+            "SELECT ?s ?x WHERE { ?s :knows ?x MINUS { VALUES (?s ?x) { (:a :c) (:g UNDEF) } } }",
+            id="minus_values_undef_cell",
+        ),
+        pytest.param(
+            "SELECT ?s ?x WHERE { ?s :name ?n OPTIONAL { ?s :likes ?x } "
+            "MINUS { SELECT ?s ?x WHERE { VALUES (?s ?x) { (:a :b) (:d UNDEF) (:g :c) } } } }",
+            id="minus_subselect_values",
+        ),
+        # A right-side solution that leaves every shared variable unbound
+        # shares nothing with the row and removes nothing (§8.3.4). Joined
+        # with the outer values, such a solution matched every row: the
+        # branch of #227 removed them all (its review). The body is now
+        # evaluated apart and the overlap tested per solution.
+        pytest.param(
+            "SELECT ?s ?n WHERE { ?s :name ?n MINUS { VALUES ?s { UNDEF :b } } }",
+            id="minus_values_all_undef_row",
+        ),
+        pytest.param(
+            "SELECT ?s ?n WHERE { ?s :name ?n MINUS { VALUES (?s ?n) { (UNDEF UNDEF) (:a UNDEF) } } }",
+            id="minus_values_all_undef_pair",
+        ),
+        pytest.param(
+            "SELECT ?s ?a WHERE { ?s :age ?a MINUS { SELECT (MIN(?x) AS ?a) WHERE { ?t :age ?x FILTER(?x > 100) } } }",
+            id="minus_aggregate_over_no_rows",
+        ),
+        pytest.param(
+            "SELECT ?s ?n WHERE { ?s :name ?n MINUS { { ?s :likes ?y } UNION { ?t :knows ?k } } }",
+            id="minus_union_arm_binds_nothing_shared",
+        ),
+        pytest.param(
+            "SELECT ?s ?n WHERE { ?s :name ?n MINUS { SELECT ?s WHERE { ?t :knows ?k OPTIONAL { ?t :likes ?s } } } }",
+            id="minus_subselect_optional_only_column",
+        ),
+        pytest.param(
+            "SELECT ?s ?e WHERE { ?s :name ?n OPTIONAL { ?s :email ?e } "
+            "MINUS { ?x :name ?nn OPTIONAL { ?x :email ?e } } }",
+            id="minus_optional_only_shared",
+        ),
+        # Mixed certainty: ?s is bound in every right-side solution but the
+        # outer row can leave it unbound, and ?n / ?e are bound by only some
+        # solutions. No anchor, so the body is evaluated apart; joined with
+        # the outer values the unbound ?s matched nothing and kept rows
+        # §8.3.4 removes (second review of #227; wrong on main).
+        pytest.param(
+            "SELECT ?x ?n ?s WHERE { ?x :name ?n OPTIONAL { ?x :likes ?s } "
+            'MINUS { ?s :knows ?k VALUES ?n { "G" UNDEF } } }',
+            id="minus_mixed_certainty_values",
+        ),
+        pytest.param(
+            "SELECT ?x ?n ?s WHERE { ?x :name ?n OPTIONAL { ?x :likes ?s } "
+            "MINUS { ?s :knows ?k OPTIONAL { ?s :name ?n } } }",
+            id="minus_mixed_certainty_optional",
+        ),
+        pytest.param(
+            "SELECT ?x ?e ?s WHERE { ?x :name ?nn OPTIONAL { ?x :likes ?s } OPTIONAL { ?x :email ?e } "
+            "MINUS { ?s :name ?w OPTIONAL { ?s :email ?e } } }",
+            id="minus_mixed_certainty_two_optionals",
+        ),
+        # Inside FILTER EXISTS / NOT EXISTS the outer row's variables are
+        # bound on both sides of a nested MINUS, as pyoxigraph (and rdflib)
+        # evaluate it: they are shared, so a right side that binds nothing
+        # else still removes every left solution (third review of #227; main
+        # took it as a no-op, and the apart probe read ?s as unbound).
+        pytest.param(
+            "SELECT ?s ?n WHERE { ?s :name ?n FILTER NOT EXISTS { ?t :knows ?k MINUS { ?z :email ?w } } }",
+            id="exists_minus_outer_variable_shared",
+        ),
+        pytest.param(
+            "SELECT ?s ?n WHERE { ?s :name ?n FILTER NOT EXISTS { ?s :knows ?k "
+            "MINUS { { ?k :email ?m FILTER(?k != ?s) } UNION { VALUES ?q { 1 } } } } }",
+            id="exists_minus_union_reads_outer",
+        ),
+        pytest.param(
+            "SELECT ?s ?n WHERE { ?s :name ?n FILTER EXISTS { ?s :knows ?k MINUS { VALUES ?k { UNDEF :b } } } }",
+            id="exists_minus_values_undef",
+        ),
+        pytest.param(
+            "SELECT ?s ?n WHERE { ?s :name ?n FILTER NOT EXISTS { ?t :knows ?k MINUS { ?s :likes ?y } } }",
+            id="exists_minus_right_binds_outer",
+        ),
+        # ?x is read by the right side's FILTER, never bound by it: it is
+        # outside every right-side solution, the sides share nothing, and
+        # MINUS removes nothing (#209, its first shape).
+        pytest.param(
+            "SELECT ?s ?x WHERE { ?s a :Person OPTIONAL { ?s :knows ?x } MINUS { ?y :name ?n FILTER(?y = ?x) } }",
+            id="minus_filter_only_variable",
         ),
         # A BIND in an OPTIONAL of the group binds the group's own ?x: it is
         # computed, never substituted by the outer value, so a later

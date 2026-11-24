@@ -170,11 +170,12 @@ def _find_slice_length(node: object, depth: int = 0) -> int | None:
 def _collect_body_vars(node: object, out: set[Variable], depth: int = 0) -> None:
     """Collect every variable the query *body* can bind.
 
-    Distinct in purpose from ``translate.minus_exists._collect_referenced_variables``
-    (which gathers only *referenced* vars for MINUS scope): this also follows the
-    assignment slots — ``.var`` (BIND / Extend), ``.res`` and ``.A`` (aggregates)
-    — so a projected variable bound by BIND or an aggregate is not falsely
-    reported as unbound.
+    Distinct in purpose from ``translate.optional_subquery.bound_variables``
+    (exactly the variables a pattern binds, for MINUS and OPTIONAL scope):
+    this over-collects, taking every variable the body mentions plus the
+    assignment slots — ``.var`` (BIND / Extend), ``.res`` and ``.A``
+    (aggregates) — so a projected variable bound by BIND or an aggregate is
+    not falsely reported as unbound.
     """
     if node is None or depth > 60:
         return

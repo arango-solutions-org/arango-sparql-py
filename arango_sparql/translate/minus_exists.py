@@ -54,12 +54,12 @@ analogous construct to fall back on.
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Any
 
-from rdflib import Variable
-
-from .builder import indent_aql
-from .optional_subquery import certain_variables
+from ..errors import UnsupportedSparqlError
+from .builder import attribute_ref, indent_aql
+from .optional_subquery import bound_variables, certain_variables
 
 if TYPE_CHECKING:
     from .visitor import AlgebraVisitor
@@ -75,10 +75,14 @@ def emit_minus(visitor: AlgebraVisitor, node: Any) -> None:
        its FOR loops + FILTERs land in the outer AQL body and
        populate ``state.var_to_expr`` with the outer scope's
        bindings.
-    2. Collect every SPARQL variable referenced anywhere inside
-       ``p2`` (walks the inner algebra tree). Intersect with the
-       outer's ``var_to_expr`` keys — that's the *shared-variable
-       set* the SPARQL spec uses to define compatibility.
+    2. Take the variables ``p2`` binds (:func:`bound_variables`: its
+       triples, BIND targets, VALUES columns, sub-select projections)
+       and intersect them with the outer's ``var_to_expr`` keys —
+       that's the *shared-variable set* the SPARQL spec uses to
+       define compatibility. A variable ``p2`` only reads, in a FILTER
+       or in a sub-select it does not project, is outside every inner
+       solution's domain, so it shares nothing (#209); a variable bound
+       only by a VALUES block shares as any other.
     3. **If the shared set is empty: do nothing.** SPARQL §8.3.4
        defines MINUS over disjoint domains as a no-op (every outer
        solution is incompatible with every inner solution
@@ -106,15 +110,20 @@ def emit_minus(visitor: AlgebraVisitor, node: Any) -> None:
     """
     visitor.visit(node.p1)
 
-    inner_vars = _collect_referenced_variables(node.p2)
-    shared = {v for v in inner_vars if str(v) in visitor.state.var_to_expr}
-    if not shared:
+    # Inside FILTER EXISTS / NOT EXISTS the outer row's variables are bound
+    # throughout the pattern, on both sides of this MINUS, as pyoxigraph and
+    # rdflib evaluate it (the repo's ground truth; §18.6 substitutes them as
+    # constants, which would put them in neither side's domain): every one
+    # is shared and bound in every solution of the right side (third review
+    # of #227, where the apart probe read them as unbound).
+    preset = visitor.state.substituted & visitor.state.var_to_expr.keys()
+    shared_names = (bound_variables(node.p2) & visitor.state.var_to_expr.keys()) | preset
+    if not shared_names:
         # SPARQL spec §8.3.4 — disjoint domain ⇒ no-op. Important
         # divergence from NOT EXISTS, which excludes any outer row
         # whenever the inner matches even one row.
         return
 
-    shared_names = {str(v) for v in shared}
     # An outer variable an earlier OPTIONAL can leave unbound is outside the
     # row's domain where it is unbound: it constrains nothing, and the row is
     # removed only through another shared variable bound on both sides
@@ -127,16 +136,38 @@ def emit_minus(visitor: AlgebraVisitor, node: Any) -> None:
     # bound what — the probe keeps joining the variable as a value, as
     # before #193 (review of #196).
     open_outer = shared_names & visitor.state.maybe_unbound
-    certain = certain_variables(node.p2)
+    certain = certain_variables(node.p2) | preset
     anchors = (shared_names & certain) - visitor.state.maybe_unbound
     free_outer = open_outer if open_outer and (anchors or shared_names <= certain) else None
-    inner_aql = _translate_probe(
-        visitor,
-        node.p2,
-        allow_optional_rebind=True,
-        overlap_var_names=shared_names,
-        free_outer=free_outer,
-    )
+    # No anchor and not every shared variable bound in every solution of the
+    # body (a VALUES UNDEF, an aggregate over no rows, a UNION arm, an
+    # OPTIONAL): whether a solution overlaps the row depends on which shared
+    # variables that solution binds. Joining the outer values in made one
+    # that binds none of them a wildcard that removed every row, and one
+    # that binds a shared variable the outer row leaves unbound matched
+    # nothing (reviews of #227). The body is evaluated on its own and §8.3.4
+    # applied per solution (:func:`_emit_apart_probe`). An OPTIONAL that
+    # re-binds every shared variable is the exception: the conditional-add
+    # sink already tests the overlap per solution (ADR-0002 Problem 2, W3C
+    # ``negation/full-minuend``) and joins on the outer values, so that pass
+    # is kept when it covers them.
+    inner_aql = None
+    if not anchors and not shared_names <= certain:
+        try:
+            inner_aql = _translate_probe(
+                visitor, node.p2, allow_optional_rebind=True, overlap_var_names=shared_names, sink_only=True
+            )
+        except (_SinkDoesNotCover, UnsupportedSparqlError):
+            _emit_apart_probe(visitor, node.p2, shared_names)
+            return
+    if inner_aql is None:
+        inner_aql = _translate_probe(
+            visitor,
+            node.p2,
+            allow_optional_rebind=True,
+            overlap_var_names=shared_names,
+            free_outer=free_outer,
+        )
 
     probe_alias = visitor.builder.fresh_alias(prefix="minus_probe")
     visitor.builder.let(probe_alias, f"LENGTH((\n{indent_aql(inner_aql)}\n))")
@@ -191,6 +222,105 @@ def emit_exists_filter(
 # ---------------------------------------------------------------------------
 
 
+def _emit_apart_probe(visitor: AlgebraVisitor, pattern: Any, shared: set[str]) -> None:
+    """MINUS over a body evaluated on its own, as §8.3.4 defines it.
+
+    The body is translated without the outer row and returns, per solution,
+    its value for each shared variable (null where it leaves one unbound).
+    An outer row is removed when some solution is compatible with it on
+    every shared variable (unbound on either side, or equal) and binds one
+    the row binds too. A body that reads nothing of the outer scope (the
+    usual case) is computed once per evaluation of its scope, before that
+    scope's loops (once per query at the top level; once per outer row
+    inside an EXISTS, OPTIONAL subquery or UNION arm, #234); evaluated per
+    row it took 14 s on 12,000 PG documents where main took 0.02 s (review
+    of #227).
+    """
+    from .visitor import AlgebraVisitor
+
+    child_builder = visitor.builder.create_child()
+    child = AlgebraVisitor(
+        builder=child_builder,
+        resolver=visitor.resolver,
+        tenant_id=visitor.tenant_id,
+        base_iri=visitor.base_iri,
+        query_triples=visitor.query_triples,
+        describe_resources=visitor.describe_resources,
+    )
+    child.state.const_subject_rpt_class = dict(visitor.state.const_subject_rpt_class)
+    # Inside EXISTS the outer row's variables are bound in the body too
+    # (see ``emit_minus``); such a body reads the outer row and stays per row.
+    child.state.var_to_expr = {
+        name: visitor.state.var_to_expr[name]
+        for name in visitor.state.substituted
+        if name in visitor.state.var_to_expr
+    }
+    child.state.substituted = set(child.state.var_to_expr)
+    # Matched in the scope's graph, as any probe is (§18.6, #195).
+    child.state.graph_scope = list(visitor.state.graph_scope)
+    visitor.state.share_query_state(child.state)
+    child.visit(pattern)
+    names = sorted(name for name in shared if name in child.state.var_to_expr)
+    if not names:
+        return  # no solution binds a shared variable: nothing is removed
+    child_builder.open_one_row_scope_first(child_builder.fresh_alias(prefix="one"))
+    child_builder.return_object([(name, child.state.var_to_expr[name]) for name in names])
+    rows_aql = visitor.builder.absorb_child(child_builder)
+
+    outer_aliases = {
+        alias
+        for expr in visitor.state.var_to_expr.values()
+        for alias in re.findall(r"(?<![@.\w])([A-Za-z_]+\d+)\b", expr)
+    }
+    independent = not visitor.state.graph_scope and not any(
+        re.search(rf"(?<![@.\w]){re.escape(alias)}\b", rows_aql) for alias in outer_aliases
+    )
+    if independent and len(names) == 1:
+        # One shared variable: a solution overlaps the row exactly when it
+        # binds that variable to the row's value, so the probe is a lookup
+        # in its sorted distinct non-null values. A row the variable is
+        # unbound in is never in them, so it is kept. ``NOOPT`` keeps the
+        # list a value computed once: without it ArangoDB pushed the
+        # ``NOT IN`` into an edge walk and re-evaluated it per vertex (over
+        # 60 s at 12,000 people), as the VALUES semi-join found
+        # (``subselect._emit_semi_join``). A scan per row of the hoisted rows
+        # took 28 s (third review of #227).
+        (name,) = names
+        values = visitor.builder.fresh_alias(prefix="minus_values")
+        row = visitor.builder.fresh_alias(prefix="row")
+        visitor.builder.let_first(
+            values,
+            f"NOOPT(SORTED_UNIQUE((\n  FOR {row} IN (\n{indent_aql(indent_aql(rows_aql))}\n  )\n"
+            f"  FILTER {attribute_ref(row, name)} != null\n"
+            f"  RETURN {attribute_ref(row, name)}\n)))",
+        )
+        visitor.builder.filter_raw(f"{visitor.state.var_to_expr[name]} NOT IN {values}")
+        return
+    if independent:
+        rows = visitor.builder.fresh_alias(prefix="minus_rows")
+        visitor.builder.let_first(rows, f"(\n{indent_aql(rows_aql)}\n)")
+        source = rows
+    else:
+        source = f"(\n{indent_aql(rows_aql)}\n)"
+    row = visitor.builder.fresh_alias(prefix="row")
+    pairs = [(attribute_ref(row, name), visitor.state.var_to_expr[name]) for name in names]
+    compatible = [f"({inner} == null || {outer} == null || {inner} == {outer})" for inner, outer in pairs]
+    overlap = [f"({inner} != null && {outer} != null)" for inner, outer in pairs]
+    tests = (
+        " && ".join(compatible)
+        + " && "
+        + (overlap[0] if len(overlap) == 1 else "(" + " || ".join(overlap) + ")")
+    )
+    probe = f"FOR {row} IN {source}\nFILTER {tests}\nLIMIT 1\nRETURN 1"
+    probe_alias = visitor.builder.fresh_alias(prefix="minus_probe")
+    visitor.builder.let(probe_alias, f"LENGTH((\n{indent_aql(probe)}\n))")
+    visitor.builder.filter_raw(f"{probe_alias} == 0")
+
+
+class _SinkDoesNotCover(Exception):
+    """A ``sink_only`` probe whose OPTIONALs do not re-bind every shared variable."""
+
+
 def _translate_probe(
     visitor: AlgebraVisitor,
     inner_pattern: Any,
@@ -199,6 +329,7 @@ def _translate_probe(
     overlap_var_names: set[str] | None = None,
     substitute: bool = False,
     free_outer: set[str] | None = None,
+    sink_only: bool = False,
 ) -> str:
     """Spawn a child visitor for *inner_pattern*, emit a row-count
     probe (``LIMIT 1`` + ``RETURN 1``), absorb its binds, and
@@ -221,6 +352,10 @@ def _translate_probe(
     var is bound on both sides and equal"). If any shared var is bound by
     a required triple, the child already FILTERs equality on it, so
     overlap is guaranteed and no extra guard is emitted.
+
+    ``sink_only`` raises
+    :class:`_SinkDoesNotCover` unless the conditional-add sink binds every
+    shared variable; the probe is then discarded.
 
     Shared with both ``emit_minus`` and ``emit_exists_filter`` —
     the only behavioural difference between those two is the
@@ -320,7 +455,9 @@ def _translate_probe(
     child_visitor.visit(inner_pattern)
 
     sink = child_visitor.state.optional_rebind_sink or []
-    if overlap_var_names is not None and free_outer is not None:
+    if sink_only and (overlap_var_names is None or not sink or overlap_var_names - {v for v, _, _ in sink}):
+        raise _SinkDoesNotCover
+    elif overlap_var_names is not None and free_outer is not None:
         # The body binds every shared variable in every solution, so the
         # domains overlap exactly where the outer row binds one of them. A
         # shared variable the outer row certainly binds makes that always.
@@ -347,47 +484,3 @@ def _translate_probe(
     child_builder.return_scalar("1")
 
     return visitor.builder.absorb_child(child_builder)
-
-
-def _collect_referenced_variables(node: Any) -> set[Variable]:
-    """Walk an algebra subtree and collect every ``Variable`` term
-    referenced in triples or expressions.
-
-    Used by :func:`emit_minus` to compute the shared-variable set
-    against the outer scope. We deliberately walk the algebra
-    tree rather than reading rdflib's ``_vars`` because the
-    latter is a set-iteration artefact populated lazily and not
-    always present on every node type we care about.
-
-    Recurses into ``.p`` / ``.p1`` / ``.p2`` / ``.graph`` /
-    ``.expr`` children and reads ``.triples`` lists on BGP-like
-    nodes. Variables inside ``Path`` predicates are picked up
-    when the path's args list contains them (rare but legal —
-    a ``Path`` whose start/end is a variable shows up via the
-    enclosing triple's subject/object slots, not the path
-    expression itself).
-    """
-    result: set[Variable] = set()
-    _walk_for_vars(node, result)
-    return result
-
-
-def _walk_for_vars(node: Any, out: set[Variable]) -> None:
-    """Recursive helper for :func:`_collect_referenced_variables`."""
-    if node is None:
-        return
-    if isinstance(node, Variable):
-        out.add(node)
-        return
-
-    triples = getattr(node, "triples", None)
-    if triples:
-        for triple in triples:
-            for term in triple:
-                if isinstance(term, Variable):
-                    out.add(term)
-
-    for attr in ("p", "p1", "p2", "graph", "expr", "other"):
-        child = getattr(node, attr, None)
-        if child is not None and (isinstance(child, Variable) or hasattr(child, "name")):
-            _walk_for_vars(child, out)
