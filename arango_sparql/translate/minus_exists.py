@@ -230,9 +230,11 @@ def _emit_apart_probe(visitor: AlgebraVisitor, pattern: Any, shared: set[str]) -
     An outer row is removed when some solution is compatible with it on
     every shared variable (unbound on either side, or equal) and binds one
     the row binds too. A body that reads nothing of the outer scope (the
-    usual case) is computed once, before the outer loops; evaluated per row
-    it took 14 s on 12,000 PG documents where main took 0.02 s (review of
-    #227).
+    usual case) is computed once per evaluation of its scope, before that
+    scope's loops (once per query at the top level; once per outer row
+    inside an EXISTS, OPTIONAL subquery or UNION arm, #234); evaluated per
+    row it took 14 s on 12,000 PG documents where main took 0.02 s (review
+    of #227).
     """
     from .visitor import AlgebraVisitor
 
