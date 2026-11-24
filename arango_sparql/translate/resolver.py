@@ -440,6 +440,8 @@ class SchemaResolver(AdvisoryLog):
     _triple_store_checked: bool = field(default=False)
     _tenant_scoped_classes: tuple[ResolvedClass, ...] | None = field(default=None)
     """Cached result of :meth:`tenant_scoped_classes`."""
+    _structural_fields: frozenset[str] | None = field(default=None)
+    """Cached result of :meth:`structural_fields`."""
     _store_sources: tuple[tuple[str, ...], tuple[ResolvedClass, ...]] | None = field(default=None)
     """Cached class survey behind :meth:`store_sources`."""
     _nested_properties: tuple[str, ...] | None = field(default=None)
@@ -1179,6 +1181,24 @@ class SchemaResolver(AdvisoryLog):
                 self._class_cache.update(cache)
             self._tenant_scoped_classes = tuple(found)
         return tuple(c for c in self._tenant_scoped_classes if (c.style == "RPT") == rpt)
+
+    def structural_fields(self) -> frozenset[str]:
+        """Document fields the mapping uses for scoping, not data: the graph
+        field and every class's ``phys:tenantField`` and ``phys:typeField``.
+        An equality FILTER on one of them narrows a scan but is not the
+        lookup a query wants to keep, so it does not stop a split of the
+        scan (``AqlQueryBuilder.split_scan_on_value``; recheck of #236)."""
+        if self._structural_fields is None:
+            fields = {self.graph_field}
+            for cls in self.ontology.subjects(RDF.type, OWL.Class):
+                if not isinstance(cls, URIRef):
+                    continue
+                for key in ("tenantField", "typeField"):
+                    value = self._physical_string(cls, key)
+                    if value:
+                        fields.add(value)
+            self._structural_fields = frozenset(fields)
+        return self._structural_fields
 
     def store_sources(self) -> tuple[tuple[str, ...], tuple[ResolvedClass, ...]]:
         """The stores a triple can be in: the document collections and the

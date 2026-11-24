@@ -4098,7 +4098,13 @@ class AlgebraVisitor:
         if (
             alias is not None
             and callable(match)
-            and target.split_scan_on_value(alias, existing, match, attribute=attribute)
+            and target.split_scan_on_value(
+                alias,
+                existing,
+                match,
+                attribute=attribute,
+                structural_fields=self.resolver.structural_fields() if attribute else frozenset(),
+            )
         ):
             return
         if callable(match):

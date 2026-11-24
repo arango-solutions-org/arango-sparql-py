@@ -181,3 +181,25 @@ def test_minus_and_the_group_scoped_optional_share_one_walker() -> None:
 
     assert minus_exists.certain_variables is optional_subquery.certain_variables
     assert not hasattr(minus_exists, "certainly_bound_variables")
+
+
+def test_a_tenant_or_label_filter_is_no_pin() -> None:
+    # The tenant field and an LPG label test narrow the scan but are not the
+    # lookup to keep; counted as pins they turned the split off and left the
+    # FILTER that scans per row (third recheck of #236).
+    from arango_sparql.api import translate
+    from arango_sparql.translate.resolver import SchemaResolver
+
+    ttl = """
+@prefix : <http://ex.org/> . @prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> . @prefix phys: <https://arango.solutions/phys#> .
+:Person a owl:Class ; phys:collectionName "nodes" ; phys:mappingStyle "LABEL" ; phys:typeField "type" ;
+    phys:typeValue "Person" ; phys:tenantField "org" ; phys:tenantEntity "Org" .
+:age a owl:DatatypeProperty ; rdfs:domain :Person ; phys:attributeName "age" .
+"""
+    aql = translate(
+        "PREFIX : <http://ex.org/> SELECT ?s ?t WHERE { ?s :age ?a BIND(?a + 1 AS ?b) ?t :age ?b }",
+        resolver=SchemaResolver.from_turtle(ttl),
+        tenant_id="t1",
+    ).aql
+    assert "!= null\n  FOR " in aql  # split: the age index is kept

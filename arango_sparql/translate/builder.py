@@ -488,7 +488,13 @@ class AqlQueryBuilder:
         return self
 
     def split_scan_on_value(
-        self, alias: str, value: str, match: Callable[[str], str], *, attribute: bool = False
+        self,
+        alias: str,
+        value: str,
+        match: Callable[[str], str],
+        *,
+        attribute: bool = False,
+        structural_fields: frozenset[str] = frozenset(),
     ) -> bool:
         """Join the scan ``FOR <alias> IN @@coll`` to *value*, which can be null.
 
@@ -528,7 +534,7 @@ class AqlQueryBuilder:
                 # scanned document itself (``doc1.email`` joined to doc1's
                 # own attribute: ERR 1203 on the split; recheck of #236).
                 return False
-            if self._anchored_after(index, alias, attribute=attribute):
+            if self._anchored_after(index, alias, attribute=attribute, structural_fields=structural_fields):
                 return False
             collection = found.group(1)
             hit = self.fresh_alias()
@@ -549,19 +555,35 @@ class AqlQueryBuilder:
             return True
         return False
 
-    def _anchored_after(self, index: int, alias: str, *, attribute: bool = False) -> bool:
+    def _anchored_after(
+        self,
+        index: int,
+        alias: str,
+        *,
+        attribute: bool = False,
+        structural_fields: frozenset[str] = frozenset(),
+    ) -> bool:
         """Whether a FILTER after clause *index* already pins *alias* by an
         equality its index can serve: its IRI (``alias._uri == …``), and for
-        an attribute split any attribute (``alias.email == …``). That lookup
-        is kept as it is, which a split around the scan would lose (0.05 s
-        became 0.20 s for ``_uri``, 0.01 s became 0.28 s for an attribute;
-        rechecks of #236)."""
-        attr = r"\.(?:`[^`]+`|\w+)(?:\.(?:`[^`]+`|\w+))*" if attribute else r"\._(?:uri|id)"
-        pinned = re.compile(rf"(?<![@.\w]){re.escape(alias)}{attr} == ")
-        return any(
-            clause.kind == _ClauseKind.FILTER and pinned.search(clause.text)
-            for clause in self._body_clauses[index + 1 :]
-        )
+        an attribute split a plain ``FILTER alias.<field> == <value>`` on a
+        data field. That lookup is kept as it is, which a split around the
+        scan would lose (0.05 s became 0.20 s for ``_uri``, 0.01 s became
+        0.28 s for an attribute; rechecks of #236). The mapping's graph,
+        tenant and type fields (*structural_fields*) narrow the scan but are
+        not such a lookup, and an ``OR`` (a compatible join, an LPG label
+        test) is no pin: counted, they turned the split off and left one
+        FILTER that scans per row."""
+        iri = re.compile(rf"(?<![@.\w]){re.escape(alias)}\._(?:uri|id) == ")
+        plain = re.compile(rf"FILTER {re.escape(alias)}\.(`[^`]+`|\w+) == (@\w+|[A-Za-z_]\w*(?:\.\w+)*)")
+        for clause in self._body_clauses[index + 1 :]:
+            if clause.kind != _ClauseKind.FILTER:
+                continue
+            if iri.search(clause.text):
+                return True
+            found = plain.fullmatch(clause.text) if attribute else None
+            if found and found.group(1).strip("`") not in structural_fields:
+                return True
+        return False
 
     def _defined_after(self, index: int, expression: str) -> bool:
         """Whether *expression* reads a variable that a ``FOR`` or ``LET`` of
