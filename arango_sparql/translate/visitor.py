@@ -3412,7 +3412,8 @@ class AlgebraVisitor:
             scope = in_scope(inner)
             if scope is not None:
                 child.filter_raw(scope)
-            enforce_classes_tenant_scope(self, inner, classes, builder=child)
+            # A copy looked up by ``_uri``: no class test holds it to *classes*.
+            enforce_classes_tenant_scope(self, inner, classes, builder=child, class_tested=False)
             child.return_scalar(inner)
             arms.append(self.builder.absorb_child(child))
         copies = self.builder.fresh_alias()
@@ -3647,14 +3648,9 @@ class AlgebraVisitor:
             return
         tests = [f"IS_SAME_COLLECTION({self.builder.bind(c, hint='coll')}, {v_alias})" for c in collections]
         self.builder.filter_raw(tests[0] if len(tests) == 1 else "(" + " || ".join(tests) + ")")
-        tenant_fields = {(c.tenant_field, c.tenant_entity) for c in classes}
-        if len(tenant_fields) > 1:
-            raise UnsupportedSparqlError(
-                f"the subject of {prop.iri!r} can be in classes with different tenant "
-                f"scoping; a reverse traversal cannot apply one tenant filter to them"
-            )
-        if classes:
-            self._enforce_tenant_scope(v_alias, classes[0])
+        # Held to its collections only, not to *classes*: a vertex of another
+        # class there is held to its own tenant field (#218).
+        enforce_classes_tenant_scope(self, v_alias, classes, class_tested=False)
 
     def _route_by_domain(self, subject: Any, prop: Any) -> str | None:
         """Open the collection ``prop``'s ``rdfs:domain`` puts *subject* in.

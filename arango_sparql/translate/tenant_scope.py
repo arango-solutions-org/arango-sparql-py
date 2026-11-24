@@ -17,10 +17,14 @@ against the class it belongs to::
     FILTER (!(<doc is a Person>) || doc.org == @tenant)
         && (!(<doc is a Doc>) || doc.ws == @tenant)
 
-A document of an unscoped class passes, as :meth:`AlgebraVisitor._tenant_test`
-lets one a walk reaches pass; one with labels of two scoped classes is held
-to both. Membership is the class's label (its ``phys:typeField``) and, when
-the classes span collections, its collection. Two classes in one collection
+A document of a listed class with no tenant field passes; one with labels
+of two listed scoped classes is held to both. Membership is the class's
+label (its ``phys:typeField``) and, when the classes span collections, its
+collection. That holds only where the read itself tests each document's
+class; a read that does not (a copy looked up by ``_uri``, a vertex a
+reverse walk reached) holds the document as a walked one is
+(:meth:`AlgebraVisitor._tenant_test`), to every scoped class stored in its
+collection, since it may belong to a class the read does not name. Two classes in one collection
 with no label to tell them apart cannot be scoped differently, so that read
 is refused. Every class's tenant root is committed, so classes under two
 roots are refused as a join across them is (:class:`CrossTenantJoinError`).
@@ -44,18 +48,48 @@ def enforce_classes_tenant_scope(
     alias: str,
     classes: Sequence[ResolvedClass],
     builder: AqlQueryBuilder | None = None,
+    *,
+    class_tested: bool = True,
 ) -> None:
-    """Emit the tenant FILTER for *alias*, a document of one of *classes*."""
+    """Emit the tenant FILTER for *alias*, a document of one of *classes*.
+
+    *class_tested* says the read already holds *alias* to *classes* (their
+    collection and label test). A read that does not — a copy of an IRI
+    looked up by ``_uri``, a vertex a reverse walk reached — can meet a
+    document of another class stored in the same collection, so when the
+    tenant fields there differ it is held to every tenant-scoped class of
+    its collection and label, as a walked document is
+    (:meth:`AlgebraVisitor._tenant_test`; review of #228, where such a copy
+    of a t2 class passed).
+    """
     if not classes:
         return
-    if len({(c.tenant_field, c.tenant_entity) for c in classes}) == 1:
-        visitor._enforce_tenant_scope(alias, classes[0], builder=builder)
-        return
     target = builder or visitor.builder
+    # Every class's tenant root is committed: two roots are refused.
+    placeholders = [visitor._tenant_placeholder(cls) for cls in classes]
+    fields = {cls.tenant_field for cls in classes}
+    if not class_tested:
+        stored = {name for cls in classes for name in (cls.shard_family or (cls.collection,))}
+        fields |= {
+            cls.tenant_field
+            for cls in visitor.resolver.tenant_scoped_classes()
+            if stored & set(cls.shard_family or (cls.collection,))
+        }
+    if len(fields) == 1:
+        # Scoped alike (one field, whatever the roots), or not at all: the
+        # single, index-friendly FILTER.
+        scoped = next((cls for cls, bind in zip(classes, placeholders, strict=True) if bind), None)
+        if scoped is not None:
+            visitor._enforce_tenant_scope(alias, scoped, builder=builder)
+        return
+    if not class_tested:
+        tenant = visitor._tenant_test(alias, builder=target)
+        if tenant:
+            target.filter_raw(tenant)
+        return
     spans_collections = len({c.collection for c in classes}) > 1
     terms = []
-    for cls in classes:
-        placeholder = visitor._tenant_placeholder(cls)
+    for cls, placeholder in zip(classes, placeholders, strict=True):
         if placeholder is None:
             continue
         assert cls.tenant_field is not None  # _tenant_placeholder guarantees it
@@ -87,9 +121,7 @@ def _membership(
         others = [
             c
             for c in classes
-            if c is not cls
-            and c.collection == cls.collection
-            and (c.tenant_field, c.tenant_entity) != (cls.tenant_field, cls.tenant_entity)
+            if c is not cls and c.collection == cls.collection and c.tenant_field != cls.tenant_field
         ]
         if others:
             raise UnsupportedSparqlError(

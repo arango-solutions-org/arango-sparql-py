@@ -55,6 +55,9 @@ _HEAD = f"""
 @prefix phys: <https://arango.solutions/phys#> .
 :name a owl:DatatypeProperty ; rdfs:domain :Person, :Doc ; phys:attributeName "name" .
 :title a owl:DatatypeProperty ; rdfs:domain :Person, :Tag ; phys:attributeName "title" .
+:nick a owl:DatatypeProperty ; phys:attributeName "nick" .
+:Secret a owl:Class ; phys:collectionName "{_NODES}" ; phys:mappingStyle "LABEL" ; phys:typeField "label" ;
+    phys:typeValue "Secret" ; phys:tenantField "org" ; phys:tenantEntity "Org" .
 :Agent a owl:Class ; phys:mappingStyle "UNION" .
 :Person rdfs:subClassOf :Agent . :Doc rdfs:subClassOf :Agent . :Tag rdfs:subClassOf :Agent .
 """
@@ -88,7 +91,7 @@ _ONTOLOGIES = {
 
 # key -> document fields; ``visible`` is whether t1 may see it.
 _PEOPLE = {
-    "p1": {"org": "t1", "name": "P1", "title": "T1"},
+    "p1": {"org": "t1", "name": "P1", "title": "T1", "nick": "K1"},
     "p2": {"org": "t2", "ws": "t1", "name": "P2", "title": "T2"},
 }
 _DOCS = {
@@ -96,6 +99,10 @@ _DOCS = {
     "d2": {"ws": "t2", "org": "t1", "name": "D2"},
 }
 _TAGS = {"g1": {"title": "G1"}}
+# A t2 document of a class no query here names, holding a copy of p1's IRI:
+# a read that looks copies up by ``_uri`` met it with no class test, and the
+# first head of #228 let it through (its review).
+_SECRET = {"xs": {"_uri": EX + "p1", "org": "t2", "name": "LEAK-NAME", "nick": "LEAK-NICK"}}
 _BOTH = {
     "pd": {"org": "t1", "ws": "t1", "name": "PD", "title": "TD"},
     "pe": {"org": "t2", "ws": "t2", "name": "PE"},
@@ -113,13 +120,16 @@ _QUERIES = {
     # spans collections: "different tenant scoping").
     "agent": "SELECT ?s WHERE { ?s a :Agent }",
     "agent_name": "SELECT ?s ?n WHERE { ?s a :Agent ; :name ?n }",
+    # Read from every copy of the IRI, the Secret one included.
+    "agent_nick": "SELECT ?s ?k WHERE { ?s a :Agent ; :nick ?k }",
+    "agent_name_nick": "SELECT ?s ?n ?k WHERE { ?s a :Agent ; :name ?n ; :nick ?k }",
 }
 
 
 def _t1_data(mapping: str) -> str:
     lines = [f"@prefix : <{EX}> ."]
     lines += [
-        ':p1 a :Person, :Agent ; :name "P1" ; :title "T1" .',
+        ':p1 a :Person, :Agent ; :name "P1" ; :title "T1" ; :nick "K1" .',
         ':d1 a :Doc, :Agent ; :name "D1" .',
         ':g1 a :Tag, :Agent ; :title "G1" .',
     ]
@@ -140,6 +150,7 @@ def _collections() -> dict[str, list[dict[str, Any]]]:
         + [_doc(k, f, "Doc") for k, f in _DOCS.items()]
         + [_doc(k, f, "Tag") for k, f in _TAGS.items()]
         + [_doc(k, f, ["Person", "Doc"]) for k, f in _BOTH.items()]
+        + [{"_key": k, **f, "label": "Secret"} for k, f in _SECRET.items()]
     )
     triples = [
         row

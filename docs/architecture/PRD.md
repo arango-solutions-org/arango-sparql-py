@@ -1350,24 +1350,38 @@ store in a mixed mapping (#191).
 field** (#218). One read can cover several classes: a property whose
 `rdfs:domain` names several, an LPG collection whose labels are different
 classes, a supertype (`phys:mappingStyle "UNION"`), a mixed-store routed
-read. Classes scoped alike keep the one `FILTER doc.<tenantField> ==
-@tenant_id`. Classes scoped differently are tested per document:
-`FILTER (!(<doc is a Person>) || doc.org == @tenant_id) && (!(<doc is a
-Doc>) || doc.ws == @tenant_id)`, where membership is the class's label and,
-when the classes span collections, `IS_SAME_COLLECTION`. A document of an
-unscoped class passes, as a walked document does; one labelled with two
-scoped classes is held to both. Every class's tenant root is committed, so
-classes under two roots are refused as below. Two classes in one
-collection with no type field to tell their documents apart cannot be
-scoped differently, and such a read is refused. Before #218 the first
-class's field filtered every document (dropping the other classes' rows,
-and passing a document whose other field held the tenant), a supertype
-spanning collections scoped differently was refused, and only the first
-class's root was committed. Implemented in
-`translate/tenant_scope.py::enforce_classes_tenant_scope`, called by every
-multi-class read (`visitor.py`, `mixed_store.py`, `copies.py`); tested in
-`tests/translate/test_tenant_per_class.py` and live in
-`tests/integration/test_tenant_per_class_live.py`.
+read, a reverse walk into a domain, the copies of one IRI. Every class's
+tenant root is committed, so classes under two roots are refused as below.
+Classes that keep the tenant in one field (whatever their roots) keep the
+one indexable `FILTER doc.<tenantField> == @tenant_id`. Otherwise:
+
+- where the read tests each document's class (its collection scan carries
+  the class test), each document is tested by its class:
+  `FILTER (!(<doc is a Person>) || doc.org == @tenant_id) && (!(<doc is a
+  Doc>) || doc.ws == @tenant_id)`, membership being the class's label and,
+  when the classes span collections, `IS_SAME_COLLECTION`. A document of a
+  listed class with no tenant field passes;
+- where it does not (a copy of an IRI looked up by `_uri`, a vertex a
+  reverse walk reached), the document may belong to a class the read does
+  not name, so it is held as a walked document is (above): to every
+  tenant-scoped class stored in its collection under its label. This also
+  applies when the read's classes agree but another scoped class in the
+  same collection keeps the tenant in another field.
+
+Two classes in one collection with no type field to tell their documents
+apart cannot be scoped differently, and such a read is refused. A document
+carrying the labels of two scoped classes is held to the classes the read
+tests it against: both in a read of both, one in a type pattern of one
+class (`?s a :Person`), every one in a walk. Before #218 the first class's
+field filtered every document (dropping the other classes' rows, and
+passing a document whose other field held the tenant), the copy and
+edge-range reads applied every field to every document, a supertype
+spanning collections or a reverse walk into classes scoped differently was
+refused, and only the first class's root was committed. Implemented in
+`translate/tenant_scope.py::enforce_classes_tenant_scope` (`class_tested`),
+called by every read of several classes (`visitor.py`, `mixed_store.py`,
+`copies.py`); tested in `tests/translate/test_tenant_per_class.py` and live
+in `tests/integration/test_tenant_per_class_live.py`.
 
 **Cross-tenant joins are forbidden.** When two BGP triples touch two
 entities that have different `tenantEntity` values, the translator

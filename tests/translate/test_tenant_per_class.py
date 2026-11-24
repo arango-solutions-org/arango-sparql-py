@@ -117,3 +117,46 @@ def test_scoped_classes_without_a_tenant_context_are_refused() -> None:
     ttl = _label("Person", _ORG) + _label("Doc", _WS) + _NAME
     with pytest.raises(CrossTenantJoinError, match="no\\s+tenant context"):
         _aql(ttl, "SELECT ?s ?n WHERE { ?s :name ?n }", tenant=None)
+
+
+def test_classes_on_one_field_keep_the_plain_filter_whatever_their_roots() -> None:
+    """``org`` under root Org and ``org`` with no root: one indexable FILTER,
+    as on main (review of #228)."""
+    ttl = _label("Person", _ORG) + _label("Doc", '; phys:tenantField "org" ') + _NAME
+    aql = _aql(ttl, "SELECT ?s ?n WHERE { ?s :name ?n }")
+    assert "FILTER doc1.org == @" in aql
+    assert "!(" not in aql
+
+
+def test_a_copy_read_without_a_class_test_holds_every_class_stored_there() -> None:
+    """A copy of an IRI looked up by ``_uri`` can be a document of a scoped
+    class the read does not name (``Secret``, a t2 copy): it is held to the
+    tenant fields of every scoped class in its collection, as a walked
+    document is. The first head of #228 let it through (its review)."""
+    ttl = (
+        ':Agent a owl:Class ; phys:mappingStyle "UNION" .\n'
+        + _label("Person", _ORG).replace(" .\n", " ; rdfs:subClassOf :Agent .\n")
+        + _label("Doc", _WS).replace(" .\n", " ; rdfs:subClassOf :Agent .\n")
+        + _label("Secret", _ORG)
+        + ':Other a owl:Class ; rdfs:subClassOf :Agent ; phys:collectionName "others" .\n'
+        + _NAME
+        + ':nick a owl:DatatypeProperty ; phys:attributeName "nick" .\n'
+    )
+    aql = _aql(ttl, "SELECT ?n ?k WHERE { :x a :Agent ; :name ?n ; :nick ?k }")
+    copies = aql[aql.index("FOR doc4 IN @@") :]
+    copies = copies[: copies.index("RETURN doc4")]
+    assert "FIRST(SPLIT(NOT_NULL(doc4._id" in copies  # the walked-document test
+
+
+def test_a_reverse_walk_into_classes_scoped_differently_is_answered() -> None:
+    """Refused on main and on the first head ("a reverse traversal cannot
+    apply one tenant filter")."""
+    ttl = (
+        _label("Person", _ORG)
+        + _label("Doc", _WS)
+        + _label("Tag")
+        + ":wrote a owl:ObjectProperty ; rdfs:domain :Person, :Doc ; rdfs:range :Tag ; "
+        + 'phys:edgeCollectionName "wrote" .\n'
+    )
+    aql = _aql(ttl, "SELECT ?s WHERE { ?s :wrote :g1 }")
+    assert ".org == @" in aql and ".ws == @" in aql

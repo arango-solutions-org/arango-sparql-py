@@ -195,7 +195,9 @@ def drop_repeated_copies(visitor: AlgebraVisitor) -> None:
             scope = visitor._graph_scope_test(other)
             if scope is not None:
                 probe.filter_raw(scope)
-            enforce_classes_tenant_scope(visitor, other, by_collection[earlier], builder=probe)
+            enforce_classes_tenant_scope(
+                visitor, other, by_collection[earlier], builder=probe, class_tested=False
+            )
             for path in fields:
                 probe.filter_raw(
                     f"{probe.attribute_exists(other, path)} == {probe.attribute_exists(alias, path)}"
@@ -282,7 +284,7 @@ def emit_attribute_across_copies(
         scope = visitor._graph_scope_test(inner)
         if scope is not None:
             into.filter_raw(scope)
-        enforce_classes_tenant_scope(visitor, inner, sources[collection], builder=into)
+        enforce_classes_tenant_scope(visitor, inner, sources[collection], builder=into, class_tested=False)
         # An indexed ``_uri`` lookup per row, as the probe's (§6.1).
         indexes = visitor.resolver.uri_indexes
         if indexes is not None and indexes.scanned(collection, members):
