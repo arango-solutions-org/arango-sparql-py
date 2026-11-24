@@ -58,6 +58,7 @@ from .paths import emit_path_triple
 from .predicates import LoopEmitter, LoopPlan, PredicateCall, extract_predicate_calls, resolve_call
 from .resolver import ResolvedClass, ResolvedProperty, SchemaResolver, is_synthetic_iri
 from .subselect import emit_to_multiset
+from .tenant_scope import enforce_classes_tenant_scope
 from .union_paths import emit_union
 from .variable_predicates import emit_variable_predicate_triple
 
@@ -2627,9 +2628,24 @@ class AlgebraVisitor:
         that joins across tenant roots. Two classes that share the
         same ``tenant_entity`` value (e.g. ``Person`` and ``Doc``
         both rooted at ``"Org"``) compose freely.
+
+        One class only: a read of several classes goes through
+        :func:`.tenant_scope.enforce_classes_tenant_scope`, which holds each
+        document to its own class's field when they differ (#218).
         """
+        placeholder = self._tenant_placeholder(resolved)
+        if placeholder is not None:
+            assert resolved.tenant_field is not None  # _tenant_placeholder guarantees it
+            (builder or self.builder).filter_eq(attribute_ref(alias, resolved.tenant_field), placeholder)
+
+    def _tenant_placeholder(self, resolved: ResolvedClass) -> str | None:
+        """Commit the query to *resolved*'s tenant root and return the tenant
+        bind placeholder; ``None`` for a class that is not tenant-scoped.
+
+        Raises :class:`CrossTenantJoinError` for a second tenant root, or a
+        tenant-scoped class with no tenant context (PRD §6.5.1)."""
         if resolved.tenant_field is None:
-            return
+            return None
         if resolved.tenant_entity is not None:
             committed = self.state.tenant.entity
             if committed is None:
@@ -2656,10 +2672,7 @@ class AlgebraVisitor:
             )
         if self.state.tenant_bind_placeholder is None:
             self.state.tenant_bind_placeholder = self.builder.bind(self.tenant_id, hint="tenant")
-        (builder or self.builder).filter_eq(
-            attribute_ref(alias, resolved.tenant_field),
-            self.state.tenant_bind_placeholder,
-        )
+        return self.state.tenant_bind_placeholder
 
     @staticmethod
     def _refuse_generated_iri_on_triples(iri: Any, table: str, *, role: str) -> None:
@@ -3240,8 +3253,7 @@ class AlgebraVisitor:
             alias = self._open_collection(collection, resolved=classes[0])
             for test in self._class_tests(self.builder, alias, classes, "the rdfs:range"):
                 self.builder.filter_raw(test)
-            for tenant in {(c.tenant_field, c.tenant_entity): c for c in classes}.values():
-                self._enforce_tenant_scope(alias, tenant)
+            enforce_classes_tenant_scope(self, alias, classes)
             join(self.builder, alias)
         else:
             # The range's classes span several collections: one indexed
@@ -3253,8 +3265,7 @@ class AlgebraVisitor:
                 child.for_(inner, collection)
                 for test in self._class_tests(child, inner, classes, "the rdfs:range"):
                     child.filter_raw(test)
-                for tenant in {(c.tenant_field, c.tenant_entity): c for c in classes}.values():
-                    self._enforce_tenant_scope(inner, tenant, builder=child)
+                enforce_classes_tenant_scope(self, inner, classes, builder=child)
                 join(child, inner)
                 child.return_scalar(inner)
                 arms.append(self.builder.absorb_child(child))
@@ -3401,8 +3412,7 @@ class AlgebraVisitor:
             scope = in_scope(inner)
             if scope is not None:
                 child.filter_raw(scope)
-            for tenant in {(c.tenant_field, c.tenant_entity): c for c in classes}.values():
-                self._enforce_tenant_scope(inner, tenant, builder=child)
+            enforce_classes_tenant_scope(self, inner, classes, builder=child)
             child.return_scalar(inner)
             arms.append(self.builder.absorb_child(child))
         copies = self.builder.fresh_alias()
@@ -3682,7 +3692,7 @@ class AlgebraVisitor:
         alias = self._open_collection(anchor.collection, resolved=anchor)
         for test in self._class_tests(self.builder, alias, classes, what):
             self.builder.filter_raw(test)
-        self._enforce_tenant_scope(alias, anchor)
+        enforce_classes_tenant_scope(self, alias, classes)
         self._guard_relationship_endpoints(alias, classes)
         self._bind_opened_subject(subject, alias, matched=False)
         return alias
@@ -3746,8 +3756,10 @@ class AlgebraVisitor:
 
         One ``FOR … IN UNION(…)`` arm per collection, each with its own class
         test, and for a constant subject its own indexed ``_uri`` match. The
-        tenant and named-graph filters apply to the union row, so the
-        classes must agree on tenant scoping. Sharded classes are refused:
+        tenant and named-graph filters apply to the union row; classes scoped
+        by different tenant fields are told apart by collection and label
+        (:func:`.tenant_scope.enforce_classes_tenant_scope`, #218). Sharded
+        classes are refused:
         a union of shard families is not built yet.
 
         AQL materialises every ``UNION`` argument before the outer ``FOR``
@@ -3766,11 +3778,6 @@ class AlgebraVisitor:
             raise UnsupportedSparqlError(
                 f"{what} spans several collections, and {sharded} are sharded; reading "
                 f"the subject {subject} across shard families is not supported"
-            )
-        if len({(c.tenant_field, c.tenant_entity) for c in classes}) > 1:
-            raise UnsupportedSparqlError(
-                f"{what} spans classes with different tenant scoping; one tenant filter "
-                f"cannot apply to the subject {subject} in all of them"
             )
         open_value = False
         if isinstance(subject, URIRef):
@@ -3830,7 +3837,7 @@ class AlgebraVisitor:
             self.state.pending_copy_checks.append((alias, by_collection, what))
             self.state.copy_members[alias] = CopyRow(by_collection)
         self._apply_graph_scope(alias)
-        self._enforce_tenant_scope(alias, classes[0])
+        enforce_classes_tenant_scope(self, alias, classes)
         self._guard_relationship_endpoints(alias, classes)
         self._bind_opened_subject(subject, alias, matched=match_in_arms)
         if open_value:

@@ -78,6 +78,7 @@ from .builder import (
     triple_object_ref,
 )
 from .resolver import ResolvedClass
+from .tenant_scope import enforce_classes_tenant_scope
 from .union_paths import _spawn_child
 from .variable_predicates import attribute_triple_loop, document_triple_arms, refuse_nested_attribute_scan
 
@@ -403,9 +404,9 @@ def _document_arm(
     scope = arm._graph_scope_test(doc)
     if scope is not None:
         builder.filter_raw(scope)
-    scoped = next((c for c in classes if c.tenant_field), None)
-    if scoped is not None:
-        arm._enforce_tenant_scope(doc, scoped)
+    if any(c.tenant_field for c in classes):
+        # Each document by its own class's tenant field (#218).
+        enforce_classes_tenant_scope(arm, doc, classes)
     else:
         tenant = arm._tenant_test(doc, builder=builder)
         if tenant is not None:
