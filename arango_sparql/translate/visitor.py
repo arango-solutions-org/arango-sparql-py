@@ -1288,11 +1288,16 @@ class AlgebraVisitor:
         alias = self.builder.fresh_alias(prefix="bv")
         self.builder.let(alias, aql_expr)
         self.state.var_to_expr[var_name] = alias
-        if _expression_variable_names(expr) & self.state.maybe_unbound or can_error(expr):
-            # Unbound where an input is, or where the expression is an error
-            # (§18.5): a later join on it must be compatible, not by value;
-            # ``IF(?k = :c, ?k, 1/0)`` joined as bound found no match where it
-            # errored (#226).
+        if (
+            _expression_variable_names(expr) & self.state.maybe_unbound
+            or can_error(expr)
+            or unbound_variables(expr, lambda name: name in self.state.var_to_expr)
+        ):
+            # Unbound where an input is, where the expression is an error the
+            # AQL shows as null, or everywhere when it reads a variable nothing
+            # in scope binds (§18.5): a later join on it must be compatible,
+            # not by value. ``IF(?k = :c, ?k, 1/0)`` and ``BIND(?zz AS ?x)``
+            # joined as bound found no match where unbound (#226).
             self.state.maybe_unbound.add(var_name)
         if self._is_date_valued(expr):
             self.state.date_shift_vars.add(var_name)
@@ -2223,7 +2228,20 @@ class AlgebraVisitor:
                     if fan_out:
                         read = self.builder.fresh_alias(prefix="lv")
                         self.builder.for_inline(read, self._fan_out_source(attr_path))
-                    self._join_maybe_unbound(str(o), existing, read, f"{read} == {existing}")
+                        self._join_maybe_unbound(str(o), existing, read, f"{read} == {existing}")
+                    else:
+                        # A single value: split the document scan, as for a
+                        # subject, so a bound value keeps an attribute index
+                        # (a computed BIND joined to ``?t :age ?b`` lost it,
+                        # 0.19 s became 2.8 s; review of #236).
+                        field_path = prop.field_path
+                        self._join_maybe_unbound(
+                            str(o),
+                            existing,
+                            read,
+                            lambda doc: f"{attribute_path_ref(doc, field_path)} == {existing}",
+                            alias=alias,
+                        )
                 elif existing != attr_path:
                     # The variable is already bound by an earlier
                     # triple to a different AQL expression — turn the

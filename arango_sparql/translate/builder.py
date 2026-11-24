@@ -509,7 +509,10 @@ class AqlQueryBuilder:
 
         Returns ``False``, changing nothing, when *alias* is not a plain
         collection scan of this builder (a traversal vertex, a union row,
-        a view search, a sharded family): the caller then filters instead.
+        a view search, a sharded family), or when *value* reads a variable
+        this builder defines after that scan, which the scan could not see
+        (an attribute joined to a value computed from the same document,
+        #226): the caller then filters instead.
         """
         pattern = re.compile(rf"FOR {re.escape(alias)} IN (@@\w+)")
         for index, clause in enumerate(self._body_clauses):
@@ -518,6 +521,8 @@ class AqlQueryBuilder:
             found = pattern.fullmatch(clause.text)
             if found is None:
                 continue
+            if self._defined_after(index, value):
+                return False
             collection = found.group(1)
             hit = self.fresh_alias()
             free = self.fresh_alias()
@@ -527,6 +532,16 @@ class AqlQueryBuilder:
             ]
             self._body_clauses[index] = _Clause(_ClauseKind.FOR, _union_clause(alias, arms, "UNION"))
             return True
+        return False
+
+    def _defined_after(self, index: int, expression: str) -> bool:
+        """Whether *expression* reads a variable that a ``FOR`` or ``LET`` of
+        this builder after clause *index* defines."""
+        names = set(re.findall(r"(?<![@.\w])([A-Za-z_]\w*)", expression))
+        for clause in self._body_clauses[index + 1 :]:
+            defined = re.match(r"(?:FOR|LET) ([A-Za-z_]\w*)(?:, ([A-Za-z_]\w*))?", clause.text)
+            if defined and names & {name for name in defined.groups() if name}:
+                return True
         return False
 
     def sort_here(self, expression: str, *, descending: bool) -> AqlQueryBuilder:

@@ -120,7 +120,14 @@ def _extend_expr(expr: str) -> object:
         ("COALESCE(?k, ?k / 0)", True),
         ("?k / 0", True),
         ("?k + 1", True),
-        ('CONCAT(?k, "!")', True),
+        # Never null in the emitted AQL (CONCAT(null) is ""): an error there
+        # is not represented (#82), and marking it would only cost the index.
+        ('CONCAT(?k, "!")', False),
+        ("STR(?k)", False),
+        ('IRI(CONCAT("http://ex.org/", ?k))', False),
+        ("xsd:integer(?k)", False),
+        ("EXISTS { ?k ?p ?o }", False),
+        ("ROUND(?k)", True),
         ("IF(?k = :c, ?k, 1/0)", True),
     ],
 )
@@ -137,3 +144,13 @@ def test_a_sub_select_column_that_can_error_is_joined_compatibly() -> None:
         resolver=SchemaResolver.from_turtle(_TTL),
     )
     assert ".x == null ||" in result.aql
+
+
+def test_a_bind_of_an_unbound_variable_is_joined_compatibly() -> None:
+    """``?zz`` is bound by nothing in scope: ``?x`` is unbound everywhere,
+    compatible with any value (review of #236; main matched nothing)."""
+    result = translate(
+        "PREFIX : <http://ex.org/>\nSELECT ?s ?x WHERE { ?s :name ?n BIND(?zz AS ?x) ?s :name ?x }",
+        resolver=SchemaResolver.from_turtle(_TTL),
+    )
+    assert "== null || " in result.aql
