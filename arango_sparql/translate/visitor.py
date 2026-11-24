@@ -44,7 +44,7 @@ from .builder import (
 )
 from .copies import CopyRow, copies_interchangeable, drop_repeated_copies, emit_attribute_across_copies
 from .date_arithmetic import compare_instants, date_shift, instant, is_date_shift, is_duration_literal
-from .expression_errors import certainly_error, unbound_variables
+from .expression_errors import can_error, certainly_error, unbound_variables
 from .filter_builtins import translate_builtin, translate_function
 from .minus_exists import emit_minus
 from .mixed_store import emit_routed_triple, route_subject
@@ -1288,7 +1288,11 @@ class AlgebraVisitor:
         alias = self.builder.fresh_alias(prefix="bv")
         self.builder.let(alias, aql_expr)
         self.state.var_to_expr[var_name] = alias
-        if _expression_variable_names(expr) & self.state.maybe_unbound:
+        if _expression_variable_names(expr) & self.state.maybe_unbound or can_error(expr):
+            # Unbound where an input is, or where the expression is an error
+            # (§18.5): a later join on it must be compatible, not by value;
+            # ``IF(?k = :c, ?k, 1/0)`` joined as bound found no match where it
+            # errored (#226).
             self.state.maybe_unbound.add(var_name)
         if self._is_date_valued(expr):
             self.state.date_shift_vars.add(var_name)

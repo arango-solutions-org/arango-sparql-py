@@ -76,3 +76,32 @@ def _operands(node: Any) -> Any:
             # literal is an operand too: ``COALESCE(?z, "x")`` is no error.
             if isinstance(item, Identifier) or isinstance(getattr(item, "name", None), str):
                 yield item
+
+
+#: Functions that never raise, whatever their arguments: BOUND reads an
+#: unbound variable as false (§17.4.1.1).
+_NEVER_ERROR = frozenset({"Builtin_BOUND"})
+
+
+def can_error(node: Any) -> bool:
+    """Whether *node* can be an error in some solution, leaving a BIND or
+    projection target unbound there (§18.5, Extend; #226).
+
+    Conservative: a constant and a plain variable never error, nor does
+    ``BOUND``, nor a ``COALESCE`` whose last operand cannot error. Anything
+    else can: arithmetic (a division by zero, a non-numeric operand), a
+    function given the wrong type, an ``IF`` whose condition or chosen
+    branch errors, a cast. A target that can be unbound is joined
+    compatibly (either side unbound, or equal) rather than by value.
+    """
+    if isinstance(node, (Variable, Identifier)):
+        return False
+    name = getattr(node, "name", None)
+    if not isinstance(name, str):
+        return False
+    if name in _NEVER_ERROR:
+        return False
+    if name == "Builtin_COALESCE":
+        operands = list(_operands(node))
+        return not operands or can_error(operands[-1])
+    return True

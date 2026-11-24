@@ -9,8 +9,11 @@ in ``tests/cross/test_multi_document_iri_cross.py`` (``optional_scope_*``).
 from __future__ import annotations
 
 import pytest
+from rdflib.plugins.sparql.algebra import translateQuery
+from rdflib.plugins.sparql.parser import parseQuery
 
 from arango_sparql.api import translate
+from arango_sparql.translate.expression_errors import can_error
 from arango_sparql.translate.resolver import SchemaResolver
 
 _TTL = """
@@ -91,3 +94,46 @@ def test_the_unbound_variable_is_still_reported() -> None:
 )
 def test_a_boolean_operand_that_is_an_error_decides_nothing(expr: str, shape: str) -> None:
     assert _bind(expr) == shape
+
+
+# -- #226: a BIND or projection target that can error can be unbound ----------
+
+
+def _extend_expr(expr: str) -> object:
+    algebra = translateQuery(
+        parseQuery(f"PREFIX : <http://ex.org/> SELECT * WHERE {{ ?s :p ?k BIND({expr} AS ?v) }}")
+    )
+    node = algebra.algebra
+    while getattr(node, "name", None) != "Extend":
+        node = node.p
+    return node.expr
+
+
+@pytest.mark.parametrize(
+    "expr, expected",
+    [
+        ("?k", False),
+        ("42", False),
+        (":c", False),
+        ("BOUND(?zz)", False),
+        ("COALESCE(?k / 0, 1)", False),
+        ("COALESCE(?k, ?k / 0)", True),
+        ("?k / 0", True),
+        ("?k + 1", True),
+        ('CONCAT(?k, "!")', True),
+        ("IF(?k = :c, ?k, 1/0)", True),
+    ],
+)
+def test_can_error(expr: str, expected: bool) -> None:
+    assert can_error(_extend_expr(expr)) is expected
+
+
+def test_a_sub_select_column_that_can_error_is_joined_compatibly() -> None:
+    """Where the expression errors the column is unbound, compatible with any
+    outer value (§18.3); joined as bound it matched nothing (#226)."""
+    result = translate(
+        "PREFIX : <http://ex.org/>\nSELECT ?s ?x WHERE { ?s :name ?x "
+        '{ SELECT ?s (IF(?n = "A", ?n, 1/0) AS ?x) WHERE { ?s :name ?n } } }',
+        resolver=SchemaResolver.from_turtle(_TTL),
+    )
+    assert ".x == null ||" in result.aql
