@@ -72,7 +72,7 @@ All five rdflib path classes are handled (`paths.py`).
 | Sequence `/` | ✅ | `paths.py:134` |
 | Inverse `^` | ✅ | `paths.py:192` |
 | Alternative `\|` | ✅ | `paths.py:114` → `union_paths.py:87` |
-| Zero/one-or-more `*` `+`, zero-or-one `?` | ✅ | `paths.py:217` (`_emit_mul_path`) |
+| Zero/one-or-more `*` `+`, zero-or-one `?` | ✅ | `paths.py` (`_emit_mul_path`). A union of fixed-length arms up to `SchemaResolver.property_path_max_depth` (default 10). A `*` / `+` path that reaches a node past that limit is refused at run time, never truncated: the AQL walks one repetition more and stops with `FAIL` (ArangoDB ERR 1569, message `E_SPARQL_PATH_DEPTH: …`) when that walk finds a pair the arms did not (issue #183; until then the answer was silently short). Cycles are not refused. With a free subject and a fixed object (`?s :p+ :b`) the check covers every subject the arms scan, so a long chain elsewhere refuses it too. Evidence: `tests/cross/test_path_depth_cross.py`, `tests/integration/test_path_depth_live.py` |
 | Negated property set `!` (incl. inverse arms) | ✅ | `paths.py:317` |
 
 **Caveats:** property paths over **RPT-mapped** subjects are rejected

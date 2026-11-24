@@ -631,6 +631,49 @@ def test_execute_missing_collection_returns_400_not_500(
     assert "collection or view not found" in detail["error"]
 
 
+def test_execute_path_past_the_depth_limit_returns_its_own_code(
+    client: TestClient,
+    fake_client_factory: type[_FakeArangoClient],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``:p+`` path longer than ``property_path_max_depth`` makes the AQL
+    call ``FAIL`` (ERR 1569, issue #183): a 400 whose code names the refusal,
+    so a client can tell it from any other failed query."""
+    message = "AQL: E_SPARQL_PATH_DEPTH: property path <http://ex.org/p>+ reaches nodes more than 10"
+    exc = _make_aql_execute_error(1569, 400, message)
+    _patch_aql_execute_raises(monkeypatch, fake_client_factory, exc)
+
+    token = _connect_session(client)
+    resp = client.post(
+        "/execute",
+        json={"sparql": SELECT_QUERY, "ontology_ttl": ONTOLOGY_TTL},
+        headers={"X-Arango-Session": token},
+    )
+    assert resp.status_code == 400, resp.text
+    detail = resp.json()["detail"]
+    assert detail["code"] == "E_SPARQL_PATH_DEPTH"
+    assert "property path" in detail["error"]
+
+
+def test_execute_other_fail_keeps_the_arango_code(
+    client: TestClient,
+    fake_client_factory: type[_FakeArangoClient],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only the path-depth refusal is renamed; another ``FAIL`` stays E_AQL_1569."""
+    exc = _make_aql_execute_error(1569, 400, "AQL: something else")
+    _patch_aql_execute_raises(monkeypatch, fake_client_factory, exc)
+
+    token = _connect_session(client)
+    resp = client.post(
+        "/execute",
+        json={"sparql": SELECT_QUERY, "ontology_ttl": ONTOLOGY_TTL},
+        headers={"X-Arango-Session": token},
+    )
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["detail"]["code"] == "E_AQL_1569"
+
+
 def test_execute_aql_query_error_returns_400(
     client: TestClient,
     fake_client_factory: type[_FakeArangoClient],

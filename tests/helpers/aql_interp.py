@@ -104,6 +104,10 @@ _FOR_LET_RE = re.compile(r"FOR\s+(\w+)\s+IN\s+([A-Za-z_]\w*)\s*$")
 # ``FOR doc3 IN UNION(`` is followed by arms, each a ``(`` line, a complete
 # query and a ``)`` or ``),`` line, and a bare ``)`` closes the union.
 _FOR_UNION_START_RE = re.compile(r"FOR\s+(\w+)\s+IN\s+(UNION|UNION_DISTINCT)\(\s*$")
+# The same arms bound to a list rather than iterated — the property-path
+# depth guard (issue #183, ``builder.let_union``): ``LET reach7 =
+# UNION_DISTINCT(`` … ``)``. A single arm is paired with a ``[]`` line.
+_LET_UNION_START_RE = re.compile(r"LET\s+(\w+)\s*=\s*(UNION|UNION_DISTINCT)\(\s*$")
 _LIMIT_RE = re.compile(r"LIMIT\s+(?:(\d+)\s*,\s*)?(\d+)")
 _SORT_RE = re.compile(r"SORT\s+(.+)$")
 # COLLECT clause patterns the visitor emits today:
@@ -270,6 +274,14 @@ def _not_null(*args: Any) -> Any:
     return None
 
 
+class AqlFailCalled(Exception):
+    """``FAIL(message)`` ran: ArangoDB aborts the query with ERR 1569."""
+
+
+def _fail(message: Any = None) -> Any:
+    raise AqlFailCalled(message)
+
+
 # Whitelisted name → callable / value for the eval namespace. Anything
 # not in this map and not a doc attribute / bind var triggers an
 # explicit error so we notice when the visitor emits AQL the
@@ -336,6 +348,10 @@ _AQL_BUILTINS: dict[str, Any] = {
     "IS_STRING": lambda v: isinstance(v, str),
     "IS_NUMBER": lambda v: isinstance(v, int | float) and not isinstance(v, bool),
     "IS_BOOL": lambda v: isinstance(v, bool),
+    # ``MINUS(a, b)``: the distinct values of *a* not in *b*, by value — the
+    # property-path depth guard compares row objects with it (issue #183).
+    "MINUS": lambda a, b: _unique([x for x in (a or []) if x not in (b or [])]),
+    "FAIL": _fail,
     "true": True,
     "false": False,
     "null": None,
@@ -814,6 +830,57 @@ def _read_block(lines: list[str], i: int, into: list[str], closer: re.Pattern[st
     return i
 
 
+def _read_union_arms(lines: list[str], i: int) -> tuple[list[str], int]:
+    """Split the arms of a ``UNION(`` / ``UNION_DISTINCT(`` opened on the
+    line before *i*; return them and the index after the union's ``)``.
+
+    Parenthesis depth splits the arms: 1 between arms, 0 at the union's
+    closing ``)``. Arms may nest blocks of their own. A bare ``[]`` arm (a
+    single-arm union's second array) contributes no rows.
+    """
+    union_arms: list[str] = []
+    arm_lines: list[str] = []
+    depth = 1
+    while i < len(lines):
+        arm_line = lines[i]
+        i += 1
+        depth += arm_line.count("(") - arm_line.count(")")
+        if depth == 0:
+            return union_arms, i
+        if depth == 1 and arm_line.rstrip(",") == ")":
+            union_arms.append("\n".join(arm_lines[1:]))  # drop the arm's ``(``
+            arm_lines = []
+            continue
+        if depth == 1 and not arm_lines and arm_line.rstrip(",") == "[]":
+            continue
+        arm_lines.append(arm_line)
+    raise AssertionError("unterminated UNION( in AQL")  # pragma: no cover - malformed AQL
+
+
+def _union_rows(
+    arms: list[str],
+    distinct: bool,
+    bind_vars: dict[str, Any],
+    docs: dict[str, list[dict[str, Any]]],
+    env: Any,
+    let_env: Any,
+) -> list[Any]:
+    """Every row of every arm, run as a correlated subquery with this row in
+    scope, in arm order (AQL ``UNION`` keeps duplicates, ``UNION_DISTINCT``
+    the first of equal rows)."""
+    rows: list[Any] = []
+    seen: set[str] = set()
+    for arm in arms:
+        for arm_row in run_aql_subset(arm, bind_vars, docs, _outer_env=env, _outer_let=let_env):
+            if distinct:
+                key = repr(sorted(arm_row.items())) if isinstance(arm_row, dict) else repr(arm_row)
+                if key in seen:
+                    continue
+                seen.add(key)
+            rows.append(arm_row)
+    return rows
+
+
 def run_aql_subset(
     aql: str,
     bind_vars: dict[str, Any],
@@ -930,27 +997,19 @@ def run_aql_subset(
             )
             (post_collect_steps if seen_collect else pre_collect_plan).append(rows_step)
             continue
+        if m := _LET_UNION_START_RE.match(line):
+            let_arms, i = _read_union_arms(lines, i)
+            let_union_step: tuple[str, Any, Any] = (
+                "LET_UNION",
+                m.group(1),
+                (let_arms, m.group(2) == "UNION_DISTINCT"),
+            )
+            (post_collect_steps if seen_collect else pre_collect_plan).append(let_union_step)
+            continue
         if m := _FOR_UNION_START_RE.match(line):
             if seen_collect:  # pragma: no cover
                 raise AssertionError(f"FOR after COLLECT not supported: {line!r}")
-            # Parenthesis depth splits the arms: 1 between arms, 0 at the
-            # union's closing ``)``. Arms may nest blocks of their own.
-            union_arms: list[str] = []
-            arm_lines: list[str] = []
-            depth = 1
-            while i < len(lines):
-                arm_line = lines[i]
-                i += 1
-                depth += arm_line.count("(") - arm_line.count(")")
-                if depth == 0:
-                    break
-                if depth == 1 and arm_line.rstrip(",") == ")":
-                    union_arms.append("\n".join(arm_lines[1:]))  # drop the arm's ``(``
-                    arm_lines = []
-                    continue
-                arm_lines.append(arm_line)
-            else:  # pragma: no cover - malformed AQL
-                raise AssertionError("unterminated FOR … IN UNION( in AQL")
+            union_arms, i = _read_union_arms(lines, i)
             pre_collect_plan.append(("FOR_UNION", m.group(1), (union_arms, m.group(2) == "UNION_DISTINCT")))
         elif m := _FOR_TRAVERSAL_RE.match(line):
             if seen_collect:  # pragma: no cover
@@ -1047,20 +1106,13 @@ def run_aql_subset(
             for doc in docs.get(collection, []):
                 run_plan(idx + 1, {**env, alias: doc}, let_env)
         elif kind == "FOR_UNION":
-            # Each arm runs as a correlated subquery with this row in scope;
-            # every row of every arm, in arm order, binds the union alias
-            # (AQL ``UNION`` keeps duplicates, ``UNION_DISTINCT`` the first of
-            # equal rows).
+            # Each row of the union binds the union alias in turn.
             arms, distinct = b
-            seen: set[str] = set()
-            for arm in arms:
-                for arm_row in run_aql_subset(arm, bind_vars, docs, _outer_env=env, _outer_let=let_env):
-                    if distinct:
-                        key = repr(sorted(arm_row.items())) if isinstance(arm_row, dict) else repr(arm_row)
-                        if key in seen:
-                            continue
-                        seen.add(key)
-                    run_plan(idx + 1, {**env, a: arm_row}, let_env)
+            for arm_row in _union_rows(arms, distinct, bind_vars, docs, env, let_env):
+                run_plan(idx + 1, {**env, a: arm_row}, let_env)
+        elif kind == "LET_UNION":
+            arms, distinct = b
+            run_plan(idx + 1, env, {**let_env, a: _union_rows(arms, distinct, bind_vars, docs, env, let_env)})
         elif kind == "FOR_VALUES":
             # ``FOR <alias> IN @_pN_values`` — SPARQL VALUES rows (or
             # the federation entry point's seed bindings) bound as a
@@ -1181,6 +1233,11 @@ def run_aql_subset(
                     )
                 elif kind == "SUBQUERY_UNIQUE":
                     let_env[field_a] = _unique_scalars(field_b, bind_vars, docs, env, let_env)
+                elif kind == "LET_UNION":
+                    union_arms_after, union_distinct = field_b
+                    let_env[field_a] = _union_rows(
+                        union_arms_after, union_distinct, bind_vars, docs, env, let_env
+                    )
                 else:  # LET — stored as ("LET", expr, alias)
                     assert field_b is not None
                     let_env[field_b] = _eval_expr(field_a, env, bind_vars, let_env)

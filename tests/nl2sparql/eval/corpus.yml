@@ -206,7 +206,8 @@ cases:
   - name: path-reachable-transitive-plus
     # Transitive MulPath `:knows+` — one-or-more hops. Lowered to a bounded
     # UNION of fixed-length arms; the default property_path_max_depth (10)
-    # applies, so no knob override is needed in the gold.
+    # applies (a longer path is refused at run time, #183), so no knob
+    # override is needed in the gold.
     nl: "Find everyone reachable from each person through one or more acquaintance links."
     expected: |
       PREFIX : <http://ex.org/>
