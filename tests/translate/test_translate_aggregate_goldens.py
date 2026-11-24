@@ -14,7 +14,9 @@ import yaml
 
 from arango_sparql.api import translate
 from arango_sparql.errors import UnsupportedSparqlError
+from arango_sparql.translate.mapping import MappingBundle, MappingSource
 from arango_sparql.translate.resolver import SchemaResolver
+from tests.helpers.aql_interp import run_aql_subset
 
 GOLDEN_PATH = Path(__file__).parent / "aggregate.yml"
 
@@ -189,6 +191,91 @@ def test_a_values_block_after_grouping_reads_nothing_out_of_scope() -> None:
     after_collect = result.aql.split("COLLECT", 1)[1]
     assert "doc1" not in after_collect
     assert "FOR row" in after_collect
+
+
+@pytest.mark.parametrize(
+    "sparql",
+    [
+        # Issue #145: the VALUES binds ?c, then the projection re-binds it.
+        "SELECT ?d (COUNT(*) AS ?c) WHERE { ?p :dept ?d } GROUP BY ?d VALUES ?c { 2 }",
+        "SELECT ?d (COUNT(*) AS ?c) WHERE { ?p :dept ?d } GROUP BY ?d VALUES (?d ?c) { (<http://example/d1> 2) }",
+        # The same rename path, reached by a BIND of a plain variable.
+        "SELECT ?p ?n WHERE { ?p :name ?n BIND(?p AS ?n) }",
+    ],
+    ids=["values-on-aggregate-alias", "values-row-on-aggregate-alias", "bind-variable-onto-bound"],
+)
+def test_renaming_onto_a_bound_variable_is_refused(sparql: str) -> None:
+    """Issue #145: SPARQL forbids re-binding an in-scope variable (§18.2.1),
+    and pyoxigraph refuses these queries. A rename (``(COUNT(*) AS ?c)``,
+    ``BIND(?p AS ?n)``) used to overwrite the binding, so the VALUES was
+    dropped and ``?n`` read ``?p``'s value."""
+    with pytest.raises(UnsupportedSparqlError, match=r"already bound"):
+        translate(f"PREFIX : <http://example/>\n{sparql}", resolver=SchemaResolver.from_turtle(""))
+
+
+def test_values_on_a_group_key_still_filters_the_groups() -> None:
+    """Control for #145: rdflib's own rename of a projected group key from its
+    Sample re-points the key to the value it already holds, so it is no re-bind."""
+    result = translate(
+        "PREFIX : <http://example/>\n"
+        "SELECT ?d (COUNT(*) AS ?c) (SAMPLE(?d) AS ?k) WHERE { ?p :dept ?d } GROUP BY ?d "
+        "VALUES ?d { <http://example/d1> }",
+        resolver=SchemaResolver.from_turtle(""),
+    )
+    after_collect = result.aql.split("COLLECT", 1)[1]
+    assert "FILTER grp" in after_collect and " IN values" in after_collect
+    assert "RETURN { d: grp" in after_collect and "k: grp" in after_collect
+
+
+_PEOPLE_BUNDLE = MappingBundle(
+    conceptual_schema={"entities": [{"name": "Person", "properties": [{"name": "name"}, {"name": "dept"}]}]},
+    physical_mapping={
+        "entities": {
+            "Person": {
+                "style": "COLLECTION",
+                "collectionName": "people",
+                "properties": {"name": {"field": "name"}, "dept": {"field": "dept"}},
+            }
+        }
+    },
+    source=MappingSource(kind="manual"),
+)
+# c's name equals its dept, so a probe that compares the two keeps exactly c.
+_PEOPLE = {"a": ("A", "d1"), "b": ("B", "d1"), "c": ("d2", "d2")}
+_PEOPLE_DOCS = {
+    "people": [
+        {"_id": f"people/{k}", "_key": k, "_uri": f"http://ex.org/{k}", "name": n, "dept": d}
+        for k, (n, d) in _PEOPLE.items()
+    ]
+}
+_ALL_PEOPLE = [("http://ex.org/a", "A"), ("http://ex.org/b", "B"), ("http://ex.org/c", "d2")]
+
+
+@pytest.mark.parametrize(
+    ("sparql", "expected"),
+    [
+        ("SELECT ?p ?n WHERE { ?p :name ?n FILTER EXISTS { ?p :dept ?d BIND(?d AS ?n) } }", _ALL_PEOPLE),
+        ("SELECT ?p ?n WHERE { ?p :name ?n FILTER NOT EXISTS { ?p :dept ?d BIND(?d AS ?n) } }", []),
+        ("SELECT ?p ?n WHERE { ?p :name ?n FILTER EXISTS { ?p :name ?m BIND(?m AS ?n) } }", _ALL_PEOPLE),
+    ],
+    ids=[
+        "exists-renames-onto-outer",
+        "not-exists-renames-onto-outer",
+        "exists-renames-onto-outer-same-value",
+    ],
+)
+def test_renaming_onto_a_variable_an_exists_probe_substituted_is_not_refused(
+    sparql: str, expected: list[tuple[str, str]]
+) -> None:
+    """Review of #145: inside EXISTS the outer row is substituted into the
+    pattern (§18.6), so the outer ``?n`` is not in scope of the inner BIND and
+    the query is valid. Expected rows are pyoxigraph's."""
+    result = translate(
+        f"PREFIX : <urn:arango-sparql:concept#>\n{sparql}",
+        resolver=SchemaResolver.from_mapping_bundle(_PEOPLE_BUNDLE),
+    )
+    rows = run_aql_subset(result.aql, result.bind_vars, _PEOPLE_DOCS)
+    assert sorted((r["p"], r["n"]) for r in rows) == expected
 
 
 def test_a_group_by_key_keeps_its_rpt_triples_table() -> None:

@@ -210,6 +210,10 @@ class _BindingState:
     """In an EXISTS probe: the variables the outer row substitutes into the
     pattern (SPARQL 1.1 §18.6, ``substitute``) — constants there, which an
     OPTIONAL body inside the probe does not hide."""
+    own_group_scoped: set[str] = field(default_factory=set)
+    """While an OPTIONAL's required side is visited: the variables bound
+    around its group that the group binds on its own
+    (:func:`group_scoped_variables`, #194), so not in scope there (#145)."""
     maybe_unbound: set[str] = field(default_factory=set)
     """SPARQL variables that can be unbound in a solution: bound by an
     OPTIONAL, a UNION arm that not every arm binds, a VALUES ``UNDEF``, a
@@ -879,9 +883,20 @@ class AlgebraVisitor:
     # ------------------------------------------------------------------
     def visit_LeftJoin(self, node: Any) -> Any:
         scope_before = set(self.state.var_to_expr)
+        # A variable this OPTIONAL's group binds on its own (#194) is not in
+        # scope of the group's required side either, so a BIND there onto it
+        # is no re-bind (#145); ``_emit_optional_side`` joins it with the
+        # outer value or refuses. Not inside a MINUS probe, where the inline
+        # conditional add decides only once ``p1`` is visited.
+        outer_own_group = self.state.own_group_scoped
+        if self.state.optional_rebind_sink is None:
+            self.state.own_group_scoped = outer_own_group | group_scoped_variables(self, scope_before, node)
         # Visit the required side first so every alias / variable that
         # the optional side references is in scope.
-        self.visit(node.p1)
+        try:
+            self.visit(node.p1)
+        finally:
+            self.state.own_group_scoped = outer_own_group
         # A GRAPH variable that could be unbound when its group began (an
         # OPTIONAL or VALUES UNDEF outside the GRAPH), and that no required
         # pattern of the group has bound yet: on a row where it is unbound
@@ -1265,13 +1280,27 @@ class AlgebraVisitor:
         # ``var_to_expr`` is enough — emitting a LET would just shadow
         # the existing binding with no semantic change.
         #
-        # The overwrite is intentional: rdflib's post-aggregation rename
-        # of ``?d`` (group key) deliberately replaces the pre-COLLECT
-        # ``?d → doc1.dept`` mapping with the new ``?d → grp1`` (the
-        # COLLECT key alias). The pre-COLLECT alias is out of scope
-        # after COLLECT, so the overwrite matches AQL scoping.
+        # rdflib's post-aggregation rename of a group key ``?d`` (from its
+        # Sample) finds ``?d`` already re-pointed at the COLLECT key alias by
+        # ``visit_AggregateJoin``, so it changes nothing. Any other rename
+        # onto a variable in scope re-binds it, which SPARQL forbids
+        # (§18.2.1): ``(COUNT(*) AS ?c)`` over a trailing ``VALUES ?c`` used
+        # to drop the VALUES silently (#145). A variable an EXISTS probe
+        # substituted from the outer row is not in scope of its pattern, nor
+        # is one an enclosing OPTIONAL's group binds on its own
+        # (``own_group_scoped``), so a rename onto either is valid and is
+        # re-pointed as before.
         if isinstance(expr, Variable) and str(expr) in self.state.var_to_expr:
-            self.state.var_to_expr[var_name] = self.state.var_to_expr[str(expr)]
+            source = self.state.var_to_expr[str(expr)]
+            if (
+                var_name not in self.state.substituted
+                and var_name not in self.state.own_group_scoped
+                and self.state.var_to_expr.get(var_name, source) != source
+            ):
+                raise UnsupportedSparqlError(
+                    f"BIND target ?{var_name} is already bound by the surrounding pattern"
+                )
+            self.state.var_to_expr[var_name] = source
             if str(expr) in self.state.maybe_unbound:
                 self.state.maybe_unbound.add(var_name)
             if str(expr) in self.state.date_shift_vars:
