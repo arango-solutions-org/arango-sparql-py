@@ -74,12 +74,19 @@ def test_a_certainly_bound_variable_keeps_the_plain_indexed_join() -> None:
     assert "== null" not in aql
 
 
-def test_an_attribute_value_that_can_be_unbound_splits_the_document_scan() -> None:
-    # As for a subject: a bound value keeps an index on the attribute, and
-    # only a null one scans (review of #236: one FILTER cost 0.19 s -> 2.8 s).
+def test_an_attribute_value_that_can_be_unbound_is_joined_by_a_filter() -> None:
+    # An OPTIONAL value is often null: splitting the scan cost 9-170x at
+    # 12,000 people (recheck of #236), so the join stays a FILTER, as on main.
     aql = _aql("SELECT ?s ?x ?y WHERE { ?s a :Person OPTIONAL { ?s :email ?x } ?y :email ?x }")
-    assert "!= null && doc3.email == doc1.email" in aql
-    assert "== null || doc" not in aql
+    assert "== null || doc" in aql
+
+
+def test_a_computed_value_joined_to_an_attribute_splits_the_document_scan() -> None:
+    # Null only where ``?a + 1`` errors: the bound value keeps an index on the
+    # attribute (one FILTER cost 0.19 s -> 2.8 s; review of #236).
+    aql = _aql("SELECT ?s ?t WHERE { ?s :age ?a BIND(?a + 1 AS ?b) ?t :age ?b }")
+    assert "bv4 != null && " in aql
+    assert ".age == bv4" in aql
 
 
 def test_an_attribute_joined_to_a_value_read_after_its_scan_is_filtered() -> None:
@@ -88,6 +95,13 @@ def test_an_attribute_joined_to_a_value_read_after_its_scan_is_filtered() -> Non
     aql = _aql("SELECT ?s ?b WHERE { ?s :age ?a BIND(?a + 1 AS ?b) ?s :email ?b }")
     assert "(bv4 == null || doc7.email == bv4)" in aql
     assert "bv4 != null" not in aql  # no split arm reads it
+
+
+def test_an_attribute_joined_to_its_own_document_is_never_split() -> None:
+    # ``?s :name ?x`` with ``?x`` read from doc1 itself: a split around doc1's
+    # scan referenced doc1 inside it (ERR 1203; recheck of #236).
+    aql = _aql("SELECT ?s ?x WHERE { ?s a :Person OPTIONAL { ?s :email ?x } ?s :name ?x }")
+    assert "FOR doc1 IN UNION(" not in aql
 
 
 def _minus_body(where: str) -> object:

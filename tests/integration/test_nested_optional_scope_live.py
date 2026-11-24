@@ -394,6 +394,13 @@ def _multiset(rows: list[dict[str, Any]]) -> list[str]:
             "SELECT ?s ?a ?b WHERE { ?s :age ?a BIND(?a + 1 AS ?b) ?t :age ?b }",
             id="arithmetic_bind_join",
         ),
+        # An OPTIONAL value joined to an attribute of its own document: the
+        # scan is never split around itself (ERR 1203 on an earlier head of
+        # #236).
+        pytest.param(
+            "SELECT ?s ?x WHERE { ?s a :Person OPTIONAL { ?s :email ?x } ?s :name ?x }",
+            id="optional_value_own_attribute",
+        ),
         # ?x is read by the right side's FILTER, never bound by it: it is
         # outside every right-side solution, the sides share nothing, and
         # MINUS removes nothing (#209, its first shape).

@@ -87,7 +87,8 @@ _NEVER_ERROR = frozenset({"Builtin_BOUND"})
 #: not represented at all, #82), so marking the target possibly-unbound
 #: would change no answer and only cost the join its index (review of #236).
 #: Checked on ArangoDB 3.12: ``CONCAT(null)`` and ``TO_STRING(null)`` are
-#: ``""``, ``LENGTH(null)`` and ``ABS(null)`` 0, ``MD5(null)`` a hash.
+#: ``""``, ``LENGTH(null)`` and ``ABS(null)`` 0, ``MD5(null)`` a hash. Not
+#: ``REPLACE``: ``REGEX_REPLACE`` is null for an invalid pattern.
 _AQL_NEVER_NULL = frozenset(
     {
         "Builtin_CONCAT",
@@ -100,11 +101,9 @@ _AQL_NEVER_NULL = frozenset(
         "Builtin_SUBSTR",
         "Builtin_STRLEN",
         "Builtin_ENCODE_FOR_URI",
-        "Builtin_REPLACE",
         "Builtin_MD5",
         "Builtin_SHA1",
         "Builtin_SHA256",
-        "Builtin_SHA384",
         "Builtin_SHA512",
         "Builtin_ABS",
         "Builtin_STRUUID",

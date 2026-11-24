@@ -521,7 +521,12 @@ class AqlQueryBuilder:
             found = pattern.fullmatch(clause.text)
             if found is None:
                 continue
-            if self._defined_after(index, value):
+            if self._defined_after(index, value) or re.search(rf"(?<![@.\w]){re.escape(alias)}\b", value):
+                # The value reads a variable defined after the scan, or the
+                # scanned document itself (``doc1.email`` joined to doc1's
+                # own attribute: ERR 1203 on the split; recheck of #236).
+                return False
+            if self._anchored_after(index, alias):
                 return False
             collection = found.group(1)
             hit = self.fresh_alias()
@@ -533,6 +538,17 @@ class AqlQueryBuilder:
             self._body_clauses[index] = _Clause(_ClauseKind.FOR, _union_clause(alias, arms, "UNION"))
             return True
         return False
+
+    def _anchored_after(self, index: int, alias: str) -> bool:
+        """Whether a FILTER after clause *index* already pins *alias* by its
+        IRI (``alias._uri == …``): its index lookup is kept as it is, which
+        a split around the scan would lose (0.05 s became 0.20 s; recheck of
+        #236)."""
+        pinned = re.compile(rf"(?<![@.\w]){re.escape(alias)}\._(?:uri|id) == ")
+        return any(
+            clause.kind == _ClauseKind.FILTER and pinned.search(clause.text)
+            for clause in self._body_clauses[index + 1 :]
+        )
 
     def _defined_after(self, index: int, expression: str) -> bool:
         """Whether *expression* reads a variable that a ``FOR`` or ``LET`` of
