@@ -689,6 +689,58 @@ class AqlQueryBuilder:
         )
         return self
 
+    def for_reachable(
+        self,
+        vertex_alias: str,
+        edge_alias: str,
+        start_alias: str,
+        edge_collection: str,
+        *,
+        direction: str,
+        min_depth: int,
+        max_depth: str,
+        order: str,
+        unique_vertices: str,
+        prune: str | None = None,
+    ) -> AqlQueryBuilder:
+        """Emit a breadth-first walk that reaches each vertex once::
+
+            FOR <v>, <e> IN <min>..<max> <DIRECTION> <start> @@<edgeColl>
+              [PRUNE <prune>] OPTIONS { order: <order>, uniqueVertices: <unique> }
+
+        For ``:p+`` / ``:p*`` over an edge collection
+        (:func:`arango_sparql.translate.paths._emit_edge_closure_arm`):
+        *order* and *unique_vertices* are the bind placeholders of ``"bfs"``
+        and ``"global"``, *max_depth* the placeholder of the depth bound (AQL
+        takes only a constant there), and *prune* an expression of *vertex_alias*
+        and *edge_alias* whose placeholders the caller bound. ``ANY`` is a
+        real traversal here, unlike :meth:`for_traversal`: each vertex is
+        reached once, so a self-loop's two directions cannot repeat it.
+        """
+        for name, alias in (("vertex", vertex_alias), ("edge", edge_alias), ("start", start_alias)):
+            if not _AQL_IDENT_RE.match(alias):
+                raise ValueError(f"invalid traversal {name} alias: {alias!r}")
+        if direction not in ("OUTBOUND", "INBOUND", "ANY"):
+            raise ValueError(f"invalid traversal direction: {direction!r}")
+        if isinstance(min_depth, bool) or not isinstance(min_depth, int) or min_depth < 0:
+            raise ValueError(f"traversal min depth must be a non-negative int, got {min_depth!r}")
+        for name, placeholder in (
+            ("max depth", max_depth),
+            ("order", order),
+            ("uniqueVertices", unique_vertices),
+        ):
+            if not placeholder.startswith("@") or placeholder.startswith("@@"):
+                raise ValueError(
+                    f"traversal {name} must be a value bind placeholder (@name), got {placeholder!r}"
+                )
+        coll_ref = self.bind_collection(edge_collection)
+        text = f"FOR {vertex_alias}, {edge_alias} IN {min_depth}..{max_depth} {direction} {start_alias} {coll_ref}"
+        if prune is not None:
+            text += f" PRUNE {prune}"
+        text += f" OPTIONS {{ order: {order}, uniqueVertices: {unique_vertices} }}"
+        self._body_clauses.append(_Clause(_ClauseKind.FOR, text))
+        return self
+
     def for_sharded(
         self,
         alias: str,
@@ -999,8 +1051,11 @@ class AqlQueryBuilder:
         """
         if not _AQL_IDENT_RE.match(row_alias):
             raise ValueError(f"invalid FOR alias: {row_alias!r}")
-        if len(arm_aqls) < 2:
-            raise AqlEmitError(f"for_union requires at least 2 arms, got {len(arm_aqls)}")
+        # One arm de-duplicated is a set (a ``:p+`` walked as a traversal,
+        # :mod:`arango_sparql.translate.paths`): paired with ``[]``.
+        minimum = 1 if distinct else 2
+        if len(arm_aqls) < minimum:
+            raise AqlEmitError(f"for_union requires at least {minimum} arm(s), got {len(arm_aqls)}")
         for i, arm in enumerate(arm_aqls):
             if not arm or not arm.strip():
                 raise AqlEmitError(

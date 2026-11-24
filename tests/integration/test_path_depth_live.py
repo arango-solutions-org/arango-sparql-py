@@ -12,6 +12,9 @@ The case matrix runs at a limit of 4 over 5- and 4-hop chains: ArangoDB's
 planner time for the attribute shape grows about fourfold per hop of the
 longest arm (the ``use-indexes`` rule on the IRI join), so the 11-hop chain
 at the default limit is run for the refusal, and answered on edges only.
+Refusals are expected of the shapes lowered to arms (``BOUNDED``); an edge
+collection of its own is walked by a traversal and answers in full
+(``tests/integration/test_edge_closure_live.py``).
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ from arango_sparql.api import translate
 from arango_sparql.errors import ARANGO_ERROR_QUERY_FAIL_CALLED, PATH_DEPTH_EXCEEDED_CODE
 from arango_sparql.translate.paths import PROPERTY_PATH_MAX_DEPTH
 from tests.cross.test_path_depth_cross import (
+    BOUNDED,
     CYCLE,
     DOC,
     EDGE,
@@ -102,6 +106,7 @@ def assert_refused(db: Any, shape: Shape, query: str, max_depth: int | None = No
 #: The live case matrix's limit, and its chains: one hop past it, and at it.
 LIMIT = 4
 PAST, AT = chain(LIMIT + 1), chain(LIMIT)
+LONG_HOPS = PROPERTY_PATH_MAX_DEPTH + 1
 
 
 def whole_chain(hops: int) -> list[str]:
@@ -109,11 +114,18 @@ def whole_chain(hops: int) -> list[str]:
     return [param.values[0].replace(":n11", f":n{hops}") for param in WHOLE_CHAIN]
 
 
-@pytest.mark.parametrize("shape", SHAPES)
+@pytest.mark.parametrize("shape", BOUNDED)
 def test_an_eleven_hop_chain_is_refused_at_the_default_limit(db: Any, shape: Shape) -> None:
     load(db, shape, LONG)
     assert_refused(db, shape, "SELECT ?s ?o WHERE { ?s :next+ ?o }")
     assert_refused(db, shape, "SELECT ?o WHERE { :n0 :next* ?o }")
+
+
+def test_an_edge_collection_of_its_own_answers_the_eleven_hop_chain_at_the_default_limit(db: Any) -> None:
+    load(db, EDGE, LONG)
+    for query in whole_chain(LONG_HOPS):
+        actual = [drop_null_bindings(r) for r in run(db, EDGE, query)]
+        assert_bindings_equal(oracle(LONG, query), actual)
 
 
 def test_every_pair_of_the_eleven_hop_chain(db: Any) -> None:
@@ -128,7 +140,12 @@ def test_every_pair_of_the_eleven_hop_chain(db: Any) -> None:
 def test_whole_chain_cases_refuse_then_answer_under_a_raised_limit(db: Any, shape: Shape) -> None:
     load(db, shape, PAST)
     for query in whole_chain(LIMIT + 1):
-        assert_refused(db, shape, query, max_depth=LIMIT)
+        if shape is not EDGE:
+            assert_refused(db, shape, query, max_depth=LIMIT)
+        else:
+            # Walked by a traversal: the limit does not apply.
+            actual = [drop_null_bindings(r) for r in run(db, shape, query, max_depth=LIMIT)]
+            assert_bindings_equal(oracle(PAST, query), actual)
         actual = [drop_null_bindings(r) for r in run(db, shape, query, max_depth=LIMIT + 1)]
         assert_bindings_equal(oracle(PAST, query), actual)
 
@@ -144,7 +161,10 @@ def test_whole_chain_cases_at_the_limit_answer(db: Any, shape: Shape) -> None:
 @pytest.mark.parametrize("shape", SHAPES)
 def test_ask(db: Any, shape: Shape) -> None:
     load(db, shape, PAST)
-    assert_refused(db, shape, f"ASK {{ :n0 :next+ :n{LIMIT + 1} }}", max_depth=LIMIT)
+    if shape is EDGE:
+        assert run(db, shape, f"ASK {{ :n0 :next+ :n{LIMIT + 1} }}", max_depth=LIMIT) == [True]
+    else:
+        assert_refused(db, shape, f"ASK {{ :n0 :next+ :n{LIMIT + 1} }}", max_depth=LIMIT)
     assert run(db, shape, f"ASK {{ :n0 :next+ :n{LIMIT + 1} }}", max_depth=LIMIT + 1) == [True]
     assert run(db, shape, f"ASK {{ :n{LIMIT + 1} :next+ :n0 }}", max_depth=LIMIT + 1) == [False]
 

@@ -204,10 +204,10 @@ cases:
       SELECT ?s ?other WHERE { ?s ^:knows ?other }
 
   - name: path-reachable-transitive-plus
-    # Transitive MulPath `:knows+` — one-or-more hops. Lowered to a bounded
-    # UNION of fixed-length arms; the default property_path_max_depth (10)
-    # applies (a longer path is refused at run time, #183), so no knob
-    # override is needed in the gold.
+    # Transitive MulPath `:knows+` — one-or-more hops. One traversal when
+    # `:knows` is an edge collection of its own; otherwise a bounded UNION of
+    # fixed-length arms under the default property_path_max_depth (10), a
+    # longer path refused at run time (#183). No knob override in the gold.
     nl: "Find everyone reachable from each person through one or more acquaintance links."
     expected: |
       PREFIX : <http://ex.org/>

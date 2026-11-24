@@ -39,6 +39,18 @@ _FOR_RE = re.compile(r"FOR\s+(\w+)\s+IN\s+@@(\w+)")
 # vertex (``v2``) and the edge (``e3``). DEDICATED_COLLECTION emits this
 # bare; GENERIC_WITH_TYPE follows it with a ``FILTER e3.<field> == @x``.
 _FOR_TRAVERSAL_RE = re.compile(r"FOR\s+(\w+)\s*,\s*(\w+)\s+IN\s+(OUTBOUND|INBOUND|ANY)\s+(\w+)\s+@@(\w+)")
+# The breadth-first walk that answers ``:p+`` / ``:p*`` over an edge
+# collection (``builder.for_reachable``): ``FOR v3, e4 IN 1..@_p1_depth
+# OUTBOUND doc2 @@c4_next [PRUNE <expr>] OPTIONS { order: @_p3_order,
+# uniqueVertices: @_p4_unique }``. Only ``bfs`` with ``global`` uniqueness is
+# emitted, and only that is run (``_reachable``).
+_FOR_REACHABLE_RE = re.compile(
+    r"FOR\s+(\w+)\s*,\s*(\w+)\s+IN\s+(\d+)\.\.@(_\w+)\s+(OUTBOUND|INBOUND|ANY)\s+(\w+)\s+@@(\w+)"
+    r"(?:\s+PRUNE\s+(.+?))?\s+OPTIONS\s+\{\s*order:\s*@(_\w+),\s*uniqueVertices:\s*@(_\w+)\s*\}\s*$"
+)
+# ``LENGTH(@@coll)``: the number of documents in a collection (the edge count
+# the traversal's depth bound is checked against).
+_COLLECTION_LENGTH_RE = re.compile(r"LENGTH\(@@(\w+)\)")
 _FILTER_RE = re.compile(r"FILTER\s+(.+)$")
 _LET_RE = re.compile(r"LET\s+(\w+)\s*=\s*(.+)$")
 _RETURN_RE = re.compile(r"RETURN(?:\s+(DISTINCT))?\s+\{\s*(.+?)\s*\}\s*$")
@@ -335,6 +347,9 @@ _AQL_BUILTINS: dict[str, Any] = {
     ),
     # The tenant test of a walked document (issue #118).
     "FIRST": lambda v: v[0] if isinstance(v, list) and v else None,
+    "APPEND": lambda a, b: [*(a or []), *(b if isinstance(b, list) else [] if b is None else [b])],
+    # ``list[*].attr`` (array expansion), rewritten by ``_eval_expr``.
+    "_expand": lambda values, attr: [v.get(attr) if isinstance(v, dict) else None for v in values or []],
     "SPLIT": lambda v, sep: None if v is None else str(v).split(sep),
     "TO_ARRAY": lambda v: [] if v is None else (v if isinstance(v, list) else [v]),
     "INTERSECTION": lambda a, b: [x for x in (a or []) if x in (b or [])],
@@ -669,6 +684,35 @@ def _replace_inline_scalar_subqueries(
     return rewritten, values
 
 
+def _replace_negated_ternaries(
+    expr: str,
+    env: dict[str, dict[str, Any]],
+    bind_vars: dict[str, Any],
+    let_env: dict[str, Any] | None,
+) -> tuple[str, dict[str, Any]]:
+    """Replace each ``!(<cond> ? <yes> : <no>)`` with a token for its value.
+
+    The regex ternary rewrite in :func:`_eval_expr` takes the first ``(`` as
+    the ternary's own, which here is the negation's: the PRUNE of an edge
+    closure walk (``e != null && !(<tenant test>)``, ``paths.
+    _emit_edge_closure_arm``) negates the tenant test's ternary. Evaluated
+    on its own, the group is a top-level ternary, which is split exactly.
+    """
+    values: dict[str, Any] = {}
+    search_from = 0
+    while (start := expr.find("!(", search_from)) >= 0:
+        end = _matching_delimiter(expr, start + 1, "(", ")")
+        inner = expr[start + 2 : end]
+        if _split_top_level_ternary(inner) is None:
+            search_from = start + 2
+            continue
+        token = f"_negated_{len(values)}"
+        values[token] = not _eval_expr(inner, env, bind_vars, let_env)
+        expr = f"{expr[:start]}{token}{expr[end + 1 :]}"
+        search_from = start + len(token)
+    return expr, values
+
+
 def _eval_expr(
     expr: str,
     env: dict[str, dict[str, Any]],
@@ -710,6 +754,8 @@ def _eval_expr(
         let_env,
     )
     scoped_let = {**(let_env or {}), **scalar_values}
+    expr, negated = _replace_negated_ternaries(expr, env, bind_vars, scoped_let)
+    scoped_let.update(negated)
     if ternary := _split_top_level_ternary(expr):
         condition, when_true, when_false = ternary
         branch = when_true if _eval_expr(condition, env, bind_vars, scoped_let) else when_false
@@ -739,6 +785,7 @@ def _eval_expr(
             for attr, attr_value in value.items():
                 namespace.setdefault(f"{alias}__{attr}", attr_value)
     py = _TERNARY_RE.sub(r"((\2) if (\1) else \3)", expr)
+    py = re.sub(r"\b([A-Za-z_]\w*)\[\*\]\.(\w+)", r"_expand(\1, '\2')", py)
     py = _QUOTED_ATTR_RE.sub(lambda m: f"_aql_attr({m.group(1)}, {m.group(2)!r})", py)
     py = _DOC_ATTR_RE.sub(_bare_attr, py)
     py = _BIND_RE.sub(lambda m: m.group(1), py)
@@ -909,6 +956,9 @@ def run_aql_subset(
     outer environment in scope; ``_outer_env`` / ``_outer_let`` carry
     that scope into the recursive call and are private to it.
     """
+    # A collection's document count is a constant of the store: substituted
+    # before parsing, so expressions never see an ``@@`` placeholder.
+    aql = _COLLECTION_LENGTH_RE.sub(lambda m: str(len(docs.get(bind_vars[f"@{m.group(1)}"], []))), aql)
     # Strip each line so a nested (indented) probe subquery re-parses
     # cleanly — the line-anchored regexes below expect no leading space.
     lines = [line.strip() for line in aql.splitlines() if line.strip()]
@@ -1011,6 +1061,21 @@ def run_aql_subset(
                 raise AssertionError(f"FOR after COLLECT not supported: {line!r}")
             union_arms, i = _read_union_arms(lines, i)
             pre_collect_plan.append(("FOR_UNION", m.group(1), (union_arms, m.group(2) == "UNION_DISTINCT")))
+        elif m := _FOR_REACHABLE_RE.match(line):
+            if seen_collect:  # pragma: no cover
+                raise AssertionError(f"FOR after COLLECT not supported: {line!r}")
+            v_alias, e_alias, min_depth, max_var, direction, start_alias, edge_var, prune, order, unique = (
+                m.groups()
+            )
+            if (bind_vars[order], bind_vars[unique]) != ("bfs", "global"):  # pragma: no cover
+                raise AssertionError(f"only a bfs walk with global vertex uniqueness is run: {line!r}")
+            pre_collect_plan.append(
+                (
+                    "REACHABLE",
+                    (v_alias, e_alias, start_alias, direction, int(min_depth), bind_vars[max_var], prune),
+                    bind_vars[f"@{edge_var}"],
+                )
+            )
         elif m := _FOR_TRAVERSAL_RE.match(line):
             if seen_collect:  # pragma: no cover
                 raise AssertionError(f"FOR after COLLECT not supported: {line!r}")
@@ -1152,6 +1217,18 @@ def run_aql_subset(
                     if target is None:  # dangling edge — no endpoint to bind
                         continue
                     run_plan(idx + 1, {**env, v_alias: target, e_alias: edge}, let_env)
+        elif kind == "REACHABLE":
+            v_alias, e_alias, start_alias, direction, min_depth, max_depth, prune = a
+            for target, edge in _reachable(
+                env,
+                let_env,
+                (v_alias, e_alias, start_alias),
+                direction,
+                (min_depth, max_depth),
+                prune,
+                docs.get(b, []),
+            ):
+                run_plan(idx + 1, {**env, v_alias: target, e_alias: edge}, let_env)
         elif kind == "FILTER":
             if _eval_filter(a, env, bind_vars, let_env):
                 run_plan(idx + 1, env, let_env)
@@ -1172,6 +1249,60 @@ def run_aql_subset(
         else:  # LET
             assert b is not None
             run_plan(idx + 1, env, {**let_env, b: _eval_expr(a, env, bind_vars, let_env)})
+
+    def _reachable(
+        env: dict[str, Any],
+        let_env: dict[str, Any],
+        aliases: tuple[str, str, str],
+        direction: str,
+        depths: tuple[int, int],
+        prune: str | None,
+        edges: list[dict[str, Any]],
+    ) -> list[tuple[dict[str, Any], dict[str, Any] | None]]:
+        """``(vertex, edge)`` per vertex a breadth-first walk reaches, as
+        ArangoDB runs ``OPTIONS { order: "bfs", uniqueVertices: "global" }``:
+        each vertex once, the start counted as visited from the outset, at
+        depths ``min_depth..max_depth``. ``PRUNE`` sees every vertex reached,
+        the start too (with a null edge), and stops the walk past one it
+        holds for; the vertex itself is still produced."""
+        v_alias, e_alias, start_alias = aliases
+        min_depth, max_depth = depths
+        # A FOR document, or one a LET read (a symmetric step's far end).
+        start = env.get(start_alias, let_env.get(start_alias))
+        if not isinstance(start, dict) or "_id" not in start:  # pragma: no cover - start is a document
+            return []
+        ends = {"OUTBOUND": (("_from", "_to"),), "INBOUND": (("_to", "_from"),)}.get(
+            direction, (("_from", "_to"), ("_to", "_from"))
+        )
+
+        def pruned(vertex: dict[str, Any], edge: dict[str, Any] | None) -> bool:
+            scope = {**env, e_alias: edge, v_alias: vertex}
+            return prune is not None and _eval_filter(prune, scope, bind_vars, let_env)
+
+        out: list[tuple[dict[str, Any], dict[str, Any] | None]] = []
+        visited = {start["_id"]}
+        if min_depth == 0:
+            out.append((start, None))
+        frontier = [] if pruned(start, None) else [start]
+        depth = 0
+        while frontier and depth < max_depth:
+            depth += 1
+            following: list[dict[str, Any]] = []
+            for vertex in frontier:
+                for edge in edges:
+                    for near, far in ends:
+                        if edge.get(near) != vertex["_id"]:
+                            continue
+                        target = id_index.get(edge.get(far))
+                        if target is None or target["_id"] in visited:
+                            continue
+                        visited.add(target["_id"])
+                        if depth >= min_depth:
+                            out.append((target, edge))
+                        if not pruned(target, edge):
+                            following.append(target)
+            frontier = following
+        return out
 
     # ``DOCUMENT(id)`` reads the document a handle names, in any collection
     # (a symmetric step's far end: ``DOCUMENT(e._from == s._id ? e._to :
