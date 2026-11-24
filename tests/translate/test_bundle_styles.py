@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 
 from arango_sparql.api import translate
+from arango_sparql.errors import SchemaResolutionError
 from arango_sparql.translate.mapping import MappingBundle, MappingSource
 from arango_sparql.translate.resolver import SchemaResolver
 from tests.helpers.aql_interp import run_aql_subset
@@ -87,6 +88,63 @@ def test_a_bundle_without_owl_reads_the_style_as_its_owl_mapping_does(cls: str, 
     from_bundle = _rows(SchemaResolver.from_mapping_bundle(bundle), cls)
     assert from_bundle == expected
     assert from_bundle == _rows(SchemaResolver.from_turtle(_OWL), cls)
+
+
+def test_a_bundle_relationship_with_an_unknown_style_is_refused() -> None:
+    """#89: the bundle path reads an unknown relationship style the way the OWL
+    path does — refused, not read as a dedicated edge collection whose other
+    relationships' edges come back under this one."""
+    bundle = MappingBundle(
+        conceptual_schema=_CONCEPTUAL,
+        physical_mapping={
+            **_PHYSICAL,
+            "relationships": {
+                "replyOf": {
+                    "style": "GENERIC_WITH_TYP",
+                    "edgeCollectionName": "edges",
+                    "typeField": "relation",
+                    "typeValue": "replyOf",
+                }
+            },
+        },
+        source=MappingSource(kind="manual"),
+    )
+    with pytest.raises(SchemaResolutionError, match="GENERIC_WITH_TYP"):
+        translate(
+            f"SELECT ?a ?b WHERE {{ ?a <{_C}replyOf> ?b }}",
+            resolver=SchemaResolver.from_mapping_bundle(bundle),
+        )
+
+
+def test_a_variable_predicate_still_answers_beside_an_edgeless_relationship_style() -> None:
+    """#220 review: the unknown-style refusal applies only to an edge-backed
+    property. A FOREIGN_KEY relationship has no edge collection, so ``?s ?p
+    ?o`` leaves it out and must still answer, not be refused over it."""
+    bundle = MappingBundle(
+        conceptual_schema=_CONCEPTUAL,
+        physical_mapping={
+            **_PHYSICAL,
+            "relationships": {
+                "replyOf": {
+                    "style": "FOREIGN_KEY",
+                    "fromCollection": "Comment",
+                    "toCollection": "Post",
+                    "fromFields": ["post_id"],
+                    "toKeyFields": ["_key"],
+                    "fromEntity": "Comment",
+                    "toEntity": "Post",
+                }
+            },
+        },
+        source=MappingSource(kind="manual"),
+    )
+    result = translate(
+        f"SELECT ?s ?p ?o WHERE {{ ?s a <{_C}Comment> ; ?p ?o }}",
+        resolver=SchemaResolver.from_mapping_bundle(bundle),
+    )
+    docs = {**_DOCS, "Comment": [{"_id": "Comment/c1", "_uri": "http://ex.org/c1", "post_id": "p1"}]}
+    rows = run_aql_subset(result.aql, result.bind_vars, docs)
+    assert ("http://ex.org/c1", "p1") in {(r["s"], r["o"]) for r in rows}
 
 
 def test_a_bundle_reads_endpoints_and_properties_from_its_conceptual_schema() -> None:

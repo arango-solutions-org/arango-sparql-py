@@ -59,6 +59,20 @@ def test_an_unknown_class_style_is_refused_not_read_as_a_collection() -> None:
         _aql(ttl, "SELECT ?d WHERE { ?d a :Doc }")
 
 
+@pytest.mark.parametrize("style", ["GENERIC_WITH_TYP", "TYPED_EDGE"])
+def test_an_unknown_relationship_style_is_refused_not_read_as_a_dedicated_collection(style: str) -> None:
+    # Before (#89): read as DEDICATED_COLLECTION, so the type test was dropped.
+    ttl = (
+        _PREFIXES
+        + ':Post a owl:Class ; phys:collectionName "Post" .\n'
+        + ':Comment a owl:Class ; phys:collectionName "Comment" .\n'
+        + f':replyOf a owl:ObjectProperty ; phys:mappingStyle "{style}" ; phys:edgeCollectionName "edges" ; '
+        'phys:typeField "relation" ; phys:typeValue "replyOf" ; rdfs:domain :Post ; rdfs:range :Comment .'
+    )
+    with pytest.raises(SchemaResolutionError, match=f"replyOf.*{style}"):
+        _aql(ttl, "SELECT ?a ?b WHERE { ?a :replyOf ?b }")
+
+
 @pytest.mark.parametrize("style", ["LABELS", "MULTI_LABEL"])
 def test_a_label_array_class_tests_its_label(style: str) -> None:
     # Before: no label test, so every document of `nodes` was a :Node.
