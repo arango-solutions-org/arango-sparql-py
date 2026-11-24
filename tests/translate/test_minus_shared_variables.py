@@ -20,7 +20,6 @@ from __future__ import annotations
 import pytest
 
 from arango_sparql.api import translate
-from arango_sparql.errors import UnsupportedSparqlError
 from arango_sparql.translate.resolver import SchemaResolver
 
 _PREFIX = "PREFIX : <http://ex.org/> "
@@ -92,7 +91,34 @@ def test_an_aggregate_column_is_joined_with_the_outer_variable() -> None:
 
 def test_a_bind_target_is_shared() -> None:
     """``BIND(:a AS ?s)`` binds ``?s`` in the right side; it was not counted,
-    the MINUS was a no-op and kept ``:a``. The probe cannot yet compare a
-    BIND with an outer value, so it is refused rather than answered wrongly."""
-    with pytest.raises(UnsupportedSparqlError, match=r"BIND target \?s is already bound"):
-        _aql("SELECT ?s WHERE { ?s :name ?n MINUS { BIND(:a AS ?s) } }")
+    the MINUS was a no-op and kept ``:a``. No shared variable is bound in
+    every solution of a BIND, so the body is evaluated apart and the probe
+    joins its ``?s`` with the outer one."""
+    aql = _aql("SELECT ?s WHERE { ?s :name ?n MINUS { BIND(:a AS ?s) } }")
+    assert "minus_probe" in aql
+    assert "!= null && NOT_NULL(doc1._uri, doc1._id) != null" in aql
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        pytest.param(
+            "SELECT ?s WHERE { ?s :name ?n MINUS { VALUES ?s { UNDEF :b } } }", id="values_undef_row"
+        ),
+        pytest.param(
+            "SELECT ?s ?a WHERE { ?s :age ?a MINUS { SELECT (MIN(?x) AS ?a) WHERE { ?t :age ?x } } }",
+            id="aggregate_column",
+        ),
+        pytest.param(
+            "SELECT ?s WHERE { ?s :name ?n MINUS { { ?s :likes ?y } UNION { ?t :knows ?k } } }",
+            id="union_arm",
+        ),
+    ],
+)
+def test_a_solution_binding_no_shared_variable_removes_nothing(query: str) -> None:
+    """No shared variable is bound in every right-side solution: the probe
+    requires one bound on both sides, per solution (§8.3.4; review of #227,
+    where such a solution removed every row)."""
+    aql = _aql(query)
+    probe = aql[aql.index("minus_probe") :]
+    assert "!= null && " in probe

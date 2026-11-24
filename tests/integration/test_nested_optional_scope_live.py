@@ -294,6 +294,36 @@ def _multiset(rows: list[dict[str, Any]]) -> list[str]:
             "MINUS { SELECT ?s ?x WHERE { VALUES (?s ?x) { (:a :b) (:d UNDEF) (:g :c) } } } }",
             id="minus_subselect_values",
         ),
+        # A right-side solution that leaves every shared variable unbound
+        # shares nothing with the row and removes nothing (§8.3.4). Joined
+        # with the outer values, such a solution matched every row: the
+        # branch of #227 removed them all (its review). The body is now
+        # evaluated apart and the overlap tested per solution.
+        pytest.param(
+            "SELECT ?s ?n WHERE { ?s :name ?n MINUS { VALUES ?s { UNDEF :b } } }",
+            id="minus_values_all_undef_row",
+        ),
+        pytest.param(
+            "SELECT ?s ?n WHERE { ?s :name ?n MINUS { VALUES (?s ?n) { (UNDEF UNDEF) (:a UNDEF) } } }",
+            id="minus_values_all_undef_pair",
+        ),
+        pytest.param(
+            "SELECT ?s ?a WHERE { ?s :age ?a MINUS { SELECT (MIN(?x) AS ?a) WHERE { ?t :age ?x FILTER(?x > 100) } } }",
+            id="minus_aggregate_over_no_rows",
+        ),
+        pytest.param(
+            "SELECT ?s ?n WHERE { ?s :name ?n MINUS { { ?s :likes ?y } UNION { ?t :knows ?k } } }",
+            id="minus_union_arm_binds_nothing_shared",
+        ),
+        pytest.param(
+            "SELECT ?s ?n WHERE { ?s :name ?n MINUS { SELECT ?s WHERE { ?t :knows ?k OPTIONAL { ?t :likes ?s } } } }",
+            id="minus_subselect_optional_only_column",
+        ),
+        pytest.param(
+            "SELECT ?s ?e WHERE { ?s :name ?n OPTIONAL { ?s :email ?e } "
+            "MINUS { ?x :name ?nn OPTIONAL { ?x :email ?e } } }",
+            id="minus_optional_only_shared",
+        ),
         # ?x is read by the right side's FILTER, never bound by it: it is
         # outside every right-side solution, the sides share nothing, and
         # MINUS removes nothing (#209, its first shape).

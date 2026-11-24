@@ -56,6 +56,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from ..errors import UnsupportedSparqlError
 from .builder import indent_aql
 from .optional_subquery import bound_variables, certain_variables
 
@@ -79,7 +80,7 @@ def emit_minus(visitor: AlgebraVisitor, node: Any) -> None:
        that's the *shared-variable set* the SPARQL spec uses to
        define compatibility. A variable ``p2`` only reads, in a FILTER
        or in a sub-select it does not project, is outside every inner
-       solution's domain, so it shares nothing (#216); a variable bound
+       solution's domain, so it shares nothing (#209); a variable bound
        only by a VALUES block shares as any other.
     3. **If the shared set is empty: do nothing.** SPARQL §8.3.4
        defines MINUS over disjoint domains as a no-op (every outer
@@ -130,13 +131,38 @@ def emit_minus(visitor: AlgebraVisitor, node: Any) -> None:
     certain = certain_variables(node.p2)
     anchors = (shared_names & certain) - visitor.state.maybe_unbound
     free_outer = open_outer if open_outer and (anchors or shared_names <= certain) else None
-    inner_aql = _translate_probe(
-        visitor,
-        node.p2,
-        allow_optional_rebind=True,
-        overlap_var_names=shared_names,
-        free_outer=free_outer,
-    )
+    # No shared variable is bound in every solution of the body (a VALUES
+    # UNDEF, an aggregate over no rows, a UNION arm, an OPTIONAL): a solution
+    # can leave every one unbound, and it then shares nothing with the row.
+    # Joining the outer values in made such a solution a wildcard that
+    # removed every row (review of #227). The body is evaluated on its own
+    # for those variables and §8.3.4 applied per solution in the probe.
+    # An OPTIONAL that re-binds every shared variable is the exception: the
+    # conditional-add sink already tests the overlap per solution (ADR-0002
+    # Problem 2, W3C ``negation/full-minuend``) and joins on the outer
+    # values, so that pass is kept when it covers them.
+    inner_aql = None
+    if not (shared_names & certain):
+        try:
+            inner_aql = _translate_probe(
+                visitor, node.p2, allow_optional_rebind=True, overlap_var_names=shared_names, sink_only=True
+            )
+        except (_SinkDoesNotCover, UnsupportedSparqlError):
+            inner_aql = _translate_probe(
+                visitor,
+                node.p2,
+                allow_optional_rebind=True,
+                overlap_var_names=shared_names,
+                apart=shared_names,
+            )
+    if inner_aql is None:
+        inner_aql = _translate_probe(
+            visitor,
+            node.p2,
+            allow_optional_rebind=True,
+            overlap_var_names=shared_names,
+            free_outer=free_outer,
+        )
 
     probe_alias = visitor.builder.fresh_alias(prefix="minus_probe")
     visitor.builder.let(probe_alias, f"LENGTH((\n{indent_aql(inner_aql)}\n))")
@@ -191,6 +217,10 @@ def emit_exists_filter(
 # ---------------------------------------------------------------------------
 
 
+class _SinkDoesNotCover(Exception):
+    """A ``sink_only`` probe whose OPTIONALs do not re-bind every shared variable."""
+
+
 def _translate_probe(
     visitor: AlgebraVisitor,
     inner_pattern: Any,
@@ -199,6 +229,8 @@ def _translate_probe(
     overlap_var_names: set[str] | None = None,
     substitute: bool = False,
     free_outer: set[str] | None = None,
+    apart: set[str] | None = None,
+    sink_only: bool = False,
 ) -> str:
     """Spawn a child visitor for *inner_pattern*, emit a row-count
     probe (``LIMIT 1`` + ``RETURN 1``), absorb its binds, and
@@ -221,6 +253,14 @@ def _translate_probe(
     var is bound on both sides and equal"). If any shared var is bound by
     a required triple, the child already FILTERs equality on it, so
     overlap is guaranteed and no extra guard is emitted.
+
+    ``apart`` (MINUS only) names shared variables the body is evaluated
+    without: not seeded from the outer row, so the body binds its own value
+    for each (null where a solution leaves it unbound), and the probe then
+    applies §8.3.4 per inner solution — every one compatible, and at least
+    one bound on both sides (see ``emit_minus``). ``sink_only`` raises
+    :class:`_SinkDoesNotCover` unless the conditional-add sink binds every
+    shared variable; the probe is then discarded.
 
     Shared with both ``emit_minus`` and ``emit_exists_filter`` —
     the only behavioural difference between those two is the
@@ -282,6 +322,9 @@ def _translate_probe(
     # FILTER EXISTS { ?s :q ?v } }`` passed on ``:q`` in the default graph
     # (#195). ``_spawn_child`` (UNION, OPTIONAL subquery) carries it too.
     child_visitor.state.graph_scope = list(visitor.state.graph_scope)
+    for name in apart or ():
+        child_visitor.state.var_to_expr.pop(name, None)
+        child_visitor.state.var_to_rpt_class.pop(name, None)
     if substitute:
         # EXISTS substitutes the outer row into its pattern (§18.6): those
         # variables are constants throughout it, inside an OPTIONAL body too,
@@ -311,16 +354,35 @@ def _translate_probe(
     # outer scope's ``_path_<n>`` / ``_bn_…``, and a class under another
     # tenant root is refused in the probe as outside it (#211).
     visitor.state.share_query_state(child_visitor.state)
-    if allow_optional_rebind:
+    if allow_optional_rebind and not apart:
         # Switch the child out of "reject re-bind" mode (ADR-0002
         # Problem 2) into conditional-add mode; visit_LeftJoin appends
-        # one entry per re-binding optional triple.
+        # one entry per re-binding optional triple. Not for a body evaluated
+        # apart: its OPTIONALs re-bind nothing, and conditional-add mode
+        # forces the inline emitter, which read a triples-table OPTIONAL as
+        # a document attribute (review of #227).
         child_visitor.state.optional_rebind_sink = []
 
     child_visitor.visit(inner_pattern)
 
     sink = child_visitor.state.optional_rebind_sink or []
-    if overlap_var_names is not None and free_outer is not None:
+    if apart:
+        # §8.3.4 per inner solution: each shared variable compatible (unbound
+        # on either side, or equal), and some shared variable bound on both.
+        pairs = [
+            (child_visitor.state.var_to_expr[name], visitor.state.var_to_expr[name])
+            for name in sorted(apart)
+            if name in child_visitor.state.var_to_expr
+        ]
+        for inner, outer in pairs:
+            child_builder.filter_raw(f"({inner} == null || {outer} == null || {inner} == {outer})")
+        both = [f"({inner} != null && {outer} != null)" for inner, outer in pairs]
+        child_builder.filter_raw(
+            "false" if not both else both[0] if len(both) == 1 else "(" + " || ".join(both) + ")"
+        )
+    elif sink_only and (overlap_var_names is None or not sink or overlap_var_names - {v for v, _, _ in sink}):
+        raise _SinkDoesNotCover
+    elif overlap_var_names is not None and free_outer is not None:
         # The body binds every shared variable in every solution, so the
         # domains overlap exactly where the outer row binds one of them. A
         # shared variable the outer row certainly binds makes that always.
