@@ -347,6 +347,11 @@ class AqlQueryBuilder:
     _bind_vars: dict[str, Any] = field(default_factory=dict)
     _body_clauses: list[_Clause] = field(default_factory=list)
     """FOR / FILTER / LET / RAW clauses, in the order the visitor adds them."""
+    _root_lets: list[_Clause] = field(default_factory=list)
+    """LETs for the top of the whole query (:meth:`let_root`): a child's are
+    passed up by :meth:`absorb_child`, and the root builder renders them."""
+    _is_child: bool = False
+    """Spawned by :meth:`create_child`; its root LETs wait for absorption."""
     _scanned_aliases: list[str] = field(default_factory=list)
     """Aliases bound by a collection scan in *this* builder's body
     (:meth:`for_` / :meth:`for_sharded`); see :meth:`scanned_aliases`."""
@@ -837,6 +842,7 @@ class AqlQueryBuilder:
           child.
         """
         child = AqlQueryBuilder()
+        child._is_child = True
         child._bind_counter = self._bind_counter
         child._alias_counter = self._alias_counter
         child._coll_counter = self._coll_counter
@@ -857,6 +863,10 @@ class AqlQueryBuilder:
         with no warning), which is worth catching loudly.
         """
         inner_aql, child_binds = child.finalize()
+        # Root LETs travel with the child's binds: a child that is discarded
+        # (a UNION arm's first pass, a probe tried and dropped) is never
+        # absorbed, so neither its binds nor its root LETs reach the query.
+        self._root_lets.extend(child._root_lets)
         for name, value in child_binds.items():
             existing = self._bind_vars.get(name, _MISSING)
             if existing is _MISSING:
@@ -1004,6 +1014,22 @@ class AqlQueryBuilder:
                 f"FOR {row_alias} IN {inline_expr}",
             )
         )
+        return self
+
+    def let_root(self, alias: str, expression: str) -> AqlQueryBuilder:
+        """Emit ``LET <alias> = <expression>`` at the top of the whole query.
+
+        For a value that reads nothing of any enclosing scope: computed once
+        per query even when emitted inside a subquery (an OPTIONAL body, an
+        EXISTS probe, a UNION arm), where :meth:`let_first` would recompute
+        it once per outer row (#234). The LET waits in this builder until
+        :meth:`absorb_child` hands it to the parent; the root renders it
+        first. *expression* may use bind variables minted in this builder
+        or its children, which reach the root the same way.
+        """
+        if not _AQL_IDENT_RE.match(alias):
+            raise ValueError(f"invalid LET alias: {alias!r}")
+        self._root_lets.append(_Clause(_ClauseKind.LET, f"LET {alias} = {expression}"))
         return self
 
     def let_first(self, alias: str, expression: str) -> AqlQueryBuilder:
@@ -1297,6 +1323,8 @@ class AqlQueryBuilder:
             refs = ", ".join(self.bind_collection(name) for name in self._with_collections)
             with_clause = f"WITH {refs}"
         ordered: list[_Clause] = []
+        if not self._is_child:
+            ordered.extend(self._root_lets)
         ordered.extend(self._body_clauses)
         if self._sort_keys:
             ordered.append(_Clause(_ClauseKind.SORT, "SORT " + ", ".join(self._sort_keys)))
