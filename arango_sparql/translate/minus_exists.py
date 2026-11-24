@@ -230,11 +230,14 @@ def _emit_apart_probe(visitor: AlgebraVisitor, pattern: Any, shared: set[str]) -
     An outer row is removed when some solution is compatible with it on
     every shared variable (unbound on either side, or equal) and binds one
     the row binds too. A body that reads nothing of the outer scope (the
-    usual case) is computed once per evaluation of its scope, before that
-    scope's loops (once per query at the top level; once per outer row
-    inside an EXISTS, OPTIONAL subquery or UNION arm, #234); evaluated per
-    row it took 14 s on 12,000 PG documents where main took 0.02 s (review
-    of #227).
+    usual case) is computed once per query, in a LET at the top of the
+    whole query (:meth:`AqlQueryBuilder.let_root`), even when the MINUS is
+    inside an OPTIONAL subquery, a UNION arm or a sub-select (#234: at the
+    top of that scope it was rebuilt per outer row, 5.9 s against 0.6 s).
+    A MINUS directly inside EXISTS reads the outer row (EXISTS binds its
+    variables on both sides) and stays per row;
+    evaluated per row it took 14 s on 12,000 PG documents where main took
+    0.02 s (review of #227).
     """
     from .visitor import AlgebraVisitor
 
@@ -288,7 +291,7 @@ def _emit_apart_probe(visitor: AlgebraVisitor, pattern: Any, shared: set[str]) -
         (name,) = names
         values = visitor.builder.fresh_alias(prefix="minus_values")
         row = visitor.builder.fresh_alias(prefix="row")
-        visitor.builder.let_first(
+        visitor.builder.let_root(
             values,
             f"NOOPT(SORTED_UNIQUE((\n  FOR {row} IN (\n{indent_aql(indent_aql(rows_aql))}\n  )\n"
             f"  FILTER {attribute_ref(row, name)} != null\n"
@@ -298,7 +301,7 @@ def _emit_apart_probe(visitor: AlgebraVisitor, pattern: Any, shared: set[str]) -
         return
     if independent:
         rows = visitor.builder.fresh_alias(prefix="minus_rows")
-        visitor.builder.let_first(rows, f"(\n{indent_aql(rows_aql)}\n)")
+        visitor.builder.let_root(rows, f"(\n{indent_aql(rows_aql)}\n)")
         source = rows
     else:
         source = f"(\n{indent_aql(rows_aql)}\n)"

@@ -401,6 +401,24 @@ def _multiset(rows: list[dict[str, Any]]) -> list[str]:
             "SELECT ?s ?x WHERE { ?s a :Person OPTIONAL { ?s :email ?x } ?s :name ?x }",
             id="optional_value_own_attribute",
         ),
+        # A MINUS evaluated apart inside an OPTIONAL, a UNION arm or an ASK
+        # is computed once at the top of the query (#234); its answers are
+        # unchanged.
+        pytest.param(
+            "SELECT ?s ?k WHERE { ?s :name ?n OPTIONAL { ?s :knows ?k "
+            "MINUS { { ?k :email ?m } UNION { VALUES ?q { 1 } } } } }",
+            id="hoisted_minus_in_optional",
+        ),
+        pytest.param(
+            "SELECT ?s WHERE { { ?s :name ?n MINUS { { ?s :likes ?y } UNION { BIND(1 AS ?q) } } } "
+            "UNION { ?s :knows ?k } }",
+            id="hoisted_minus_in_union_arm",
+        ),
+        pytest.param(
+            "SELECT ?s ?c WHERE { ?s :name ?n { SELECT ?s (COUNT(?k) AS ?c) WHERE { ?s :knows ?k "
+            "MINUS { VALUES ?k { UNDEF :c } } } GROUP BY ?s } }",
+            id="hoisted_minus_in_grouped_subselect",
+        ),
         # ?x is read by the right side's FILTER, never bound by it: it is
         # outside every right-side solution, the sides share nothing, and
         # MINUS removes nothing (#209, its first shape).
