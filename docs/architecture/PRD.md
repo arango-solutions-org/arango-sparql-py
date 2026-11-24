@@ -1374,8 +1374,14 @@ one indexable `FILTER doc.<tenantField> == @tenant_id`. Otherwise:
   committed one is recorded, and committing another root afterwards is
   refused (`_TenantCommitment.admitted`). A query that never commits a root
   (every class it names has no `phys:tenantEntity`) sees, on that field,
-  the documents of every root carrying its tenant id, as on `main`: a
-  tenant id is then not placed under any root. Otherwise "the query's root" is the root committed when
+  the documents of the root carrying its tenant id, as on `main`: a
+  tenant id is then not placed under any root. A property whose domain is
+  under a root (`:x :pn ?z` with `rdfs:domain :Project`) read on an already
+  bound subject does not commit that root. Documents of two roots admitted
+  by one query are refused. Because a UNION translates its arms twice
+  (once to collect their variables), an arm order that admits a root
+  before another arm commits a different one is refused, while the
+  opposite order answers. Otherwise "the query's root" is the root committed when
   the copies are read: on a mapping with several roots, a copy read
   translated before the query names a class under a root is refused, since
   the tenant id cannot yet be placed under a root (hiding those copies

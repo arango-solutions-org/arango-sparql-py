@@ -291,3 +291,21 @@ def test_a_root_committed_after_a_copy_read_admitted_another_is_refused() -> Non
         ttl,
         "SELECT ?n ?k ?pn WHERE { { ?p a :Project ; :pn ?pn } UNION { :x a :Agent ; :name ?n ; :nick ?k } }",
     )
+
+
+def test_a_copy_read_admitting_two_roots_is_refused() -> None:
+    """Secret (Region) and Vault (Bank) are stored with Person on ``org``:
+    a copy read that admits both by the tenant id alone would return two
+    tenants' documents even if the query commits no root (fifth recheck of
+    #228; main returned both)."""
+    ttl = (
+        _label("Person", '; phys:tenantField "org" ').replace(" .\n", " ; rdfs:subClassOf :Agent .\n")
+        + _label("Secret", '; phys:tenantField "org" ; phys:tenantEntity "Region" ')
+        + _label("Vault", '; phys:tenantField "org" ; phys:tenantEntity "Bank" ')
+        + ':Other a owl:Class ; rdfs:subClassOf :Agent ; phys:collectionName "others" ; phys:tenantField "org" .\n'
+        + ':name a owl:DatatypeProperty ; phys:attributeName "name" .\n'
+        + ':nick a owl:DatatypeProperty ; phys:attributeName "nick" .\n'
+        + ':Agent a owl:Class ; phys:mappingStyle "UNION" .\n'
+    )
+    with pytest.raises(CrossTenantJoinError, match="admits documents under tenant roots Bank, Region"):
+        _aql(ttl, "SELECT ?n ?k WHERE { :x a :Agent ; :name ?n ; :nick ?k }")

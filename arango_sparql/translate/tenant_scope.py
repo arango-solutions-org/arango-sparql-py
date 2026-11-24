@@ -89,11 +89,20 @@ def enforce_classes_tenant_scope(
             target.filter_eq(attribute_ref(alias, field), bind)
             # An undecided class's documents pass on the tenant id alone; a
             # root committed later must be theirs (``_TenantCommitment``).
-            visitor.state.tenant.admitted |= {
+            admitted = visitor.state.tenant.admitted | {
                 cls.tenant_entity
                 for cls, placeholder in zip(listed, placeholders, strict=True)
                 if placeholder == _UNDECIDED and cls.tenant_entity
             }
+            if len(admitted) > 1:
+                # One tenant id under two roots is two tenants: refused even
+                # if the query never commits a root (fifth recheck of #228).
+                raise CrossTenantJoinError(
+                    f"a read of the copies of an IRI admits documents under tenant roots "
+                    f"{', '.join(sorted(admitted))} by their tenant id alone; one tenant cannot scope "
+                    f"both (PRD §6.5.1)"
+                )
+            visitor.state.tenant.admitted = admitted
         return
     undecided = [cls for cls, bind in zip(listed, placeholders, strict=True) if bind == _UNDECIDED]
     if undecided:
