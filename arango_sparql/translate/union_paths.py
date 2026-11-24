@@ -59,11 +59,13 @@ runs.
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from rdflib.paths import AlternativePath
 
-from .builder import attribute_ref
+from ..errors import AqlEmitError
+from .builder import attribute_ref, indent_aql
 
 if TYPE_CHECKING:
     from .visitor import AlgebraVisitor
@@ -142,12 +144,35 @@ def _triple_arm_driver(subject: Any, arm: Any, obj: Any) -> Callable[[AlgebraVis
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class DepthGuard:
+    """Refuse a bounded ``:p*`` / ``:p+`` expansion that would answer short.
+
+    The arms of :func:`_emit_union_of_arms` are the path repeated ``0..N`` (or
+    ``1..N``) times; ``beyond`` walks it ``N + 1`` times, projected like the
+    arms. When ``beyond`` yields a row the arms do not, some node is first
+    reached after ``N + 1`` repetitions, so the bounded union is missing pairs,
+    and the query fails with ``FAIL(<message>)`` instead (issue #183; the
+    argument is in :func:`arango_sparql.translate.paths._emit_mul_path`).
+
+    ``only`` emits the check without iterating the arms: the caller emits the
+    path's own arms afterwards, because they are constrained in a way the
+    check must not be (an object the query fixes).
+    """
+
+    beyond: Callable[[AlgebraVisitor], None]
+    message_bind: str
+    only: bool = False
+
+
 def _emit_union_of_arms(
     visitor: AlgebraVisitor,
     arm_drivers: list[Callable[[AlgebraVisitor], None]],
     *,
     distinct: bool = False,
     existence_collapse: bool = False,
+    keep_vars: frozenset[str] = frozenset(),
+    depth_guard: DepthGuard | None = None,
 ) -> None:
     """Two-phase UNION emitter — probe arms for vars, then emit
     each arm with the full union-schema projection and combine.
@@ -162,13 +187,23 @@ def _emit_union_of_arms(
 
     ``distinct`` selects AQL ``UNION_DISTINCT`` (property-path set
     semantics) vs ``UNION`` (SPARQL pattern bag semantics).
+
+    ``keep_vars`` are internal sigils (``_path_<n>`` / ``_bn_…``) that are
+    still projected and bound outside: the end points of a repeated path. A
+    ``:p+`` whose object is a sequence's intermediate (``:p+/:q``) must hand
+    that intermediate to the next step, or the step joins nothing.
+
+    ``depth_guard`` binds the arms with ``LET`` and checks them against one
+    more repetition before iterating them (:class:`DepthGuard`).
     """
-    if len(arm_drivers) < 2:
+    if len(arm_drivers) < (1 if depth_guard is not None else 2):
         # Defensive — AlternativePath always has ≥ 2 arms (otherwise
         # rdflib would have collapsed to the single inner path),
         # Union always has p1 + p2. If a future caller hands us a
         # degenerate single-arm list, fail loudly rather than emit
-        # an AQL ``UNION((x))`` that ArangoDB would reject.
+        # an AQL ``UNION((x))`` that ArangoDB would reject. A guarded
+        # repetition (``:p+`` at depth 1) may have one arm: its LET pairs
+        # it with ``[]``.
         raise ValueError(f"UNION requires at least 2 arms, got {len(arm_drivers)}")
 
     # ---- Phase 1: probe each arm to collect its bound variables -----
@@ -201,7 +236,7 @@ def _emit_union_of_arms(
     # names the user can never reference — strip them from the
     # per-arm RETURN and the outer-scope binding so the AQL only
     # carries user-visible vars.
-    user_vars = [v for v in raw_vars if not v.startswith("_path_") and not v.startswith("_bn_")]
+    user_vars = [v for v in raw_vars if v in keep_vars or not v.startswith(("_path_", "_bn_"))]
 
     if not raw_vars:
         # Arms bind no variables at all — a constant-only existence
@@ -228,7 +263,6 @@ def _emit_union_of_arms(
     all_vars = [*all_vars, *sorted(filled - set(all_vars))]
 
     # ---- Phase 2: emit each arm with full-schema projection ---------
-    arm_aqls: list[str] = []
     # Variables some arm does not bind (it projects ``null``) or binds to a
     # value that can itself be unbound: unbound in some rows of the union.
     unbound_in_some_arm: set[str] = set()
@@ -237,23 +271,28 @@ def _emit_union_of_arms(
     # anything else does not.
     arm_relationships: dict[str, set[str]] = {}
     not_relationship: set[str] = set()
-    for driver in arm_drivers:
+
+    def emit_arm(driver: Callable[[AlgebraVisitor], None], *, track: bool) -> str:
         cv = _spawn_child(visitor)
         driver(cv)
-        for name in all_vars:
-            if name not in cv.state.var_to_expr or name in visitor.state.var_to_expr:
-                continue
-            rels = cv.state.relationship_nodes.get(name)
-            if rels:
-                arm_relationships.setdefault(name, set()).update(rels)
-            else:
-                not_relationship.add(name)
+        if track:
+            for name in all_vars:
+                if name not in cv.state.var_to_expr or name in visitor.state.var_to_expr:
+                    continue
+                rels = cv.state.relationship_nodes.get(name)
+                if rels:
+                    arm_relationships.setdefault(name, set()).update(rels)
+                else:
+                    not_relationship.add(name)
         # An arm that only reads an outer document opens no FOR of its own.
         if not cv.builder.has_for_clause():
             cv.builder.open_one_row_scope_first(cv.builder.fresh_alias(prefix="empty"))
-        unbound_in_some_arm.update(
-            name for name in all_vars if name not in cv.state.var_to_expr or name in cv.state.maybe_unbound
-        )
+        if track:
+            unbound_in_some_arm.update(
+                name
+                for name in all_vars
+                if name not in cv.state.var_to_expr or name in cv.state.maybe_unbound
+            )
         # Build the per-arm RETURN: vars bound in this arm use
         # their expression; vars NOT bound in this arm fall back
         # to ``null`` so every row of UNION carries the same
@@ -269,11 +308,34 @@ def _emit_union_of_arms(
             expr = cv.state.var_to_expr.get(var_name, "null")
             mapping.append((var_name, expr))
         cv.builder.return_object(mapping)
-        arm_aqls.append(visitor.builder.absorb_child(cv.builder))
+        return visitor.builder.absorb_child(cv.builder)
+
+    arm_aqls = [emit_arm(driver, track=True) for driver in arm_drivers]
 
     # ---- Outer-scope FOR + variable binding -------------------------
-    row_alias = visitor.builder.fresh_alias(prefix="row")
-    visitor.builder.for_union(row_alias, arm_aqls, distinct=distinct)
+    if depth_guard is None:
+        row_alias = visitor.builder.fresh_alias(prefix="row")
+        visitor.builder.for_union(row_alias, arm_aqls, distinct=distinct)
+    else:
+        if all_vars == ["_path_hit"]:
+            # The check compares end points; an existence-only row has none,
+            # so it could not tell a new node from a known one.
+            raise AqlEmitError("property-path depth guard needs the end point projected, got none")
+        # The beyond arm is projected like the others but leaves no trace on
+        # the outer scope: it is only compared, never iterated.
+        beyond_aql = emit_arm(depth_guard.beyond, track=False)
+        reach_alias = visitor.builder.fresh_alias(prefix="reach")
+        beyond_alias = visitor.builder.fresh_alias(prefix="beyond")
+        visitor.builder.let_union(reach_alias, arm_aqls, distinct=True)
+        visitor.builder.let(beyond_alias, f"(\n{indent_aql(beyond_aql)}\n)")
+        # ``||`` short-circuits, so FAIL runs only when a node is new.
+        visitor.builder.filter_raw(
+            f"LENGTH(MINUS({beyond_alias}, {reach_alias})) == 0 || FAIL({depth_guard.message_bind})"
+        )
+        if depth_guard.only:
+            return
+        row_alias = visitor.builder.fresh_alias(prefix="row")
+        visitor.builder.for_inline(row_alias, reach_alias)
 
     for var_name in all_vars:
         if var_name == "_path_hit":

@@ -40,6 +40,7 @@ from fastapi.responses import JSONResponse
 
 from .._env import read_arango_password, read_arango_url, read_arango_username
 from .._privacy import tenant_name
+from ..errors import ARANGO_ERROR_QUERY_FAIL_CALLED, PATH_DEPTH_EXCEEDED_CODE
 from . import control_plane
 from .app import _PUBLIC_MODE, _svc_logger, app
 from .platform_auth import (
@@ -632,9 +633,11 @@ def _translate_errors(prefix: str, status_code: int = 500):
     is surfaced as ``400`` with the structured ``{error, code}`` shape the
     SPARQL-error paths use. The ``code`` carries the ArangoDB numeric
     error code (e.g. ``E_AQL_1203`` for "collection or view not found") so
-    the HTTP status and the UI banner agree. Genuine infrastructure
-    failures (connection refused, server 5xx) fall through to
-    ``status_code`` (default 500).
+    the HTTP status and the UI banner agree. A property path the AQL
+    refused for running past ``property_path_max_depth`` (ERR 1569 from
+    its ``FAIL``) carries ``E_SPARQL_PATH_DEPTH`` instead (issue #183).
+    Genuine infrastructure failures (connection refused, server 5xx) fall
+    through to ``status_code`` (default 500).
     """
     try:
         yield
@@ -643,6 +646,10 @@ def _translate_errors(prefix: str, status_code: int = 500):
     except AQLQueryExecuteError as e:
         arango_code = getattr(e, "error_code", None)
         code = f"E_AQL_{arango_code}" if arango_code else "E_AQL_EXECUTION"
+        if arango_code == ARANGO_ERROR_QUERY_FAIL_CALLED and PATH_DEPTH_EXCEEDED_CODE in str(e):
+            # A ``:p*`` / ``:p+`` path longer than the translator's limit: the
+            # AQL refused it with FAIL rather than answer short (issue #183).
+            code = PATH_DEPTH_EXCEEDED_CODE
         raise HTTPException(
             status_code=400,
             detail={

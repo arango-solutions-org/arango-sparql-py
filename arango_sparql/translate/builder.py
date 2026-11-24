@@ -294,12 +294,20 @@ def indent_aql(text: str) -> str:
     return "\n".join("  " + line for line in text.splitlines())
 
 
-def _union_clause(alias: str, arm_aqls: list[str], op: str) -> str:
-    """``FOR <alias> IN <op>((<arm1>), …)``, each arm's lines indented two
-    spaces inside its own ``(`` / ``)`` lines (EXPLAIN-readable, and the
-    layout the cross-test interpreter reads)."""
+def _union_expression(arm_aqls: list[str], op: str) -> str:
+    """``<op>((<arm1>), …)``, each arm's lines indented two spaces inside its
+    own ``(`` / ``)`` lines (EXPLAIN-readable, and the layout the cross-test
+    interpreter reads). AQL's ``UNION`` functions take at least two arrays,
+    so a single arm is paired with ``[]``."""
     arm_blocks = ",\n".join("(\n" + indent_aql(arm) + "\n)" for arm in arm_aqls)
-    return f"FOR {alias} IN {op}(\n{arm_blocks}\n)"
+    if len(arm_aqls) == 1:
+        arm_blocks += ",\n[]"
+    return f"{op}(\n{arm_blocks}\n)"
+
+
+def _union_clause(alias: str, arm_aqls: list[str], op: str) -> str:
+    """``FOR <alias> IN <op>((<arm1>), …)`` (see :func:`_union_expression`)."""
+    return f"FOR {alias} IN {_union_expression(arm_aqls, op)}"
 
 
 class _ClauseKind(Enum):
@@ -922,6 +930,30 @@ class AqlQueryBuilder:
         self._body_clauses.append(_Clause(_ClauseKind.FOR, _union_clause(row_alias, arm_aqls, op)))
         if scans_documents:
             self._scanned_aliases.append(row_alias)
+        return self
+
+    def let_union(self, alias: str, arm_aqls: list[str], *, distinct: bool) -> AqlQueryBuilder:
+        """Emit ``LET <alias> = UNION[|_DISTINCT]((<arm1>), …)``.
+
+        The :meth:`for_union` arms bound to a list instead of iterated, for a
+        caller that reads the rows twice: the property-path depth guard
+        (:mod:`arango_sparql.translate.paths`) compares them with the next
+        repetition's rows before iterating them. One arm is allowed (it is
+        paired with ``[]``, as AQL's ``UNION`` needs two arrays).
+        """
+        if not _AQL_IDENT_RE.match(alias):
+            raise ValueError(f"invalid LET alias: {alias!r}")
+        if not arm_aqls:
+            raise AqlEmitError("let_union requires at least 1 arm")
+        for i, arm in enumerate(arm_aqls):
+            if not arm or not arm.strip():
+                raise AqlEmitError(
+                    f"let_union arm {i} is empty; every UNION arm must be a non-empty AQL block"
+                )
+        op = "UNION_DISTINCT" if distinct else "UNION"
+        self._body_clauses.append(
+            _Clause(_ClauseKind.LET, f"LET {alias} = {_union_expression(arm_aqls, op)}")
+        )
         return self
 
     def has_for_clause(self) -> bool:
