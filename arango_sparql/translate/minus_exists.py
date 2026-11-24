@@ -276,19 +276,23 @@ def _emit_apart_probe(visitor: AlgebraVisitor, pattern: Any, shared: set[str]) -
     if independent and len(names) == 1:
         # One shared variable: a solution overlaps the row exactly when it
         # binds that variable to the row's value, so the probe is a lookup
-        # in its sorted distinct values (ArangoDB's sort-in-values rule makes
-        # the IN a binary search). A scan per row of the hoisted rows took
-        # 28 s on 12,000 rows (third review of #227).
+        # in its sorted distinct non-null values. A row the variable is
+        # unbound in is never in them, so it is kept. ``NOOPT`` keeps the
+        # list a value computed once: without it ArangoDB pushed the
+        # ``NOT IN`` into an edge walk and re-evaluated it per vertex (over
+        # 60 s at 12,000 people), as the VALUES semi-join found
+        # (``subselect._emit_semi_join``). A scan per row of the hoisted rows
+        # took 28 s (third review of #227).
         (name,) = names
         values = visitor.builder.fresh_alias(prefix="minus_values")
         row = visitor.builder.fresh_alias(prefix="row")
         visitor.builder.let_first(
             values,
-            f"SORTED_UNIQUE((\n  FOR {row} IN (\n{indent_aql(indent_aql(rows_aql))}\n  )\n"
-            f"  RETURN {attribute_ref(row, name)}\n))",
+            f"NOOPT(SORTED_UNIQUE((\n  FOR {row} IN (\n{indent_aql(indent_aql(rows_aql))}\n  )\n"
+            f"  FILTER {attribute_ref(row, name)} != null\n"
+            f"  RETURN {attribute_ref(row, name)}\n)))",
         )
-        outer = visitor.state.var_to_expr[name]
-        visitor.builder.filter_raw(f"!({outer} != null && {outer} IN {values})")
+        visitor.builder.filter_raw(f"{visitor.state.var_to_expr[name]} NOT IN {values}")
         return
     if independent:
         rows = visitor.builder.fresh_alias(prefix="minus_rows")

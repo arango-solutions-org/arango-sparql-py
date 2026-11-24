@@ -27,7 +27,7 @@ _PREFIX = "PREFIX : <http://ex.org/> "
 
 def _emits_minus(aql: str) -> bool:
     """The MINUS is translated: a per-row probe, or a lookup in hoisted values."""
-    return "minus_probe" in aql or "IN minus_values" in aql
+    return "minus_probe" in aql or "NOT IN minus_values" in aql
 
 
 def _aql(query: str) -> str:
@@ -100,10 +100,7 @@ def test_a_bind_target_is_shared() -> None:
     every solution of a BIND, so the body is evaluated apart and the probe
     joins its ``?s`` with the outer one."""
     aql = _aql("SELECT ?s WHERE { ?s :name ?n MINUS { BIND(:a AS ?s) } }")
-    assert (
-        "FILTER !(NOT_NULL(doc1._uri, doc1._id) != null && NOT_NULL(doc1._uri, doc1._id) IN minus_values"
-        in aql
-    )
+    assert "FILTER NOT_NULL(doc1._uri, doc1._id) NOT IN minus_values" in aql
 
 
 @pytest.mark.parametrize(
@@ -129,9 +126,9 @@ def test_a_solution_binding_no_shared_variable_removes_nothing(query: str) -> No
     aql = _aql(query)
     assert _emits_minus(aql)
     # Some shared variable bound on both sides: in the probe's overlap
-    # guard, or the lookup's ``outer != null && outer IN values``.
-    tail = aql[aql.index("FOR doc1") :]
-    assert "!= null && " in tail
+    # guard, or the lookup's non-null values (a null outer value is never
+    # in them).
+    assert "!= null && " in aql[aql.index("FOR doc1") :] or "!= null\n  RETURN" in aql
 
 
 def test_a_body_evaluated_apart_is_computed_once_before_the_outer_loop() -> None:
@@ -151,7 +148,7 @@ def test_one_shared_variable_is_a_lookup_in_its_hoisted_sorted_values() -> None:
     aql = _aql("SELECT ?s ?k WHERE { ?s :knows ?k MINUS { { ?x :likes ?k } UNION { VALUES ?q { 1 } } } }")
     assert aql.startswith("LET minus_values")
     assert "SORTED_UNIQUE((" in aql
-    assert "IN minus_values" in aql
+    assert "NOT IN minus_values" in aql  # a bare NOT IN: a binary search
 
 
 def test_inside_exists_the_outer_variables_are_shared_by_a_nested_minus() -> None:
