@@ -56,10 +56,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from rdflib import Variable
-
 from .builder import indent_aql
-from .optional_subquery import certain_variables
+from .optional_subquery import bound_variables, certain_variables
 
 if TYPE_CHECKING:
     from .visitor import AlgebraVisitor
@@ -75,10 +73,14 @@ def emit_minus(visitor: AlgebraVisitor, node: Any) -> None:
        its FOR loops + FILTERs land in the outer AQL body and
        populate ``state.var_to_expr`` with the outer scope's
        bindings.
-    2. Collect every SPARQL variable referenced anywhere inside
-       ``p2`` (walks the inner algebra tree). Intersect with the
-       outer's ``var_to_expr`` keys — that's the *shared-variable
-       set* the SPARQL spec uses to define compatibility.
+    2. Take the variables ``p2`` binds (:func:`bound_variables`: its
+       triples, BIND targets, VALUES columns, sub-select projections)
+       and intersect them with the outer's ``var_to_expr`` keys —
+       that's the *shared-variable set* the SPARQL spec uses to
+       define compatibility. A variable ``p2`` only reads, in a FILTER
+       or in a sub-select it does not project, is outside every inner
+       solution's domain, so it shares nothing (#216); a variable bound
+       only by a VALUES block shares as any other.
     3. **If the shared set is empty: do nothing.** SPARQL §8.3.4
        defines MINUS over disjoint domains as a no-op (every outer
        solution is incompatible with every inner solution
@@ -106,15 +108,13 @@ def emit_minus(visitor: AlgebraVisitor, node: Any) -> None:
     """
     visitor.visit(node.p1)
 
-    inner_vars = _collect_referenced_variables(node.p2)
-    shared = {v for v in inner_vars if str(v) in visitor.state.var_to_expr}
-    if not shared:
+    shared_names = bound_variables(node.p2) & visitor.state.var_to_expr.keys()
+    if not shared_names:
         # SPARQL spec §8.3.4 — disjoint domain ⇒ no-op. Important
         # divergence from NOT EXISTS, which excludes any outer row
         # whenever the inner matches even one row.
         return
 
-    shared_names = {str(v) for v in shared}
     # An outer variable an earlier OPTIONAL can leave unbound is outside the
     # row's domain where it is unbound: it constrains nothing, and the row is
     # removed only through another shared variable bound on both sides
@@ -347,47 +347,3 @@ def _translate_probe(
     child_builder.return_scalar("1")
 
     return visitor.builder.absorb_child(child_builder)
-
-
-def _collect_referenced_variables(node: Any) -> set[Variable]:
-    """Walk an algebra subtree and collect every ``Variable`` term
-    referenced in triples or expressions.
-
-    Used by :func:`emit_minus` to compute the shared-variable set
-    against the outer scope. We deliberately walk the algebra
-    tree rather than reading rdflib's ``_vars`` because the
-    latter is a set-iteration artefact populated lazily and not
-    always present on every node type we care about.
-
-    Recurses into ``.p`` / ``.p1`` / ``.p2`` / ``.graph`` /
-    ``.expr`` children and reads ``.triples`` lists on BGP-like
-    nodes. Variables inside ``Path`` predicates are picked up
-    when the path's args list contains them (rare but legal —
-    a ``Path`` whose start/end is a variable shows up via the
-    enclosing triple's subject/object slots, not the path
-    expression itself).
-    """
-    result: set[Variable] = set()
-    _walk_for_vars(node, result)
-    return result
-
-
-def _walk_for_vars(node: Any, out: set[Variable]) -> None:
-    """Recursive helper for :func:`_collect_referenced_variables`."""
-    if node is None:
-        return
-    if isinstance(node, Variable):
-        out.add(node)
-        return
-
-    triples = getattr(node, "triples", None)
-    if triples:
-        for triple in triples:
-            for term in triple:
-                if isinstance(term, Variable):
-                    out.add(term)
-
-    for attr in ("p", "p1", "p2", "graph", "expr", "other"):
-        child = getattr(node, attr, None)
-        if child is not None and (isinstance(child, Variable) or hasattr(child, "name")):
-            _walk_for_vars(child, out)

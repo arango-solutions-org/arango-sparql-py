@@ -231,21 +231,75 @@ def _multiset(rows: list[dict[str, Any]]) -> list[str]:
             "SELECT ?s ?x WHERE { ?s :name ?n OPTIONAL { ?s :likes ?x } "
             "MINUS { SELECT ?s (MIN(?k) AS ?x) WHERE { ?s :knows ?k } GROUP BY ?s } }",
             id="minus_subselect_aggregate_column",
-            marks=pytest.mark.xfail(
-                strict=True,
-                reason="#212: the probe's sub-select join leaves out the outer row's unbound ?x",
-            ),
         ),
-        # Any sub-select column the probe joins in its one-sided form, not
-        # only an aggregate: a projected copy too (#212).
+        # A sub-select column computed by an aggregate, a projected copy, a
+        # BIND or a constant: MINUS did not count it as shared at all, since
+        # it read only triples and expressions, and matched on ?s alone,
+        # keeping a's (a, b) or removing rows it must keep (#212).
+        pytest.param(
+            "SELECT ?s ?x WHERE { ?s :name ?n OPTIONAL { ?s :likes ?x } "
+            "MINUS { SELECT ?s (COUNT(?k) AS ?x) WHERE { ?s :knows ?k } GROUP BY ?s } }",
+            id="minus_subselect_count_column",
+        ),
         pytest.param(
             "SELECT ?s ?x WHERE { ?s :name ?n OPTIONAL { ?s :likes ?x } "
             "MINUS { SELECT ?s (?k AS ?x) WHERE { ?s :knows ?k } } }",
             id="minus_subselect_copy_column",
-            marks=pytest.mark.xfail(
-                strict=True,
-                reason="#212: the probe's sub-select join leaves out the outer row's unbound ?x",
-            ),
+        ),
+        pytest.param(
+            "SELECT ?s ?x WHERE { ?s :name ?n OPTIONAL { ?s :likes ?x } "
+            "MINUS { SELECT ?s ?x WHERE { ?s :knows ?k BIND(?k AS ?x) } } }",
+            id="minus_subselect_bind_column",
+        ),
+        pytest.param(
+            "SELECT ?s ?x WHERE { ?s :name ?n OPTIONAL { ?s :likes ?x } "
+            "MINUS { SELECT ?s (:c AS ?x) WHERE { ?s :knows ?k } } }",
+            id="minus_subselect_constant_column",
+        ),
+        pytest.param(
+            "SELECT ?s ?x WHERE { ?s :knows ?x MINUS { SELECT (?k AS ?x) WHERE { ?t :likes ?k } } }",
+            id="minus_subselect_only_shared_column",
+        ),
+        # ?s is bound inside the sub-select but not projected: not shared.
+        pytest.param(
+            "SELECT ?s WHERE { ?s :name ?n MINUS { SELECT ?k WHERE { ?s :knows ?k } } }",
+            id="minus_subselect_unprojected",
+        ),
+        # A right side that binds the shared variables only through VALUES
+        # (#216), with UNDEF cells (#208): MINUS saw no shared variable and
+        # removed nothing.
+        pytest.param(
+            "SELECT ?s WHERE { ?s :name ?n MINUS { VALUES ?s { :a :d } } }",
+            id="minus_values_only",
+        ),
+        pytest.param(
+            "SELECT ?s ?x WHERE { ?s :name ?n OPTIONAL { ?s :likes ?x } MINUS { VALUES (?s ?x) { (:a :b) } } }",
+            id="minus_values_open_outer",
+        ),
+        pytest.param(
+            "SELECT ?s ?x WHERE { ?s :knows ?x MINUS { VALUES ?x { :c } } }",
+            id="minus_values_object",
+        ),
+        pytest.param(
+            "SELECT ?s ?x WHERE { ?s a :Person OPTIONAL { ?s :knows ?x } "
+            "MINUS { VALUES (?s ?x) { (:z UNDEF) (UNDEF :b) } } }",
+            id="minus_values_undef_per_row",
+        ),
+        pytest.param(
+            "SELECT ?s ?x WHERE { ?s :knows ?x MINUS { VALUES (?s ?x) { (:a :c) (:g UNDEF) } } }",
+            id="minus_values_undef_cell",
+        ),
+        pytest.param(
+            "SELECT ?s ?x WHERE { ?s :name ?n OPTIONAL { ?s :likes ?x } "
+            "MINUS { SELECT ?s ?x WHERE { VALUES (?s ?x) { (:a :b) (:d UNDEF) (:g :c) } } } }",
+            id="minus_subselect_values",
+        ),
+        # ?x is read by the right side's FILTER, never bound by it: it is
+        # outside every right-side solution, the sides share nothing, and
+        # MINUS removes nothing (#209, its first shape).
+        pytest.param(
+            "SELECT ?s ?x WHERE { ?s a :Person OPTIONAL { ?s :knows ?x } MINUS { ?y :name ?n FILTER(?y = ?x) } }",
+            id="minus_filter_only_variable",
         ),
         # A BIND in an OPTIONAL of the group binds the group's own ?x: it is
         # computed, never substituted by the outer value, so a later
