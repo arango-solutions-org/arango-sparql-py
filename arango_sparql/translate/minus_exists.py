@@ -110,7 +110,14 @@ def emit_minus(visitor: AlgebraVisitor, node: Any) -> None:
     """
     visitor.visit(node.p1)
 
-    shared_names = bound_variables(node.p2) & visitor.state.var_to_expr.keys()
+    # Inside FILTER EXISTS / NOT EXISTS the outer row's variables are bound
+    # throughout the pattern, on both sides of this MINUS, as pyoxigraph and
+    # rdflib evaluate it (the repo's ground truth; §18.6 substitutes them as
+    # constants, which would put them in neither side's domain): every one
+    # is shared and bound in every solution of the right side (third review
+    # of #227, where the apart probe read them as unbound).
+    preset = visitor.state.substituted & visitor.state.var_to_expr.keys()
+    shared_names = (bound_variables(node.p2) & visitor.state.var_to_expr.keys()) | preset
     if not shared_names:
         # SPARQL spec §8.3.4 — disjoint domain ⇒ no-op. Important
         # divergence from NOT EXISTS, which excludes any outer row
@@ -129,7 +136,7 @@ def emit_minus(visitor: AlgebraVisitor, node: Any) -> None:
     # bound what — the probe keeps joining the variable as a value, as
     # before #193 (review of #196).
     open_outer = shared_names & visitor.state.maybe_unbound
-    certain = certain_variables(node.p2)
+    certain = certain_variables(node.p2) | preset
     anchors = (shared_names & certain) - visitor.state.maybe_unbound
     free_outer = open_outer if open_outer and (anchors or shared_names <= certain) else None
     # No anchor and not every shared variable bound in every solution of the
@@ -239,6 +246,14 @@ def _emit_apart_probe(visitor: AlgebraVisitor, pattern: Any, shared: set[str]) -
         describe_resources=visitor.describe_resources,
     )
     child.state.const_subject_rpt_class = dict(visitor.state.const_subject_rpt_class)
+    # Inside EXISTS the outer row's variables are bound in the body too
+    # (see ``emit_minus``); such a body reads the outer row and stays per row.
+    child.state.var_to_expr = {
+        name: visitor.state.var_to_expr[name]
+        for name in visitor.state.substituted
+        if name in visitor.state.var_to_expr
+    }
+    child.state.substituted = set(child.state.var_to_expr)
     # Matched in the scope's graph, as any probe is (§18.6, #195).
     child.state.graph_scope = list(visitor.state.graph_scope)
     visitor.state.share_query_state(child.state)
@@ -258,6 +273,23 @@ def _emit_apart_probe(visitor: AlgebraVisitor, pattern: Any, shared: set[str]) -
     independent = not visitor.state.graph_scope and not any(
         re.search(rf"(?<![@.\w]){re.escape(alias)}\b", rows_aql) for alias in outer_aliases
     )
+    if independent and len(names) == 1:
+        # One shared variable: a solution overlaps the row exactly when it
+        # binds that variable to the row's value, so the probe is a lookup
+        # in its sorted distinct values (ArangoDB's sort-in-values rule makes
+        # the IN a binary search). A scan per row of the hoisted rows took
+        # 28 s on 12,000 rows (third review of #227).
+        (name,) = names
+        values = visitor.builder.fresh_alias(prefix="minus_values")
+        row = visitor.builder.fresh_alias(prefix="row")
+        visitor.builder.let_first(
+            values,
+            f"SORTED_UNIQUE((\n  FOR {row} IN (\n{indent_aql(indent_aql(rows_aql))}\n  )\n"
+            f"  RETURN {attribute_ref(row, name)}\n))",
+        )
+        outer = visitor.state.var_to_expr[name]
+        visitor.builder.filter_raw(f"!({outer} != null && {outer} IN {values})")
+        return
     if independent:
         rows = visitor.builder.fresh_alias(prefix="minus_rows")
         visitor.builder.let_first(rows, f"(\n{indent_aql(rows_aql)}\n)")

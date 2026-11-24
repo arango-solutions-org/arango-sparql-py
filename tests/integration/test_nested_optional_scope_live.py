@@ -344,6 +344,28 @@ def _multiset(rows: list[dict[str, Any]]) -> list[str]:
             "MINUS { ?s :name ?w OPTIONAL { ?s :email ?e } } }",
             id="minus_mixed_certainty_two_optionals",
         ),
+        # Inside FILTER EXISTS / NOT EXISTS the outer row's variables are
+        # bound on both sides of a nested MINUS, as pyoxigraph (and rdflib)
+        # evaluate it: they are shared, so a right side that binds nothing
+        # else still removes every left solution (third review of #227; main
+        # took it as a no-op, and the apart probe read ?s as unbound).
+        pytest.param(
+            "SELECT ?s ?n WHERE { ?s :name ?n FILTER NOT EXISTS { ?t :knows ?k MINUS { ?z :email ?w } } }",
+            id="exists_minus_outer_variable_shared",
+        ),
+        pytest.param(
+            "SELECT ?s ?n WHERE { ?s :name ?n FILTER NOT EXISTS { ?s :knows ?k "
+            "MINUS { { ?k :email ?m FILTER(?k != ?s) } UNION { VALUES ?q { 1 } } } } }",
+            id="exists_minus_union_reads_outer",
+        ),
+        pytest.param(
+            "SELECT ?s ?n WHERE { ?s :name ?n FILTER EXISTS { ?s :knows ?k MINUS { VALUES ?k { UNDEF :b } } } }",
+            id="exists_minus_values_undef",
+        ),
+        pytest.param(
+            "SELECT ?s ?n WHERE { ?s :name ?n FILTER NOT EXISTS { ?t :knows ?k MINUS { ?s :likes ?y } } }",
+            id="exists_minus_right_binds_outer",
+        ),
         # ?x is read by the right side's FILTER, never bound by it: it is
         # outside every right-side solution, the sides share nothing, and
         # MINUS removes nothing (#209, its first shape).

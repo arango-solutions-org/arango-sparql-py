@@ -25,6 +25,11 @@ from arango_sparql.translate.resolver import SchemaResolver
 _PREFIX = "PREFIX : <http://ex.org/> "
 
 
+def _emits_minus(aql: str) -> bool:
+    """The MINUS is translated: a per-row probe, or a lookup in hoisted values."""
+    return "minus_probe" in aql or "IN minus_values" in aql
+
+
 def _aql(query: str) -> str:
     resolver = SchemaResolver.from_turtle("", default_collection="Document")
     return translate(_PREFIX + query, resolver=resolver).aql
@@ -54,7 +59,7 @@ def _aql(query: str) -> str:
     ],
 )
 def test_a_variable_only_values_or_a_projection_binds_is_shared(query: str) -> None:
-    assert "minus_probe" in _aql(query)
+    assert _emits_minus(_aql(query))
 
 
 @pytest.mark.parametrize(
@@ -76,7 +81,7 @@ def test_a_variable_only_values_or_a_projection_binds_is_shared(query: str) -> N
     ],
 )
 def test_a_variable_the_right_side_only_reads_is_not_shared(query: str) -> None:
-    assert "minus_probe" not in _aql(query)
+    assert not _emits_minus(_aql(query))
 
 
 def test_an_aggregate_column_is_joined_with_the_outer_variable() -> None:
@@ -95,8 +100,10 @@ def test_a_bind_target_is_shared() -> None:
     every solution of a BIND, so the body is evaluated apart and the probe
     joins its ``?s`` with the outer one."""
     aql = _aql("SELECT ?s WHERE { ?s :name ?n MINUS { BIND(:a AS ?s) } }")
-    assert "minus_probe" in aql
-    assert "!= null && NOT_NULL(doc1._uri, doc1._id) != null" in aql
+    assert (
+        "FILTER !(NOT_NULL(doc1._uri, doc1._id) != null && NOT_NULL(doc1._uri, doc1._id) IN minus_values"
+        in aql
+    )
 
 
 @pytest.mark.parametrize(
@@ -120,8 +127,11 @@ def test_a_solution_binding_no_shared_variable_removes_nothing(query: str) -> No
     requires one bound on both sides, per solution (§8.3.4; review of #227,
     where such a solution removed every row)."""
     aql = _aql(query)
-    probe = aql[aql.index("minus_probe") :]
-    assert "!= null && " in probe
+    assert _emits_minus(aql)
+    # Some shared variable bound on both sides: in the probe's overlap
+    # guard, or the lookup's ``outer != null && outer IN values``.
+    tail = aql[aql.index("FOR doc1") :]
+    assert "!= null && " in tail
 
 
 def test_a_body_evaluated_apart_is_computed_once_before_the_outer_loop() -> None:
@@ -131,5 +141,21 @@ def test_a_body_evaluated_apart_is_computed_once_before_the_outer_loop() -> None
     aql = _aql(
         "SELECT ?s ?a WHERE { ?s :age ?a MINUS { SELECT (MIN(?x) AS ?a) WHERE { ?t :age ?x FILTER(?x > 100) } } }"
     )
-    assert aql.startswith("LET minus_rows")
-    assert aql.index("LET minus_rows") < aql.index("FOR doc1 IN")
+    assert aql.startswith("LET minus_")
+    assert aql.index("LET minus_") < aql.index("FOR doc1 IN")
+
+
+def test_one_shared_variable_is_a_lookup_in_its_hoisted_sorted_values() -> None:
+    """A per-row scan of the hoisted rows took 28 s on 12,000 rows; one
+    shared variable is a sorted IN lookup instead (third review of #227)."""
+    aql = _aql("SELECT ?s ?k WHERE { ?s :knows ?k MINUS { { ?x :likes ?k } UNION { VALUES ?q { 1 } } } }")
+    assert aql.startswith("LET minus_values")
+    assert "SORTED_UNIQUE((" in aql
+    assert "IN minus_values" in aql
+
+
+def test_inside_exists_the_outer_variables_are_shared_by_a_nested_minus() -> None:
+    """pyoxigraph's reading: the outer row binds ?s on both sides, so a right
+    side that binds nothing else still shares ?s (main took it as a no-op)."""
+    aql = _aql("SELECT ?s WHERE { ?s :name ?n FILTER NOT EXISTS { ?t :knows ?k MINUS { ?z :email ?w } } }")
+    assert _emits_minus(aql)
