@@ -145,7 +145,47 @@ def test_a_copy_read_without_a_class_test_holds_every_class_stored_there() -> No
     aql = _aql(ttl, "SELECT ?n ?k WHERE { :x a :Agent ; :name ?n ; :nick ?k }")
     copies = aql[aql.index("FOR doc4 IN @@") :]
     copies = copies[: copies.index("RETURN doc4")]
-    assert "FIRST(SPLIT(NOT_NULL(doc4._id" in copies  # the walked-document test
+    # Held to Doc's and Person's fields, and to Secret's, which the read
+    # does not name: three per-class terms in the copy scan.
+    assert copies.count("|| doc4.") == 3
+    assert copies.count("doc4.org == @") == 2
+
+
+def test_an_unlisted_class_under_another_root_is_hidden_in_a_copy_read() -> None:
+    """``Secret`` keeps the tenant in ``org`` too, but under root Region: its
+    t1 is another tenant than Org's t1, so its copies are not visible. Main
+    and the first heads of #228 passed them (review of #228)."""
+    ttl = (
+        ':Agent a owl:Class ; phys:mappingStyle "UNION" .\n'
+        + _label("Person", _ORG).replace(" .\n", " ; rdfs:subClassOf :Agent .\n")
+        + _label("Secret", '; phys:tenantField "org" ; phys:tenantEntity "Region" ')
+        + ':Other a owl:Class ; rdfs:subClassOf :Agent ; phys:collectionName "others" '
+        + _ORG
+        + ".\n"
+        + ':name a owl:DatatypeProperty ; rdfs:domain :Person, :Other ; phys:attributeName "name" .\n'
+        + ':nick a owl:DatatypeProperty ; phys:attributeName "nick" .\n'
+    )
+    aql = _aql(ttl, "SELECT ?n ?k WHERE { :x a :Agent ; :name ?n ; :nick ?k }")
+    assert "|| false)" in aql
+
+
+def test_a_copy_read_is_not_refused_for_a_root_in_another_collection() -> None:
+    """A class under another root stored elsewhere does not matter to a copy
+    read; the first fix refused the whole mapping (recheck of #228)."""
+    ttl = (
+        ':Agent a owl:Class ; phys:mappingStyle "UNION" .\n'
+        + _label("Person", _ORG).replace(" .\n", " ; rdfs:subClassOf :Agent .\n")
+        + _label("Doc", _WS)
+        + ':Other a owl:Class ; rdfs:subClassOf :Agent ; phys:collectionName "others" '
+        + _ORG
+        + ".\n"
+        + ':Project a owl:Class ; phys:collectionName "projects" ; phys:tenantField "pf" ; '
+        + 'phys:tenantEntity "Workspace" .\n'
+        + ':name a owl:DatatypeProperty ; rdfs:domain :Person, :Other ; phys:attributeName "name" .\n'
+        + ':nick a owl:DatatypeProperty ; phys:attributeName "nick" .\n'
+    )
+    aql = _aql(ttl, "SELECT ?s ?n ?k WHERE { ?s a :Agent ; :name ?n ; :nick ?k }")
+    assert ".pf" not in aql
 
 
 def test_a_reverse_walk_into_classes_scoped_differently_is_answered() -> None:

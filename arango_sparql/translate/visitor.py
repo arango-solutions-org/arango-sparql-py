@@ -3648,9 +3648,11 @@ class AlgebraVisitor:
             return
         tests = [f"IS_SAME_COLLECTION({self.builder.bind(c, hint='coll')}, {v_alias})" for c in collections]
         self.builder.filter_raw(tests[0] if len(tests) == 1 else "(" + " || ".join(tests) + ")")
-        # Held to its collections only, not to *classes*: a vertex of another
-        # class there is held to its own tenant field (#218).
-        enforce_classes_tenant_scope(self, v_alias, classes, class_tested=False)
+        # The vertex is held to every tenant-scoped class of its collection
+        # by the caller's walk test (``_guard_tenants``); the domain classes'
+        # roots are committed here (#218; it used to filter on classes[0]).
+        for cls in classes:
+            self._tenant_placeholder(cls)
 
     def _route_by_domain(self, subject: Any, prop: Any) -> str | None:
         """Open the collection ``prop``'s ``rdfs:domain`` puts *subject* in.

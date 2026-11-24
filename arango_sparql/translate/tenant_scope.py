@@ -21,13 +21,15 @@ A document of a listed class with no tenant field passes; one with labels
 of two listed scoped classes is held to both. Membership is the class's
 label (its ``phys:typeField``) and, when the classes span collections, its
 collection. That holds only where the read itself tests each document's
-class; a read that does not (a copy looked up by ``_uri``, a vertex a
-reverse walk reached) holds the document as a walked one is
-(:meth:`AlgebraVisitor._tenant_test`), to every scoped class stored in its
-collection, since it may belong to a class the read does not name. Two classes in one collection
-with no label to tell them apart cannot be scoped differently, so that read
-is refused. Every class's tenant root is committed, so classes under two
-roots are refused as a join across them is (:class:`CrossTenantJoinError`).
+class. A read that does not (a copy of an IRI looked up by ``_uri``) may
+meet a document of a class it does not name, so it also tests the document
+against every tenant-scoped class stored in its collection: on that class's
+field when the class is under the query's tenant root, and as not visible
+when it is under another root or there is no tenant context. Those classes
+commit no root. Two classes in one collection with no label to tell them
+apart cannot be scoped differently, so that read is refused. Every listed
+class's tenant root is committed, so classes under two roots are refused as
+a join across them is (:class:`CrossTenantJoinError`).
 """
 
 from __future__ import annotations
@@ -57,46 +59,74 @@ def enforce_classes_tenant_scope(
     collection and label test). A read that does not — a copy of an IRI
     looked up by ``_uri``, a vertex a reverse walk reached — can meet a
     document of another class stored in the same collection, so when the
-    tenant fields there differ it is held to every tenant-scoped class of
-    its collection and label, as a walked document is
-    (:meth:`AlgebraVisitor._tenant_test`; review of #228, where such a copy
-    of a t2 class passed).
+    tenant fields there differ it is held, by its label and collection, to
+    every tenant-scoped class stored there as well (review of #228, where
+    such a copy of a t2 class passed); see :func:`_unlisted_placeholder`.
     """
     if not classes:
         return
     target = builder or visitor.builder
-    # Every class's tenant root is committed: two roots are refused.
-    placeholders = [visitor._tenant_placeholder(cls) for cls in classes]
-    fields = {cls.tenant_field for cls in classes}
+    listed = list(classes)
+    # Every listed class's tenant root is committed: two roots are refused.
+    placeholders: list[str | None] = [visitor._tenant_placeholder(cls) for cls in listed]
     if not class_tested:
-        stored = {name for cls in classes for name in (cls.shard_family or (cls.collection,))}
-        fields |= {
-            cls.tenant_field
-            for cls in visitor.resolver.tenant_scoped_classes()
-            if stored & set(cls.shard_family or (cls.collection,))
-        }
-    if len(fields) == 1:
+        # The document may be of any class stored where it is read, so it is
+        # held to every tenant-scoped one there too (review of #228, where a
+        # copy of an unlisted t2 class passed). Those classes commit no root.
+        stored = {name for cls in listed for name in (cls.shard_family or (cls.collection,))}
+        for cls in visitor.resolver.tenant_scoped_classes():
+            if stored & set(cls.shard_family or (cls.collection,)) and all(cls.iri != c.iri for c in listed):
+                listed.append(cls)
+                placeholders.append(_unlisted_placeholder(visitor, cls))
+    if len({cls.tenant_field for cls in listed}) == 1 and _HIDDEN not in placeholders:
         # Scoped alike (one field, whatever the roots), or not at all: the
         # single, index-friendly FILTER.
-        scoped = next((cls for cls, bind in zip(classes, placeholders, strict=True) if bind), None)
+        scoped = next((cls for cls, bind in zip(listed, placeholders, strict=True) if bind), None)
         if scoped is not None:
             visitor._enforce_tenant_scope(alias, scoped, builder=builder)
         return
-    if not class_tested:
-        tenant = visitor._tenant_test(alias, builder=target)
-        if tenant:
-            target.filter_raw(tenant)
-        return
-    spans_collections = len({c.collection for c in classes}) > 1
+    spans_collections = len({c.collection for c in listed}) > 1
     terms = []
-    for cls, placeholder in zip(classes, placeholders, strict=True):
+    for cls, placeholder in zip(listed, placeholders, strict=True):
         if placeholder is None:
             continue
-        assert cls.tenant_field is not None  # _tenant_placeholder guarantees it
-        member = _membership(target, alias, cls, classes, spans_collections)
-        terms.append(f"(!({member}) || {attribute_ref(alias, cls.tenant_field)} == {placeholder})")
+        assert cls.tenant_field is not None  # tenant_scoped_classes / _tenant_placeholder guarantee it
+        member = _membership(target, alias, cls, listed, spans_collections)
+        test = (
+            "false"
+            if placeholder == _HIDDEN
+            else f"{attribute_ref(alias, cls.tenant_field)} == {placeholder}"
+        )
+        terms.append(f"(!({member}) || {test})")
     if terms:
         target.filter_raw(terms[0] if len(terms) == 1 else " && ".join(terms))
+
+
+_HIDDEN = "false"
+
+
+def _unlisted_placeholder(visitor: AlgebraVisitor, cls: ResolvedClass) -> str:
+    """The tenant bind for a scoped class the read does not name, or
+    ``_HIDDEN`` when its documents cannot be visible to this query.
+
+    Hidden without a tenant context (as a walked document is), and when the
+    class is under another tenant root than the query: the same tenant id
+    under another root is another tenant. When the query has committed no
+    root yet, the class is checked on its field only if the mapping has one
+    root at most."""
+    if visitor.tenant_id is None:
+        return _HIDDEN
+    committed = visitor.state.tenant.entity
+    if cls.tenant_entity is not None:
+        if committed is not None and committed != cls.tenant_entity:
+            return _HIDDEN
+        if committed is None:
+            roots = {c.tenant_entity for c in visitor.resolver.tenant_scoped_classes() if c.tenant_entity}
+            if len(roots) > 1:
+                return _HIDDEN
+    if visitor.state.tenant_bind_placeholder is None:
+        visitor.state.tenant_bind_placeholder = visitor.builder.bind(visitor.tenant_id, hint="tenant")
+    return visitor.state.tenant_bind_placeholder
 
 
 def _membership(

@@ -1350,8 +1350,9 @@ store in a mixed mapping (#191).
 field** (#218). One read can cover several classes: a property whose
 `rdfs:domain` names several, an LPG collection whose labels are different
 classes, a supertype (`phys:mappingStyle "UNION"`), a mixed-store routed
-read, a reverse walk into a domain, the copies of one IRI. Every class's
-tenant root is committed, so classes under two roots are refused as below.
+read, a reverse walk into a domain, the copies of one IRI. The root of
+every class the read names is committed, so classes under two roots are
+refused as below.
 Classes that keep the tenant in one field (whatever their roots) keep the
 one indexable `FILTER doc.<tenantField> == @tenant_id`. Otherwise:
 
@@ -1361,12 +1362,16 @@ one indexable `FILTER doc.<tenantField> == @tenant_id`. Otherwise:
   Doc>) || doc.ws == @tenant_id)`, membership being the class's label and,
   when the classes span collections, `IS_SAME_COLLECTION`. A document of a
   listed class with no tenant field passes;
-- where it does not (a copy of an IRI looked up by `_uri`, a vertex a
-  reverse walk reached), the document may belong to a class the read does
-  not name, so it is held as a walked document is (above): to every
-  tenant-scoped class stored in its collection under its label. This also
-  applies when the read's classes agree but another scoped class in the
-  same collection keeps the tenant in another field.
+- where it does not (a copy of an IRI looked up by `_uri`), the document
+  may belong to a class the read does not name, so it is also tested
+  against every tenant-scoped class stored in its collection, by label and
+  collection: on that class's field when the class is under the query's
+  tenant root (or the mapping has one root), and as not visible when it is
+  under another root (the same tenant id under another root is another
+  tenant) or there is no tenant context. Those classes commit no root, and
+  classes in other collections do not matter. A vertex a reverse walk
+  reaches is held by the walked-document test above, and the domain
+  classes' roots are committed.
 
 Two classes in one collection with no type field to tell their documents
 apart cannot be scoped differently, and such a read is refused. A document
@@ -1378,7 +1383,8 @@ passing a document whose other field held the tenant), the copy and
 edge-range reads applied every field to every document, a supertype
 spanning collections or a reverse walk into classes scoped differently was
 refused, and only the first class's root was committed. Implemented in
-`translate/tenant_scope.py::enforce_classes_tenant_scope` (`class_tested`),
+`translate/tenant_scope.py::enforce_classes_tenant_scope` (`class_tested`,
+`_unlisted_placeholder`),
 called by every read of several classes (`visitor.py`, `mixed_store.py`,
 `copies.py`); tested in `tests/translate/test_tenant_per_class.py` and live
 in `tests/integration/test_tenant_per_class_live.py`.
