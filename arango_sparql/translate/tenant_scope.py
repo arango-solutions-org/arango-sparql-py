@@ -87,6 +87,13 @@ def enforce_classes_tenant_scope(
         field = listed[0].tenant_field
         if bind is not None and field is not None:
             target.filter_eq(attribute_ref(alias, field), bind)
+            # An undecided class's documents pass on the tenant id alone; a
+            # root committed later must be theirs (``_TenantCommitment``).
+            visitor.state.tenant.admitted |= {
+                cls.tenant_entity
+                for cls, placeholder in zip(listed, placeholders, strict=True)
+                if placeholder == _UNDECIDED and cls.tenant_entity
+            }
         return
     undecided = [cls for cls, bind in zip(listed, placeholders, strict=True) if bind == _UNDECIDED]
     if undecided:

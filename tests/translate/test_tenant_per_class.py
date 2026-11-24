@@ -265,3 +265,29 @@ def test_rootless_listed_classes_on_one_field_answer_beside_a_rooted_unlisted_on
     aql = _aql(ttl, "SELECT ?n ?k WHERE { :x a :Agent ; :name ?n ; :nick ?k }")
     assert "|| false" not in aql
     assert ".org == @" in aql
+
+
+def test_a_root_committed_after_a_copy_read_admitted_another_is_refused() -> None:
+    """Person and Other keep the tenant in ``org`` with no root; Secret,
+    stored with Person, is on ``org`` under Region. The copy read admits
+    Secret's documents by their tenant id alone; a Project pattern then
+    commits root Org, whose tenant t1 is not Region's: refused, as on the
+    second head of #228 (its fourth recheck; main leaked the Region copy)."""
+    ttl = (
+        _label("Person", '; phys:tenantField "org" ').replace(" .\n", " ; rdfs:subClassOf :Agent .\n")
+        + _label("Secret", '; phys:tenantField "org" ; phys:tenantEntity "Region" ')
+        + ':Other a owl:Class ; rdfs:subClassOf :Agent ; phys:collectionName "others" ; phys:tenantField "org" .\n'
+        + ':Project a owl:Class ; phys:collectionName "projects" ; phys:tenantField "pf" ; '
+        + 'phys:tenantEntity "Org" .\n'
+        + ':pn a owl:DatatypeProperty ; rdfs:domain :Project ; phys:attributeName "pn" .\n'
+        + ':name a owl:DatatypeProperty ; phys:attributeName "name" .\n'
+        + ':nick a owl:DatatypeProperty ; phys:attributeName "nick" .\n'
+        + ':Agent a owl:Class ; phys:mappingStyle "UNION" .\n'
+    )
+    with pytest.raises(CrossTenantJoinError, match="admitted documents under 'Region'"):
+        _aql(ttl, "SELECT ?n ?k ?pn WHERE { :x a :Agent ; :name ?n ; :nick ?k . ?p a :Project ; :pn ?pn }")
+    # Org committed first: Secret is hidden instead, and the query answers.
+    _aql(
+        ttl,
+        "SELECT ?n ?k ?pn WHERE { { ?p a :Project ; :pn ?pn } UNION { :x a :Agent ; :name ?n ; :nick ?k } }",
+    )

@@ -89,6 +89,12 @@ class _TenantCommitment:
     """
 
     entity: str | None = None
+    admitted: set[str] = field(default_factory=set)
+    """Roots whose documents a read let through before any root was
+    committed: a copy read on one tenant field held them to the tenant id
+    alone (``tenant_scope.py``). Committing another root afterwards is
+    refused, since those documents belong to another tenant (recheck of
+    #228)."""
 
 
 @dataclass
@@ -2649,6 +2655,13 @@ class AlgebraVisitor:
         if resolved.tenant_entity is not None:
             committed = self.state.tenant.entity
             if committed is None:
+                admitted = self.state.tenant.admitted - {resolved.tenant_entity}
+                if admitted:
+                    raise CrossTenantJoinError(
+                        f"SPARQL query reads entities under tenant root {resolved.tenant_entity!r} after a "
+                        f"read that admitted documents under {', '.join(sorted(admitted))!r} by their tenant "
+                        f"id alone; one tenant cannot scope both roots (PRD §6.5.1)"
+                    )
                 self.state.tenant.entity = resolved.tenant_entity
             elif committed != resolved.tenant_entity:
                 # Not only a join: a UNION of separately rooted arms is refused

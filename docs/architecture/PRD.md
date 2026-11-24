@@ -1370,7 +1370,12 @@ one indexable `FILTER doc.<tenantField> == @tenant_id`. Otherwise:
   under another root (the same tenant id under another root is another
   tenant) or there is no tenant context. When one field holds every scoped
   class there, listed or not, and none is hidden, the plain FILTER on that
-  field applies. Otherwise "the query's root" is the root committed when
+  field applies; a class under a root it lets through before the query has
+  committed one is recorded, and committing another root afterwards is
+  refused (`_TenantCommitment.admitted`). A query that never commits a root
+  (every class it names has no `phys:tenantEntity`) sees, on that field,
+  the documents of every root carrying its tenant id, as on `main`: a
+  tenant id is then not placed under any root. Otherwise "the query's root" is the root committed when
   the copies are read: on a mapping with several roots, a copy read
   translated before the query names a class under a root is refused, since
   the tenant id cannot yet be placed under a root (hiding those copies
