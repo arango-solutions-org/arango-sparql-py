@@ -115,3 +115,27 @@ def test_a_minus_inside_exists_reading_the_outer_row_stays_per_row() -> None:
         "MINUS { { ?k :email ?m } UNION { VALUES ?q { 1 } } } } }"
     )
     assert not aql.startswith("LET minus_")
+
+
+def test_a_discarded_conditional_add_attempt_leaves_one_root_let() -> None:
+    """MINUS first tries the conditional-add probe (``sink_only``) and drops
+    it when its OPTIONAL does not bind every shared variable; this query
+    drops it several times and must still hoist each body once (review of
+    #235)."""
+    aql = _aql(
+        "SELECT ?s ?k WHERE { ?s :knows ?k MINUS { { ?k :email ?m MINUS { VALUES (?m ?y) "
+        '{ ("b@x.org" 1) (UNDEF 2) } } } UNION { ?z :age 20 } OPTIONAL { ?s :likes ?w } } }'
+    )
+    assert aql.count("LET minus_values") <= 1
+    assert aql.count("LET minus_rows") <= 1
+    assert aql.count("LET minus_") >= 1
+
+
+def test_absorbing_a_child_twice_hoists_its_let_once() -> None:
+    root = _root()
+    child = _child_with_root_let(root)
+    root.absorb_child(child)
+    root.absorb_child(child)
+    root.return_scalar("1")
+    aql, _ = root.finalize()
+    assert aql.count("LET hoisted") == 1

@@ -835,6 +835,9 @@ class AqlQueryBuilder:
           binds to the same collection name into a single
           collection lock at execution time, so the only cost
           is one extra entry in the bind-vars dict.
+        * ``_root_lets`` — LETs for the top of the whole query
+          (:meth:`let_root`); :meth:`absorb_child` moves them up, and
+          only the root (``_is_child`` false) renders them.
         * ``_body_clauses`` / ``_sort_keys`` / ``_limit_clause`` /
           ``_return_clause`` — the child's clauses live in the
           child's own ``finalize()`` output, not in the parent's
@@ -867,6 +870,7 @@ class AqlQueryBuilder:
         # (a UNION arm's first pass, a probe tried and dropped) is never
         # absorbed, so neither its binds nor its root LETs reach the query.
         self._root_lets.extend(child._root_lets)
+        child._root_lets = []  # absorbing the same child again adds none twice
         for name, value in child_binds.items():
             existing = self._bind_vars.get(name, _MISSING)
             if existing is _MISSING:

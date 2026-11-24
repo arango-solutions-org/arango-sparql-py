@@ -232,8 +232,10 @@ def _emit_apart_probe(visitor: AlgebraVisitor, pattern: Any, shared: set[str]) -
     the row binds too. A body that reads nothing of the outer scope (the
     usual case) is computed once per query, in a LET at the top of the
     whole query (:meth:`AqlQueryBuilder.let_root`), even when the MINUS is
-    inside an EXISTS, OPTIONAL subquery or UNION arm (#234: at the top of
-    that scope it was rebuilt per outer row, 5.9 s against 0.6 s);
+    inside an OPTIONAL subquery, a UNION arm or a sub-select (#234: at the
+    top of that scope it was rebuilt per outer row, 5.9 s against 0.6 s).
+    A MINUS directly inside EXISTS reads the outer row (EXISTS binds its
+    variables on both sides) and stays per row;
     evaluated per row it took 14 s on 12,000 PG documents where main took
     0.02 s (review of #227).
     """
