@@ -1368,8 +1368,13 @@ one indexable `FILTER doc.<tenantField> == @tenant_id`. Otherwise:
   collection: on that class's field when the class is under the query's
   tenant root (or the mapping has one root), and as not visible when it is
   under another root (the same tenant id under another root is another
-  tenant) or there is no tenant context. Those classes commit no root, and
-  classes in other collections do not matter. A vertex a reverse walk
+  tenant) or there is no tenant context. "The query's root" is the root
+  committed when the copies are read: on a mapping with several roots, a
+  copy read that comes before the query names a tenant-scoped class (every
+  class it names is unscoped) is refused, since the tenant id cannot yet be
+  placed under a root, and hiding those copies dropped rows depending on
+  pattern order. Those classes commit no root, and classes in other
+  collections do not matter. A vertex a reverse walk
   reaches is held by the walked-document test above, and the domain
   classes' roots are committed.
 

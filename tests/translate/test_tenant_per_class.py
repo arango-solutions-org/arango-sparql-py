@@ -200,3 +200,23 @@ def test_a_reverse_walk_into_classes_scoped_differently_is_answered() -> None:
     )
     aql = _aql(ttl, "SELECT ?s WHERE { ?s :wrote :g1 }")
     assert ".org == @" in aql and ".ws == @" in aql
+
+
+def test_a_copy_read_before_any_root_is_committed_is_refused_on_a_multi_root_mapping() -> None:
+    """Every class the read names is unscoped, so no root is committed when
+    the copies are read; ``Person`` (root Org) is stored there, and the
+    mapping also has root Workspace. Which root t1 belongs to is not known:
+    hiding Person's copies dropped t1 rows depending on pattern order
+    (second recheck of #228), so the read is refused."""
+    ttl = (
+        ':Agent a owl:Class ; phys:mappingStyle "UNION" .\n'
+        + _label("Tag").replace(" .\n", " ; rdfs:subClassOf :Agent .\n")
+        + _label("Person", _ORG)
+        + ':Other a owl:Class ; rdfs:subClassOf :Agent ; phys:collectionName "others" .\n'
+        + ':Project a owl:Class ; phys:collectionName "projects" ; phys:tenantField "pf" ; '
+        + 'phys:tenantEntity "Workspace" .\n'
+        + ':name a owl:DatatypeProperty ; phys:attributeName "name" .\n'
+        + ':nick a owl:DatatypeProperty ; phys:attributeName "nick" .\n'
+    )
+    with pytest.raises(CrossTenantJoinError, match="before the query names a class"):
+        _aql(ttl, "SELECT ?n ?k WHERE { :x a :Agent ; :name ?n ; :nick ?k }")

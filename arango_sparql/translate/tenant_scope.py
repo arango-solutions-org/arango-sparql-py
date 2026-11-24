@@ -37,7 +37,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
-from ..errors import UnsupportedSparqlError
+from ..errors import CrossTenantJoinError, UnsupportedSparqlError
 from .builder import AqlQueryBuilder, attribute_ref, is_aql_identifier, type_predicate
 
 if TYPE_CHECKING:
@@ -112,8 +112,8 @@ def _unlisted_placeholder(visitor: AlgebraVisitor, cls: ResolvedClass) -> str:
     Hidden without a tenant context (as a walked document is), and when the
     class is under another tenant root than the query: the same tenant id
     under another root is another tenant. When the query has committed no
-    root yet, the class is checked on its field only if the mapping has one
-    root at most."""
+    root yet, the class is checked on its field if the mapping has one root
+    at most, and the read is refused otherwise."""
     if visitor.tenant_id is None:
         return _HIDDEN
     committed = visitor.state.tenant.entity
@@ -121,9 +121,19 @@ def _unlisted_placeholder(visitor: AlgebraVisitor, cls: ResolvedClass) -> str:
         if committed is not None and committed != cls.tenant_entity:
             return _HIDDEN
         if committed is None:
-            roots = {c.tenant_entity for c in visitor.resolver.tenant_scoped_classes() if c.tenant_entity}
+            roots = sorted(
+                {c.tenant_entity for c in visitor.resolver.tenant_scoped_classes() if c.tenant_entity}
+            )
             if len(roots) > 1:
-                return _HIDDEN
+                # Which root the tenant id belongs to is not known yet: a
+                # pattern read later may commit one. Hiding these copies
+                # dropped t1 rows depending on pattern order (second
+                # recheck of #228), so the read is refused instead.
+                raise CrossTenantJoinError(
+                    f"a read of the copies of an IRI can reach documents of {cls.iri!r}, under tenant root "
+                    f"{cls.tenant_entity!r}, before the query names a class under one of the mapping's "
+                    f"roots ({', '.join(roots)}); one tenant id cannot be placed under a root (PRD §6.5.1)"
+                )
     if visitor.state.tenant_bind_placeholder is None:
         visitor.state.tenant_bind_placeholder = visitor.builder.bind(visitor.tenant_id, hint="tenant")
     return visitor.state.tenant_bind_placeholder
