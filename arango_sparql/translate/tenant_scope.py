@@ -80,11 +80,22 @@ def enforce_classes_tenant_scope(
                 placeholders.append(_unlisted_placeholder(visitor, cls))
     if len({cls.tenant_field for cls in listed}) == 1 and _HIDDEN not in placeholders:
         # Scoped alike (one field, whatever the roots), or not at all: the
-        # single, index-friendly FILTER.
-        scoped = next((cls for cls, bind in zip(listed, placeholders, strict=True) if bind), None)
-        if scoped is not None:
-            visitor._enforce_tenant_scope(alias, scoped, builder=builder)
+        # single, index-friendly FILTER. No unlisted class needs placing
+        # under a root then (recheck of #228: refusing here refused reads
+        # main answered). A listed class carries a bind when any does.
+        bind = next((b for b in placeholders if b and b != _UNDECIDED), None)
+        field = listed[0].tenant_field
+        if bind is not None and field is not None:
+            target.filter_eq(attribute_ref(alias, field), bind)
         return
+    undecided = [cls for cls, bind in zip(listed, placeholders, strict=True) if bind == _UNDECIDED]
+    if undecided:
+        roots = sorted({c.tenant_entity for c in visitor.resolver.tenant_scoped_classes() if c.tenant_entity})
+        raise CrossTenantJoinError(
+            f"a read of the copies of an IRI can reach documents of {undecided[0].iri!r}, under tenant root "
+            f"{undecided[0].tenant_entity!r}, before the query names a class under one of the mapping's "
+            f"roots ({', '.join(roots)}); one tenant id cannot be placed under a root (PRD §6.5.1)"
+        )
     spans_collections = len({c.collection for c in listed}) > 1
     terms = []
     for cls, placeholder in zip(listed, placeholders, strict=True):
@@ -103,6 +114,7 @@ def enforce_classes_tenant_scope(
 
 
 _HIDDEN = "false"
+_UNDECIDED = "undecided"
 
 
 def _unlisted_placeholder(visitor: AlgebraVisitor, cls: ResolvedClass) -> str:
@@ -113,7 +125,8 @@ def _unlisted_placeholder(visitor: AlgebraVisitor, cls: ResolvedClass) -> str:
     class is under another tenant root than the query: the same tenant id
     under another root is another tenant. When the query has committed no
     root yet, the class is checked on its field if the mapping has one root
-    at most, and the read is refused otherwise."""
+    at most, and is ``_UNDECIDED`` otherwise: the caller refuses the read
+    unless one field holds every class there."""
     if visitor.tenant_id is None:
         return _HIDDEN
     committed = visitor.state.tenant.entity
@@ -127,13 +140,10 @@ def _unlisted_placeholder(visitor: AlgebraVisitor, cls: ResolvedClass) -> str:
             if len(roots) > 1:
                 # Which root the tenant id belongs to is not known yet: a
                 # pattern read later may commit one. Hiding these copies
-                # dropped t1 rows depending on pattern order (second
-                # recheck of #228), so the read is refused instead.
-                raise CrossTenantJoinError(
-                    f"a read of the copies of an IRI can reach documents of {cls.iri!r}, under tenant root "
-                    f"{cls.tenant_entity!r}, before the query names a class under one of the mapping's "
-                    f"roots ({', '.join(roots)}); one tenant id cannot be placed under a root (PRD §6.5.1)"
-                )
+                # dropped t1 rows depending on pattern order (second recheck
+                # of #228); the caller refuses the read if it needs this
+                # class's own test.
+                return _UNDECIDED
     if visitor.state.tenant_bind_placeholder is None:
         visitor.state.tenant_bind_placeholder = visitor.builder.bind(visitor.tenant_id, hint="tenant")
     return visitor.state.tenant_bind_placeholder

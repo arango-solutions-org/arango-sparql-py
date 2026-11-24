@@ -195,9 +195,8 @@ def drop_repeated_copies(visitor: AlgebraVisitor) -> None:
             scope = visitor._graph_scope_test(other)
             if scope is not None:
                 probe.filter_raw(scope)
-            enforce_classes_tenant_scope(
-                visitor, other, by_collection[earlier], builder=probe, class_tested=False
-            )
+            # Class-tested just above: an unlisted class cannot reach the probe.
+            enforce_classes_tenant_scope(visitor, other, by_collection[earlier], builder=probe)
             for path in fields:
                 probe.filter_raw(
                     f"{probe.attribute_exists(other, path)} == {probe.attribute_exists(alias, path)}"

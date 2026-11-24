@@ -220,3 +220,48 @@ def test_a_copy_read_before_any_root_is_committed_is_refused_on_a_multi_root_map
     )
     with pytest.raises(CrossTenantJoinError, match="before the query names a class"):
         _aql(ttl, "SELECT ?n ?k WHERE { :x a :Agent ; :name ?n ; :nick ?k }")
+
+
+_MULTI_ROOT_TAIL = (
+    ':Other a owl:Class ; rdfs:subClassOf :Agent ; phys:collectionName "others" ORG_SLOT.\n'
+    ':Project a owl:Class ; phys:collectionName "projects" ; phys:tenantField "pf" ; '
+    'phys:tenantEntity "Workspace" .\n'
+    ':name a owl:DatatypeProperty ; phys:attributeName "name" .\n'
+    ':nick a owl:DatatypeProperty ; phys:attributeName "nick" .\n'
+    ':Agent a owl:Class ; phys:mappingStyle "UNION" .\n'
+)
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "SELECT ?s WHERE { ?s a :Agent }",
+        "ASK { :x a :Agent }",
+        "SELECT (COUNT(DISTINCT ?s) AS ?c) WHERE { ?s a :Agent }",
+    ],
+)
+def test_a_type_only_supertype_read_is_answered_on_a_multi_root_mapping(query: str) -> None:
+    """The copy-dedup probe is class-tested, so a class the supertype does
+    not name cannot reach it and need not be placed under a root. The third
+    head of #228 refused these, which main answered (its recheck)."""
+    ttl = (
+        _label("Tag").replace(" .\n", " ; rdfs:subClassOf :Agent .\n")
+        + _label("Person", _ORG)
+        + _label("Doc", _WS)
+        + _MULTI_ROOT_TAIL.replace("ORG_SLOT", "")
+    )
+    _aql(ttl, query)
+
+
+def test_rootless_listed_classes_on_one_field_answer_beside_a_rooted_unlisted_one() -> None:
+    """Person and Other keep the tenant in ``org`` with no root; Secret, stored
+    with Person, is on ``org`` under Org. One field holds them all: the plain
+    FILTER applies and no root needs placing (recheck of #228)."""
+    ttl = (
+        _label("Person", '; phys:tenantField "org" ').replace(" .\n", " ; rdfs:subClassOf :Agent .\n")
+        + _label("Secret", _ORG)
+        + _MULTI_ROOT_TAIL.replace("ORG_SLOT", '; phys:tenantField "org" ')
+    )
+    aql = _aql(ttl, "SELECT ?n ?k WHERE { :x a :Agent ; :name ?n ; :nick ?k }")
+    assert "|| false" not in aql
+    assert ".org == @" in aql
