@@ -73,3 +73,18 @@ cases:
     expected_bind_vars:
       "@c1_Person": "Person"
       "_p1": "^A"
+
+  - name: ask_with_offset_limit
+    # The query's own OFFSET/LIMIT is kept (#164): with OFFSET 2 the
+    # answer is whether a third solution exists, so no LIMIT 1 is forced.
+    sparql: |
+      PREFIX : <http://ex.org/>
+      ASK { ?s a :Person } OFFSET 2 LIMIT 5
+    expected_aql: |-
+      RETURN LENGTH(
+        FOR doc1 IN @@c1_Person
+        LIMIT 2, 5
+        RETURN 1
+      ) > 0
+    expected_bind_vars:
+      "@c1_Person": "Person"

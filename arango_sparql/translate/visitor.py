@@ -434,10 +434,10 @@ class AlgebraVisitor:
         # > 0`` at finalize() time — same recipe as the legacy
         # ``aql-translator.js#translateQuery`` ASK branch (``ASK is
         # essentially SELECT LIMIT 1``).
-        inner = node.p
-        if getattr(inner, "name", None) == "Project":
-            inner = inner.p
+        inner, slices = _peel_solution_wrappers(node.p)
         self.visit(inner)
+        for s in slices:
+            self._apply_slice(s)
         # LIMIT 1 short-circuits the cursor — we only need to know
         # whether *any* row matches, not how many.
         if self.builder._limit_clause is None:  # noqa: SLF001 - own builder
@@ -479,17 +479,10 @@ class AlgebraVisitor:
 
         template = list(getattr(node, "template", []) or [])
 
-        inner = node.p
-        # rdflib stamps a Project (and optionally Distinct/Slice) around
-        # the WHERE; peel them off so we don't emit a stray RETURN { ... }
-        # before our own ``RETURN [...]``. The Project's PV is the union
-        # of vars referenced by the template — we don't need it because
-        # we re-derive expressions directly from var_to_expr.
-        while inner is not None and getattr(inner, "name", None) in (
-            "Project",
-            "Distinct",
-        ):
-            inner = inner.p
+        # The Project's PV is the union of vars referenced by the
+        # template — we don't need it because we re-derive expressions
+        # directly from var_to_expr.
+        inner, slices = _peel_solution_wrappers(node.p)
         if inner is None:
             # CONSTRUCT WHERE {} with no pattern is grammatically legal
             # but produces no bindings → no triples. Refuse so the
@@ -515,6 +508,8 @@ class AlgebraVisitor:
                 )
 
         self.visit(inner)
+        for s in slices:
+            self._apply_slice(s)
 
         triple_exprs: list[tuple[str, str, str]] = []
         for s_term, p_term, o_term in template:
@@ -618,9 +613,10 @@ class AlgebraVisitor:
         # wrappers and drive the underlying pattern. Like CONSTRUCT,
         # we DON'T want the Project's ``RETURN { ... }`` so we strip
         # it before recursing.
-        while getattr(inner, "name", None) in ("Distinct", "Project"):
-            inner = inner.p
+        inner, slices = _peel_solution_wrappers(inner)
         self.visit(inner)
+        for s in slices:
+            self._apply_slice(s)
 
         described: list[str] = []
         for term in pv:
@@ -847,6 +843,9 @@ class AlgebraVisitor:
         # Visit the inner pattern first so FOR/FILTER/SORT come before LIMIT.
         # The Project wrapper (when present) will emit RETURN after we return.
         self.visit(node.p)
+        self._apply_slice(node)
+
+    def _apply_slice(self, node: Any) -> None:
         start = int(getattr(node, "start", 0) or 0)
         length = getattr(node, "length", None)
         if length is None:
@@ -4592,6 +4591,27 @@ def _collect_bgp_triples(node: Any) -> list[tuple[Any, Any, Any]]:
     out: list[tuple[Any, Any, Any]] = []
     _walk_for_bgp_triples(node, out)
     return out
+
+
+def _peel_solution_wrappers(node: Any) -> tuple[Any, list[Any]]:
+    """Strip the SELECT-shaped wrappers rdflib stamps on an ASK,
+    CONSTRUCT or DESCRIBE WHERE, returning the pattern and any ``Slice``
+    nodes found.
+
+    Visiting the ``Project`` would emit a ``RETURN { … }`` before the
+    query's own RETURN. ``LIMIT``/``OFFSET`` arrive as a
+    ``Slice`` above the Project; the caller re-applies them with
+    :meth:`AlgebraVisitor._apply_slice` after driving the pattern, so
+    they cut the WHERE solutions before the template is instantiated
+    (SPARQL 1.1 §16.2, #164). ``ORDER BY`` sits below the Project and
+    is visited with the pattern.
+    """
+    slices: list[Any] = []
+    while node is not None and getattr(node, "name", None) in ("Project", "Distinct", "Slice"):
+        if node.name == "Slice":
+            slices.append(node)
+        node = node.p
+    return node, slices
 
 
 def _walk_for_bgp_triples(node: Any, out: list[tuple[Any, Any, Any]]) -> None:
