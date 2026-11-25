@@ -52,7 +52,12 @@ from .optional_crosssubject import (
     emit_rpt_cross_subject_optional,
     is_rpt_cross_subject_optional,
 )
-from .optional_subquery import emit_optional_subquery, group_own_value, group_scoped_variables
+from .optional_subquery import (
+    emit_optional_subquery,
+    group_filter_scope,
+    group_own_value,
+    group_scoped_variables,
+)
 from .optional_subquery import needs_subquery as needs_optional_subquery
 from .paths import emit_path_triple
 from .predicates import LoopEmitter, LoopPlan, PredicateCall, extract_predicate_calls, resolve_call
@@ -871,7 +876,8 @@ class AlgebraVisitor:
         # turn "all groups rejected" into one spurious empty binding.
         if self.builder._empty_result_fallback:  # noqa: SLF001 - own builder
             self.builder.clear_empty_result_fallback()
-        aql_expr = self._translate_expr(node.expr)
+        with group_filter_scope(self, node.p):
+            aql_expr = self._translate_expr(node.expr)
         self.builder.filter_raw(aql_expr)
 
     # ------------------------------------------------------------------
